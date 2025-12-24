@@ -1,0 +1,23 @@
+# --- CORE SYSTEM ---
+requests
+numpy
+colorama
+pyaudio
+
+# --- EARS (Hearing) ---
+faster-whisper
+
+# --- MOUTH (Speech) ---
+# Critical: ONNX Runtime GPU is required for fast neural speech on RTX 3050
+kokoro-onnx
+sounddevice
+onnxruntime-gpu
+
+# --- EYES (Vision) ---
+transformers
+pillow
+einops
+accelerate
+torch
+torchvision
+torchaudio
