@@ -1,0 +1,37 @@
+# --- IGNORE MASSIVE MOONDREAM FOLDER ---
+core_logic/moondream_brain/
+**/moondream_brain/
+
+# --- SAFETY NET (Ignore all heavy model weights anywhere) ---
+*.pt
+*.pth
+*.bin
+*.onnx
+*.safetensors
+
+
+# --- IGNORE PYTHON ENVIRONMENTS (CRITICAL) ---
+venv/
+.venv/
+env/
+Lib/
+Scripts/
+
+# --- IGNORE MODELS (Too heavy) ---
+core_logic/models/
+*.onnx
+*.bin
+*.pt
+*.pth
+
+# --- IGNORE AUDIO/TEMP ---
+*.wav
+*.mp3
+__pycache__/
+*.pyc
+
+# --- IGNORE JUNK & SECRETS ---
+.env
+api_keys.txt
+jarvis_v2/
+*.png
