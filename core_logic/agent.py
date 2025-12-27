@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
+from crud import crud
 load_dotenv()
 
 class Clara_Agent:
@@ -130,6 +131,7 @@ Final Answer: You can buy approximately 0.4873 Bitcoin coins with an investment 
 9. **BE CONCISE:** Your "Thought" must be 1-2 sentences max. Do not recite these rules. Just state the plan.
 """
         self.chat_history = ""
+        self.db = crud()
         print(f"Initializing Clara with model : {model_name}")
         self.llm =None
         self.load_clara(model_name)
@@ -179,151 +181,156 @@ Final Answer: You can buy approximately 0.4873 Bitcoin coins with an investment 
         """
         Main Loop: Now Powered by Ears 👂
         """
-        print("\n💬 CLARA is listening... (Press Ctrl+C to switch to keyboard)")
         while True:
-            try:
-                # 1. LISTEN (Uses your ears.py logic)
-                # This will block for ~5-8 seconds waiting for speech
-                user_input = listen_local()
-
-                # 2. CHECK: Did we hear anything?
-                if not user_input:
-                    # If listen_local returns None (silence/error), we just loop back
-                    continue
-
-                # 3. WAKE WORD CHECK (Optional but recommended)
-                # Since your ears.py grabs everything, we can filter here.
-                # If you want her to respond to everything, remove this block.
-                # if "clara" not in user_input.lower():
-                #    print(" [Ignored: No Wake Word]")
-                #    continue
-
-                print(f"\n🗣️ User said: {user_input}")
-
-                # 4. EXIT COMMANDS
-                if user_input.lower() in ["exit", "quit", "shutdown"]:
-                    print("👋 Shutting down.")
-                    break
-
-                # 5. EXECUTE THE AGENT LOGIC
-                # (This is your existing ROCTTOC / Logic flow)
-                query = user_input
-                break
-
-            except KeyboardInterrupt:
-                # Allows you to break the voice loop and type if needed
-                print("\n⌨️ Manual Input Mode Triggered.")
+            print("\n💬 CLARA is listening... (Press Ctrl+C to switch to keyboard)")
+            while True:
                 try:
-                    manual_input = input("You (Type): ")
-                    if manual_input.strip():
-                        query = manual_input
-                        break
-                except KeyboardInterrupt:
-                    print("Bye!")
-                    break
-        # query = input("Enter your mission for CLARA: ")
-        print(f"\n New Mission : {query}")
-        # Added basic formatting to history
-        self.chat_history = self.system_prompt + f"\nUser: {query}\n"
-        turn_count = 0
-        total_count = 5
-        self.llm.append(system(self.system_prompt))
-        self.llm.append(user(query))
+                    # 1. LISTEN (Uses your ears.py logic)
+                    # This will block for ~5-8 seconds waiting for speech
+                    user_input = listen_local()
 
-        while turn_count < total_count:
+                    # 2. CHECK: Did we hear anything?
+                    if not user_input:
+                        # If listen_local returns None (silence/error), we just loop back
+                        continue
+
+                    # 3. WAKE WORD CHECK (Optional but recommended)
+                    # Since your ears.py grabs everything, we can filter here.
+                    # If you want her to respond to everything, remove this block.
+                    # if "clara" not in user_input.lower():
+                    #    print(" [Ignored: No Wake Word]")
+                    #    continue
+
+                    print(f"\n🗣️ User said: {user_input}")
+
+                    # 4. EXIT COMMANDS
+                    if user_input.lower() in ["exit", "quit", "shutdown"]:
+                        print("👋 Shutting down.")
+                        exit(0)
+
+                    # 5. EXECUTE THE AGENT LOGIC
+                    # (This is your existing ROCTTOC / Logic flow)
+                    query = user_input
+                    break
+
+                except KeyboardInterrupt:
+                    # Allows you to break the voice loop and type if needed
+                    print("\n⌨️ Manual Input Mode Triggered.")
+                    try:
+                        manual_input = input("You (Type): ")
+                        if manual_input.strip():
+                            query = manual_input
+                            break
+                    except KeyboardInterrupt:
+                        print("Bye!")
+                        break
+            # query = input("Enter your mission for CLARA: ")
+            print(f"\n New Mission : {query}")
+            # Added basic formatting to history
+            # self.chat_history = self.system_prompt + f"\nUser: {query}\n"
+            self.llm.append(system(self.system_prompt))
+            gatekeeper_prompt = (
+                        f"User Query: '{user_input}'\n"
+                        "Analyze this request. Output ONLY an XML block:\n"
+                        "<analysis>\n"
+                        "  <intent>TASK or CHAT</intent>\n"
+                        "  <context_needed>TRUE or FALSE</context_needed>\n"
+                        "</analysis>"
+                    )
+            self.llm.append(user(gatekeeper_prompt))
+                    
+            print(">> [Brain] Analyzing Intent...")
+            gate_response = self.llm.sample().content
+                    
+            intent = "TASK" if "<intent>TASK</intent>" in gate_response else "CHAT"
+            need_context = "<context_needed>TRUE</context_needed>" in gate_response
+                    
+            print(f">> [Gatekeeper] Intent: {intent} | Memory Needed: {need_context}")
+
+            # 4. LAZY LOAD CONTEXT (Using CRUD)
+            if need_context:
+                print(">> [Memory] Loading Soul from disk...")
+                # <--- NEW: Use CRUD to fetch formatted context
+                mem_context = self.db.get_full_context()
+                self.llm.append(system(f"PREVIOUS LONG-TERM MEMORY:\n{mem_context}"))
+            
+            # 5. EXECUTE
+            self.llm.append(user(f"Now, execute this request: {user_input}"))
+
+            if intent == "TASK":
+                final_answer = self.run_task()
+            else:
+                final_answer = self.run_chat()
+
+            # 6. SPEAK RESULT
+            speak(final_answer)
+
+            # 7. THE MEMORIZER
+            self.memorize_episode()
+
+    def run_chat(self):
+        print(">> [Mode] Chatting...")
+        response = self.llm.sample()
+        return response.content
+
+    def run_task(self):
+        turn_count = 0
+        max_turns = 5
+        
+        while turn_count < max_turns:
             turn_count += 1
             print(f"\n[Loop {turn_count}] Thinking...")
-            response_obj = self.llm.sample() 
+            
+            response_obj = self.llm.sample()
             raw_content = response_obj.content
             
-            # 5. MANUAL BRAKES (The Logic Fix)
             if "Observation:" in raw_content:
-                print("   [System] ✂️  Cutting off hallucinated Observation.")
+                print("   [System] ✂️ Cutting off hallucinated Observation.")
                 response_text = raw_content.split("Observation:")[0].strip()
             else:
                 response_text = raw_content.strip()
 
-            print(f"Clara Response : {response_text}")
-
-            # 6. APPEND (SDK Style)
+            print(f"Clara: {response_text}")
             self.llm.append(assistant(response_text))
 
-            if "Final Answer:" in raw_content:
-                answer = raw_content.split("Final Answer:")[-1].strip()
-                speak("hmm")# minor pause before speaking the final answer
-                speak(answer)
-                return answer
+            if "Final Answer:" in response_text:
+                return response_text.split("Final Answer:")[-1].strip()
 
-            # Note: 'tool_name' logic relies on parse_action working correctly
             tool_name, tool_input = self.parse_action(response_text)
 
-            if tool_name == "python_repl":
-                print(f"   -> Running Tool: {tool_name} with input: {tool_input}")
-                observation = run_python_code(tool_input)
-                print(f"Observation from python_repl: {observation}")
+            if tool_name:
+                observation = "Error: Tool failed."
                 
-                # FIX 4: Added "Observation:" label so the LLM knows what this text is
-                self.chat_history += f"\n{response_text}\nObservation got from {tool_name} for {tool_input}: {observation}\n"
-                self.llm.append(user(f"Observation got from {tool_name} for {tool_input}: {observation}"))
-            
-            elif(tool_name == "web_search"):
-                print(f"   -> Running Tool: {tool_name} with input: {tool_input}")
-                web = web_search(tool_input)
-                # observation ="Source 1 :"+web["results"][0]["content"]+ "Source 2:" +web["results"][1]["content"]
-                observation = web["answer"]
-                print(f"Observation from web_search : {observation}")
-                self.chat_history += f"\n{response_text}\nObservation got from {tool_name} for {tool_input}: {observation}\n"
-                self.llm.append(user(f"Observation got from {tool_name} for {tool_input}: {observation}"))
-            
-            elif(tool_name == "date_time"):
-                print(f"   -> Running Tool: {tool_name}")
-                observation = get_time_date()
-                print(f"Observation from date_time: {observation}")
-                self.chat_history += f"\n{response_text}\nObservation got from {tool_name} : {observation}\n"
-                self.llm.append(user(f"Observation got from {tool_name} : {observation}"))
-
-            elif(tool_name == "consult_archive"):
-                print(f"   -> Running Tool: {tool_name} with input: {tool_input}")
-                observation = consult_archive(tool_input)
-                print(f"Observation from consult_archive: {observation}")
-                self.chat_history += f"\n{response_text}\nObservation got from {tool_name} for {tool_input}: {observation}\n"
-                self.llm.append(user(f"Observation got from {tool_name} for {tool_input}: {observation}"))
-
-            elif(tool_name == "vision_tool"):
-                # self.unload_clara()
-                print(f"   -> Running Tool: {tool_name} with input: {tool_input}")
-                arg_pattern = r'"(.*?)"\s*,\s*"(.*?)"'
-                match = re.search(arg_pattern, tool_input)
+                if tool_name == "python_repl":
+                    print(f"   -> Tool: Python ({tool_input})")
+                    observation = run_python_code(tool_input)
                 
-                if match:
-                    img_path = match.group(1)
-                    user_query = match.group(2)
-                else:
-                    # Fallback: If LLM forgot quotes, try splitting by the first comma
-                    print("   ⚠️ Warning: Tool input format loose. Attempting fallback split.")
+                elif tool_name == "web_search":
+                    print(f"   -> Tool: Web Search ({tool_input})")
+                    res = web_search(tool_input)
+                    observation = res.get("answer", "No results found.")
+
+                elif tool_name == "date_time":
+                    print("   -> Tool: Date/Time")
+                    observation = get_time_date()
+
+                elif tool_name == "consult_archive":
+                    print(f"   -> Tool: Archive ({tool_input})")
+                    observation = consult_archive(tool_input)
+                    
+                elif tool_name == "vision_tool":
+                    print(f"   -> Tool: Vision ({tool_input})")
                     parts = tool_input.split(",", 1)
-                    if len(parts) == 2:
-                        img_path = parts[0].strip().strip('"').strip("'")
-                        user_query = parts[1].strip().strip('"').strip("'")
-                    else:
-                        # Worst case: Treat whole input as path, use default query
-                        img_path = tool_input.strip().strip('"')
-                        user_query = "Describe this image"
+                    path = parts[0].strip().strip('"').strip("'")
+                    query = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else "Describe this."
+                    
+                    from .sight import analyze_image
+                    observation = analyze_image(path, query)
 
-                print(f"   -> Target: {img_path}")
-                print(f"   -> Query:  {user_query}")
+                print(f"   -> Observation: {str(observation)[:100]}...")
+                self.llm.append(user(f"Observation got from {tool_name}: {observation}"))
 
-                print("   -> Loading Vision Module...")
-                from .sight import analyze_image
-                observation = analyze_image(img_path, user_query)
-                # self.load_clara()
-                print(f"Observation from analyze_image: {observation}")
-                self.chat_history += f"\n{response_text}\nObservation got from {tool_name} for {tool_input}: {observation}\n"
-                self.llm.append(user(f"Observation got from {tool_name} for {tool_input}: {observation}"))
-                
             else:
-                print("   -> No valid action found. Asking brain to continue...")
-                self.chat_history += f"\n{response_text}\nObservation: No valid tool call found. Please try again or give Final Answer.\n"
-                self.llm.append(user(f"\n{response_text}\nObservation: No valid tool call found. Please try again or give Final Answer.\n"))
-                
-        return "Error: Max turns reached without a final answer."
+                self.llm.append(user("System: No valid Action found. Please continue."))
+
+        return "I ran out of steps."
