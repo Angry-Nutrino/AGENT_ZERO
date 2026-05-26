@@ -1,5 +1,198 @@
 # CLARA Project Timeline
 
+## 2026-05-25
+
+[FIX] charmap codec error silently dropping memory writes
+crud.py _load_memory and _save_memory both opened memory.json without encoding specified.
+Windows defaulted to cp1252 which can't encode → (U+2192) and other Unicode chars appearing
+in session log summaries. Any consolidation containing these chars silently failed.
+Fix: encoding='utf-8' on both open() calls + ensure_ascii=False on json.dump so Unicode
+is stored natively rather than escaped. Affected: core_logic/crud.py.
+
+[FIX] format_llm hallucination on web_search results
+FAST path format_llm prompt had no grounding constraint — non-reasoning model blended
+tool output with training priors and fabricated model names/benchmarks (GPT-5.4, ClockBench).
+Fix: added "Use ONLY the information present in the tool result. Do not add, infer, or
+supplement from training knowledge. If the tool result is empty or an error, say so directly."
+Affected: core_logic/agent.py (format_llm system prompt).
+
+[FIX] DELIBERATE Final Answer content dilution on long ReAct runs
+On turns 6-8, system prompt attention weakens and model writes completion receipts instead
+of actual answers ("I successfully read the file" rather than the file contents).
+Two fixes:
+  Final-turn reminder in _turn_message: "Re-read the original request. Your Final Answer
+    must directly answer that request in full — not a summary of what you did."
+  Rule 16 extension in SYSTEM_PROMPT: "delivering the answer IS a sub-task. A description
+    of having found the answer is not the answer."
+Affected: core_logic/agent.py (_turn_message), core_logic/system_prompt.py (Rule 16).
+
+## 2026-05-24 (Evening)
+
+[UPDATE] Evening harness run analysis + rotation (2026-05-24-evening.md, 20:33 IST)
+17/20 pass. Three fails:
+  Q04 (pipeline walkthrough): Interpreter correctly routed DELIBERATE but Final Answer was a
+    meta-summary ("I successfully read api.py/orchestrator.py, sub-tasks complete") instead of
+    actually walking through the pipeline. Non-reasoning model wrote a completion receipt.
+    fail_count=1, kept verbatim.
+  Q05 (latest AI models): web_search executed correctly but format_llm hallucinated model names
+    (GPT-5.4, Gemini 3.1 Pro) and a non-existent benchmark (ClockBench). Critical failure — 
+    non-reasoning format_llm is unsafe on web_search results. fail_count=1, kept verbatim.
+  Q17 (last 3 episodic_log entries): memory.json is 16277 lines; offset calculations landed in
+    filesystem_map section, not episodic_log. Genuine large-file navigation ceiling. fail_count=1.
+Also flagged: recurring charmap codec error in consolidation — silently dropping memory writes.
+17 questions replaced covering: voice.py streams, task_graph.py SQL schema, telegram_bot.py
+ESCAPE_CHARS, ResourceLedger race conditions, archive injection explanation, briefs/ directory
+check, TIMELINE.md entry count, false memory guardrail test, execution mode routing explanation.
+
+## 2026-05-24
+
+[UPDATE] Morning harness run analysis + rotation (2026-05-24-morning.md, first non-reasoning run)
+19/20 pass. Non-reasoning DELIBERATE avg ~10s vs ~23s on reasoning — 2.4x faster, no capability
+regression. Q15 (submit_user_event line numbers) and Q19 (read probe file) both passed after
+previously failing — Action format fix and Rule 13 fallback confirmed working.
+Q20 FAIL: "No .json files found" — start_search returned 0 on *.json pattern despite files
+existing in subdirectories; Clara didn't apply list_directory fallback. fail_count=1, kept verbatim.
+Q18 soft issue: date written as 2026-05-23 (wrong) — memory context used instead of date_time tool.
+New Q18 forces explicit date_time tool call. 19 questions replaced covering: task_graph.py states,
+background_tasks.py intervals, ENUMERATION_KEYWORDS search, user_profile personality type,
+environment.py debounce, persona guardrail (impersonation attempt), session_logger.py format,
+tool_registry.py methods, self_knowledge total count, bench_logger.py columns, context window CHAT.
+
+## 2026-05-22 (Evening)
+
+[UPDATE] Morning harness run #2 analysis + question rotation (2026-05-22-morning.md, 16:59 IST)
+Q06/Q12/Q17 all passed — Rule 17 (DC tools for enumeration) and Thought-only cascade escalation
+confirmed working. Two new failures identified:
+  Q15: Action format failures on content-search-across-project — model produced malformed Actions
+    for all 8 turns; line numbers never retrieved. Kept verbatim, fail_count=1.
+  Q19: Write-read path mismatch — Q18 wrote tests/probe_output.txt ("Done") but Q19 reported file
+    not found 90s later. Both kept in set; Q18 preserved as-is since Q19 depends on it.
+17 passed questions replaced with new questions covering: conflict.py, tracer.py,
+resource_ledger.py, interpreter.py, orchestrator.py MAX_ATTEMPTS, vault entry count,
+filesystem_map section, thought_only_streak search, CLAUDE.md protocol extraction, WebSockets
+explanation, process vs thread, and .json file enumeration. Mode distribution maintained.
+
+## 2026-05-22
+
+[UPDATE] Question rotation protocol for daily test harness
+Both question files (questions_morning.json, questions_evening.json) updated with fail_count
+and last_result metadata fields per question. Morning Q06/Q12/Q17 seeded with fail_count=1
+from the 2026-05-22 morning run. Rotation protocol added to CLAUDE.md: when Alkama triggers
+analysis after a run, passed questions are replaced with new ones covering different capabilities,
+failed questions stay verbatim. No rewording until they pass. No pool file — new questions
+generated on the fly during analysis.
+
+[FIX] Three DELIBERATE execution fixes from morning test report analysis (2026-05-22-morning.md)
+Analysis of 20-question morning harness run identified 3 hard fails and 2 partials:
+  Q05 (wrong line): Clara found `temp_llm` in memorize_episode instead of `llm` in process_request
+    CHAT branch — string match without context verification. Fix: extended Rule 13 in SYSTEM_PROMPT
+    with CODE SEARCH CONTEXT VERIFICATION block — when a search returns multiple hits, read 10
+    surrounding lines around each hit to identify its enclosing function and class.
+  Q06 (no file reads): Clara used python_repl for directory scan (os.stat multiline) — hit import/scope
+    fragility, accepted partial metadata without falling back to file-by-file reads. Fix: added Rule 17
+    to SYSTEM_PROMPT — DC tools only for filesystem enumeration (get_file_info, start_search,
+    list_directory); python_repl is correct for structured file parsing (JSON/CSV with known path).
+  Q12 (Thought-only cascade): 8 turns, all stalls, zero Actions — turn budget burned entirely on
+    Thoughts without escalation. Fix: thought_only_streak counter in run_task (core_logic/agent.py).
+    Streak resets on any successful Action parse. At streak >= 3: CRITICAL escalation message
+    replaces standard corrective — "Stop reasoning. Pick ONE tool and execute it immediately."
+Affected: core_logic/system_prompt.py (Rules 13 + 17), core_logic/agent.py (thought_only_streak).
+
+[FEATURE] Daily automated test harness (Phase 1 + 2A)
+Built a complete daily stress-testing pipeline for Clara with zero manual intervention.
+Components:
+  api.py: Added POST /query endpoint — accepts {"text":"..."}, returns {"response":"..."},
+    routes through full orchestrator pipeline identical to WebSocket path. Local-only, unauthenticated.
+  start_backend.sh: Backend-only startup script (no frontend). Used by harness and remote dispatch.
+  tests/test_harness.py: Core harness — health check → auto-start backend if down (monitors api.log
+    for readiness signal) → fires 20 questions with strict 90s gap → asks Clara to self-assess her
+    own session log with exact path → writes structured markdown report to reports/ → sends Telegram
+    notification when complete.
+  tests/questions_morning.json: 20 morning questions (DELIBERATE-heavy: filesystem, multi-step,
+    code verification, write-then-read probes). Each tagged with expected_mode for routing analysis.
+  tests/questions_evening.json: 20 evening questions (memory recall, persona guardrails, routing
+    edge cases, vault accuracy, stable-knowledge CHAT routing). Each tagged with expected_mode.
+  setup_schedule.ps1: PowerShell script to register two Windows Task Scheduler tasks —
+    CLARA_Test_Morning (08:00 daily) and CLARA_Test_Evening (20:00 daily), using jarvis_v2 venv.
+Phase 2B (my analysis with extended thinking + proposed fixes) is delivered manually in VS Code
+after Telegram notification — interactive by design so Alkama can push back per fix before I implement.
+
+[FIX] CHAT context-echo bug: [DISCOVERED_TOOLS] removed from MEMORY_CONTEXT_BLOCK on CHAT path
+Root cause: tool_context (cosine-discovered tool schemas, ~800-1000 tokens) was appended to
+full_context unconditionally before routing, so CHAT received tool schemas in its assistant-role
+prefix on every request. Non-reasoning model on short/ambiguous input reproduced the entire block
+verbatim instead of answering (session_2026-05-21_14-53-53.log, line 1021, completion=2022 tokens).
+Fix: tool_context now split from full_context before routing. After routing: CHAT gets llm_context
+= full_context (no tools); DELIBERATE/FAST get llm_context = full_context + tool_context.
+Interpreter still receives interp_context = full_context + tool_context for routing accuracy.
+Affected: core_logic/agent.py (full_context assembly + MEMORY_CONTEXT_BLOCK injection).
+
+[FIX] Memory consolidation crash on non-string vault facts
+Root cause: consolidation model placed self_knowledge-format dicts into facts[] array instead of
+self_learning field. _encode_sync(dict) raised an exception; except clause logged e as "3" (internal
+encoder index). Fix: (1) type guard in vault loop — skips non-string entries with warning instead
+of crashing; (2) consolidation prompt now explicitly states facts[] must be plain string sentences
+and that architectural facts about Clara belong in self_learning, not facts.
+Affected: core_logic/agent.py (memorize_episode vault loop + consolidation prompt).
+
+## 2026-05-21
+
+[FIX] ReAct Loop 1 structural hardening: stronger Turn 1 trigger + get_more_search_results mandatory injection
+Cross-session log analysis (2026-04-26 → 2026-05-20) identified model behavior shift between May 12 and May 18
+(likely xAI grok-4-1-fast-reasoning update) that changed Loop 1 failure mode from bare-Glint hallucination
+to Thought-only stall. Two targeted fixes in core_logic/agent.py:
+  Fix A — Turn 1 trigger (line 1108): changed from "You are in agent task mode." to an explicit directive:
+    "Begin. Emit Thought: then Action: in the SAME response — one combined output. A Thought without an Action
+    wastes the turn budget. Do not write Final Answer unless the task is trivially answered from memory right now."
+    Closes the structural ambiguity that let the model interpret the trigger as a thinking prompt rather than
+    an action prompt.
+  Fix B — Mandatory DELIBERATE injection (line 758): added get_more_search_results alongside start_search and
+    read_file. start_search initiates a search session, get_more_search_results retrieves the actual results —
+    they are always a two-phase unit. Injecting start_search without get_more_search_results caused Loop 3
+    Thought-only stalls on every filesystem search task (model found the tool, initiated search, then stalled
+    because get_more_search_results was absent from discovered tools).
+Affected: core_logic/agent.py (run_task trigger + DELIBERATE mandatory injection block)
+
+## 2026-05-19
+
+[FEATURE] Telegram bot integration (Brief 27)
+New file: core_logic/telegram_bot.py — TelegramBot + TelegramNotifier singleton.
+Messages from Alkama's personal Telegram chat enter as user_input events through
+orchestrator.submit_user_event() — identical pipeline to the web UI (full memory,
+persona, routing, token tracking). source="user" on all Telegram messages.
+Uses long-polling (not webhooks) — no public URL or tunnel required.
+Security gate: TELEGRAM_ALLOWED_CHAT_ID env var; unauthorized senders rejected before
+any processing. MarkdownV2 escaping + message splitting (4096 char limit) for all responses.
+TelegramNotifier module-level singleton (notifier) available for proactive outbound
+messaging from any component: `await notifier.send("text")`. No-ops if unconfigured.
+Modified: api.py — import, global, lifespan init after tool registry injection,
+lifespan shutdown before mcp_client.disconnect_all().
+Deviation from brief: _process_via_pipeline pattern replaced with direct
+orchestrator.submit_user_event() call — process_request has no message_id param
+and final_answer is returned by submit_user_event, not captured via on_step_update.
+
+## 2026-05-18
+
+[FIX] Three-layer ReAct loop hardening: mandatory DELIBERATE tools, Thought-only corrective, off-format grace period
+Root cause analysis from session log session_2026-05-18_09-11-21.log exposed three compounding failures:
+  1. start_search not in [DISCOVERED_TOOLS] — cosine search targets query goal, not filesystem operation;
+     model was instructed (Rule 13) to use start_search but couldn't reach it, causing a planning-execution gap.
+  2. Thought-only turns silently accepted — loop injected "No valid Action found. Please continue." for
+     Thought-without-Action turns, which the model interpreted as permission to keep thinking. Three turns
+     burned with no actions taken.
+  3. Off-format safety net too aggressive on early turns — turn 1 prose triggered implicit Final Answer
+     immediately, killing the task before a single action was taken and creating an ambiguous "Yes, do it"
+     follow-up with no context.
+Fixes applied to core_logic/agent.py:
+  - Fix 1 (process_request): After routing, if mode == DELIBERATE, unconditionally inject start_search and
+    read_file into full_context if not already in discovered set. Logged as "DELIBERATE mandatory injection".
+    Ensures Rule 13's "use start_search first" instruction is always executable.
+  - Fix 2 (run_task): After safety net, before parse_actions — detect Thought-without-Action turns and inject
+    a targeted corrective naming the exact violation and the recovery path (call tool_search if tool absent).
+    Uses continue so the corrective fires immediately without executing other loop logic.
+  - Fix 3 (run_task): Off-format safety net now corrects on turns 1-4 (inject ReAct format reminder, continue)
+    and only triggers implicit Final Answer on turns 5+. Prevents warm-up prose from killing tasks on loop 1.
+
 ## 2026-05-10
 
 [FEATURE] Per-turn read-modify-write conflict detection and write-lock exclusivity (ResourceLedger)

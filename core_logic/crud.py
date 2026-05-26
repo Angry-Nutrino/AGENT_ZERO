@@ -12,7 +12,7 @@ class crud:
         if not os.path.exists(self.filepath):
             return self._create_default_memory()
         try:
-            with open(self.filepath, 'r') as f:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except json.JSONDecodeError:
             return self._create_default_memory()
@@ -33,8 +33,8 @@ class crud:
 
     def _save_memory(self):
         try:
-            with open(self.filepath, 'w') as f:
-                json.dump(self.memory, f, indent=2)
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(self.memory, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"❌ Failed to save memory: {e}")
 

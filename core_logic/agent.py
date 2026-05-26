@@ -61,8 +61,12 @@ def _turn_message(current_turn: int, max_turns: int, body: str) -> str:
     if next_turn == max_turns:
         suffix = (
             "\n\n[FINAL TURN — no further Actions will execute after this response. "
-            "Write your Final Answer now. State: what succeeded, what failed, "
-            "what you attempted for each failure, and what remains incomplete if anything.]"
+            "Write your Final Answer now. Re-read the original request at the top of this "
+            "conversation before writing. Your Final Answer must directly answer that request "
+            "in full — not a summary of what you did, not a confirmation that you found the "
+            "answer, but the actual answer itself. "
+            "State what succeeded, what failed, what you attempted for each failure, "
+            "and what remains incomplete if anything.]"
         )
     else:
         suffix = ""
@@ -286,7 +290,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 api_key=os.getenv("XAI_API_KEY"),
                 timeout=120, # Override default timeout with longer timeout for reasoning models
                 )
-            self.llm = self.client.chat.create(model="grok-4-1-fast-reasoning")
+            self.llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
             slog.info("Clara Brain loaded successfully.")
 
         except Exception as e:
@@ -510,12 +514,14 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             "- Do NOT mention internal system details: no 'CHAT mode', 'TASK mode', 'memory context block', 'gatekeeper', 'routing', or any technical pipeline terms.\n"
             "- Do NOT mention the prefix 'Now, execute this request:' — strip it and focus on what Alkama actually said.\n"
             "- Keep the summary to 1-2 sentences focused purely on the content of the exchange.\n\n"
-            "- FACTS: Extract only TRULY PERMANENT facts worth remembering forever. A fact qualifies if it is:\n"
+            "- FACTS: Extract only TRULY PERMANENT facts worth remembering forever. Each fact MUST be a plain string sentence. DO NOT use dicts or objects — strings only.\n"
+            "  A fact qualifies if it is:\n"
             "  * A personal attribute of Alkama (name, relationship, personality trait, confirmed preference)\n"
             "  * A stable project decision or architectural constraint\n"
             "  * A real-world fact about a person, place, or thing that won't change\n"
             "  * Something Alkama explicitly stated as a standing preference or rule\n\n"
             "- DO NOT extract as facts:\n"
+            "  * Architectural or operational facts about Clara herself — those belong in self_learning, not facts\n"
             "  * File paths, file counts, file sizes, screenshot metadata, directory listings\n"
             "  * Timestamps, dates of events, or anything time-sensitive\n"
             "  * Tool outputs or Glints (web search results, command output)\n"
@@ -585,6 +591,9 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     existing_facts = list(self.db.memory.get("long_term", []))
                     existing_embs = self._encode_sync(existing_facts).to('cpu') if existing_facts else None
                     for fact in facts:
+                        if not isinstance(fact, str):
+                            slog.warning(f"   [Memory] Skipping non-string fact (model put dict in facts[]): {str(fact)[:80]}")
+                            continue
                         # Fast path: exact string match (catches identical concurrent writes)
                         if fact in existing_facts:
                             slog.info(f"   [Memory] Skipping exact duplicate: {fact[:60]}")
@@ -683,6 +692,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
             # Dynamic tool discovery — inject relevant schemas before Interpreter
             tool_context = ""
+            discovered = []
             if self.tool_registry and self.tool_registry.is_ready:
                 discovered = self.tool_registry.search(q_emb_cpu, top_k=8)
 
@@ -726,17 +736,21 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             full_context = mem_context
             if archive_context:
                 full_context += "\n" + archive_context
-            if tool_context:
-                full_context += tool_context
             if active_tasks_context:
                 full_context += "\n" + active_tasks_context
+
+            # tool_context goes to Interpreter only at this stage.
+            # Whether it also enters [MEMORY_CONTEXT_BLOCK] is decided after routing —
+            # DELIBERATE needs tool schemas in context; CHAT must never receive them
+            # (bloated assistant prefix causes context-echo on short/ambiguous messages).
+            interp_context = full_context + tool_context if tool_context else full_context
 
             # 2. Interpret
             interp_timer = Timer()
             interpreted, interp_usage = await interpret(
                 content=final_prompt,
                 source=source,
-                context=full_context,
+                context=interp_context,
                 client=self.client,
                 task_context=task_context,
             )
@@ -745,6 +759,23 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # 3. Route
             mode = route(interpreted)
             slog.info(f">> [Router] Mode: {mode}")
+
+            # Fix 1: DELIBERATE mandatory tool injection.
+            # Cosine search targets the query's goal, not the operation — it misses
+            # start_search and read_file whenever the query describes what to achieve
+            # rather than what filesystem action to take. DELIBERATE almost always needs
+            # these two tools, so guarantee their presence regardless of cosine score.
+            if mode == "DELIBERATE" and self.tool_registry and self.tool_registry.is_ready:
+                _discovered_names = {s.get("name") for s in discovered}
+                _deliberate_extras = []
+                for _tn in ("start_search", "get_more_search_results", "read_file"):
+                    if _tn not in _discovered_names:
+                        _schema = self.tool_registry.get_schema(_tn)
+                        if _schema:
+                            _deliberate_extras.append(_schema)
+                            slog.info(f"   [Registry] DELIBERATE mandatory injection: {_tn}")
+                if _deliberate_extras:
+                    full_context += format_tool_schemas_for_context(_deliberate_extras)
 
             on_interpreted = task_context.get("on_interpreted") if task_context else None
             if on_interpreted:
@@ -758,7 +789,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             if mode == "CHAT":
                 llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
             else:
-                llm = self.client.chat.create(model="grok-4-1-fast-reasoning")
+                llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
 
             if mode == "DELIBERATE":
                 llm.append(system(self.system_prompt))
@@ -778,8 +809,16 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
             # FAST: no system prompt appended — llm is consolidation-only
 
+            # CHAT must not receive tool schemas in [MEMORY_CONTEXT_BLOCK] — it has no
+            # ReAct loop and never calls tools, so tool schemas only bloat the assistant
+            # prefix and cause context-echo on short/ambiguous user messages.
+            if mode == "CHAT":
+                llm_context = full_context
+            else:
+                llm_context = full_context + tool_context if tool_context else full_context
+
             llm.append(assistant(
-                f"[MEMORY_CONTEXT_BLOCK]\n{full_context}\n[/MEMORY_CONTEXT_BLOCK]"
+                f"[MEMORY_CONTEXT_BLOCK]\n{llm_context}\n[/MEMORY_CONTEXT_BLOCK]"
             ))
             llm.append(user(f"Now, execute this request: {final_prompt}"))
 
@@ -911,7 +950,10 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 format_llm.append(system(
                     PERSONA + "\n\n---\n\n"
                     "Format the tool result into a natural response. "
-                    "Do not mention tool names or pipeline details."
+                    "Do not mention tool names or pipeline details. "
+                    "Use ONLY the information present in the tool result. "
+                    "Do not add, infer, or supplement from your training knowledge. "
+                    "If the tool result is empty or an error, say so directly."
                 ))
                 prompt_parts = [f"Request: {intent}"]
                 if tool_result:
@@ -1087,8 +1129,14 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         if llm is None:
             llm = self.llm
         max_turns = 8
-        llm.append(user(f"[SYSTEM MODE: TASK] [Turn 1/{max_turns}] You are in agent task mode."))
+        llm.append(user(
+            f"[SYSTEM MODE: TASK] [Turn 1/{max_turns}] Begin. "
+            "Emit Thought: then Action: in the SAME response — one combined output. "
+            "A Thought without an Action wastes the turn budget. "
+            "Do not write Final Answer unless the task is trivially answered from memory right now."
+        ))
         turn_count = 0
+        thought_only_streak = 0
         deliberate_usage_list = []
         last_response_text = ""
 
@@ -1172,26 +1220,71 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 return final, deliberate_usage_list
 
             # Safety net: detect off-format turns — no Thought, no Action, no Final Answer.
-            # This happens when the model dumps prose directly after an observation
-            # instead of following the ReAct format. Treat as implicit final answer
-            # rather than looping on empty turns.
+            # Early turns (1-4): inject a corrective and continue — the model may be
+            # warming up into ReAct format. Late turns (5+): implicit Final Answer.
             has_format_markers = (
                 "Thought:" in response_text
                 or "Action:" in response_text
                 or "Final Answer:" in response_text
             )
             if not has_format_markers and response_text.strip():
+                if turn_count <= 4:
+                    slog.warning(
+                        f"   [Loop] Off-format turn {turn_count} — correcting (early turn)."
+                    )
+                    llm.append(user(
+                        f"[SYSTEM MODE: TASK] [Turn {turn_count}/{max_turns}]\n"
+                        "System: Your response had no ReAct markers (Thought/Action/Final Answer). "
+                        "You MUST use ReAct format. Structure your response as:\n"
+                        "Thought: <your reasoning>\n"
+                        "Action: [{\"tool\": \"tool_name\", \"query\": \"...\"}]\n"
+                        "or end with: Final Answer: <answer>"
+                    ))
+                    continue
+                else:
+                    slog.warning(
+                        f"   [Loop] Off-format turn {turn_count} — treating as implicit Final Answer."
+                    )
+                    slog.info(f">> [DELIBERATE] Final Answer (implicit):\n{response_text}")
+                    return response_text, deliberate_usage_list
+
+            # Fix 2: Thought-only corrective.
+            # A Thought without an Action is half a ReAct cycle — the model knows what
+            # it wants to do but stalls instead of acting. Inject a targeted corrective
+            # that names the exact violation and the recovery path (call tool_search if
+            # the needed tool is absent from [DISCOVERED_TOOLS]).
+            if ("Thought:" in response_text
+                    and "Action:" not in response_text
+                    and "Final Answer:" not in response_text):
+                thought_only_streak += 1
                 slog.warning(
-                    f"   [Loop] Off-format turn {turn_count} — no Thought/Action/Final Answer. "
-                    f"Treating as implicit Final Answer."
+                    f"   [Loop] Turn {turn_count}: Thought with no Action — streak {thought_only_streak}. Correcting."
                 )
-                slog.info(f">> [DELIBERATE] Final Answer (implicit):\n{response_text}")
-                return response_text, deliberate_usage_list
+                if thought_only_streak >= 3:
+                    llm.append(user(
+                        f"[SYSTEM MODE: TASK] [Turn {turn_count}/{max_turns}]\n"
+                        f"CRITICAL: You have stalled {thought_only_streak} consecutive turns with Thought but no Action. "
+                        "Stop reasoning. Pick ONE tool from [DISCOVERED_TOOLS] and execute it immediately. "
+                        "Your next response must contain Action: [...] — nothing else before it. "
+                        "If no tool fits, write Final Answer with whatever partial results you have."
+                    ))
+                else:
+                    llm.append(user(
+                        f"[SYSTEM MODE: TASK] [Turn {turn_count}/{max_turns}]\n"
+                        "System: Your last response had a Thought but no Action followed. "
+                        "Every Thought MUST be immediately followed by an Action or Final Answer "
+                        "in the same response — a Thought alone wastes the turn budget. "
+                        "If the tool you need is absent from [DISCOVERED_TOOLS], call tool_search "
+                        "first with a semantic query to locate it. "
+                        "Re-emit your Thought and follow it with an Action now."
+                    ))
+                continue
 
             # Parse all actions
             actions = self.parse_actions(response_text)
 
             if actions:
+                thought_only_streak = 0
                 # Separate valid actions from failed extractions
                 valid_actions = [a for a in actions if a.get("tool")]
                 failed_actions = [a for a in actions if not a.get("tool")]
@@ -1207,11 +1300,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 async def execute_tool(action: dict) -> str:
                     tool_name  = action["tool"]
                     tool_input = action["query"]
-                    slog.info(
-                        f"   -> Tool: {tool_name} ({tool_input[:60]}...)"
-                        if len(tool_input) > 60
-                        else f"   -> Tool: {tool_name} ({tool_input})"
-                    )
+                    slog.info(f"   -> Tool: {tool_name} ({tool_input})")
                     result = await execute_deliberate(
                         tool_name,
                         tool_input,

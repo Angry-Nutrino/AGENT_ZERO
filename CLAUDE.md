@@ -57,6 +57,30 @@ python -m pytest tests/test_brief13.py -v
 python -m pytest tests/ -v
 ```
 
+### Daily Test Harness — Question Rotation Protocol
+
+The harness fires 20 questions per session from `tests/questions_morning.json` and
+`tests/questions_evening.json`. Each question carries `fail_count` (consecutive fails,
+resets to 0 on pass) and `last_result` ("pass" | "fail" | "pending").
+
+**When Alkama triggers me after a harness run:**
+1. Read the report at `reports/YYYY-MM-DD-{session}.md`
+2. Determine pass/fail for each question from the Full Responses section:
+   - **Fail:** "Task incomplete", timeout, wrong answer, partial answer on multi-part question
+   - **Pass:** correct, complete response within turn budget
+3. For each **failed** question: increment `fail_count`, set `last_result: "fail"`, keep question verbatim
+4. For each **passed** question: set `last_result: "pass"`, then replace it with a new question:
+   - Generate a question that tests a **different capability** not covered by the remaining set
+   - Match the same `expected_mode` as the question being replaced
+   - Reset `fail_count: 0`, `last_result: "pending"`
+5. Write the updated JSON file
+6. Update TIMELINE.md with a `[UPDATE]` entry describing what rotated
+
+**Rotation only happens when Alkama explicitly triggers the analysis** — not automatically.
+**No rewording of failed questions** — they stay verbatim until they pass.
+**New questions** should cover: untested modules, edge cases in routing, memory integrity checks,
+multi-step file ops, persona guardrails, error recovery — avoid repeating areas already in the set.
+
 ### Environment Variables (core_logic/.env)
 - `XAI_API_KEY` — xAI Grok API key (all LLM calls)
 - `tavily_api` — Tavily API key (web search tool)
@@ -436,6 +460,40 @@ Backend sends:
 - `"final_answer"` — complete response with `message_id`
 - `"speaking_start"` / `"speaking_stop"` — voice waveform animation (fires when Kokoro TTS is playing)
 - `"user_transcript"` — STT result from Whisper, displayed as User bubble in chat
+
+---
+
+## Telegram Integration (Brief 27)
+
+`core_logic/telegram_bot.py` — `TelegramBot` + `TelegramNotifier`.
+
+Messages from Alkama's personal Telegram bot are processed as `user_input` events through
+the full orchestrator pipeline (`submit_user_event`), identical to the web UI.
+`source="user"`, full memory and persona active, identical routing.
+
+Uses **long-polling** (not webhooks) — no public URL or tunnel required. Works behind VPN,
+dynamic IP, or any network. Poll interval: 1s, timeout: 10s.
+
+**Security:** `TELEGRAM_ALLOWED_CHAT_ID` env var gates all incoming messages. Any sender
+not matching the allowed chat ID is silently rejected before any processing occurs.
+
+**`TelegramNotifier` singleton** (`notifier`) available for proactive outbound messaging
+from any component:
+```python
+from .telegram_bot import notifier
+await notifier.send("Memory maintenance complete.")
+await notifier.send("**Bold alert**", parse_markdown=True)
+```
+No-ops gracefully if Telegram is not configured (env vars missing).
+
+**MarkdownV2 escaping** (`_to_telegram_md`): all Telegram special chars escaped, then
+bold/italic/code re-applied. Responses split at paragraph boundaries if over 4096 chars.
+
+**Config:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` in `core_logic/.env`.
+Telegram bot is optional — server starts normally if env vars are not set.
+
+**Bot startup/shutdown** wired into `api.py` lifespan after tool registry injection.
+Requires: `pip install "python-telegram-bot>=21.0"`
 
 ---
 

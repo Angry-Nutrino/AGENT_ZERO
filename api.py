@@ -4,6 +4,7 @@ import os
 import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import psutil
@@ -28,6 +29,7 @@ from core_logic.bench_logger import init_bench_log, close_bench_log
 from core_logic.tool_registry import ToolRegistry
 from core_logic.mcp_client import MCPClient, MCPError
 from core_logic.voice import VoiceCoordinator, set_voice
+from core_logic.telegram_bot import TelegramBot
 from starlette.websockets import WebSocketState
 
 # Start session log before anything else
@@ -44,6 +46,7 @@ tracer: Tracer | None = None
 tool_registry: ToolRegistry | None = None
 mcp_client: MCPClient | None = None
 voice: VoiceCoordinator | None = None
+telegram_bot: TelegramBot | None = None
 active_connections: set = set()  # live WebSocket connections — used for speaking_start/stop broadcast
 
 async def _broadcast(payload: dict) -> None:
@@ -153,6 +156,18 @@ async def lifespan(app: FastAPI):
     clara.mcp_client = mcp_client
     slog.info("[API] Tool registry injected into agent.")
 
+    # ── Telegram Bot ──────────────────────────────────────────────────────────
+    global telegram_bot
+    tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    tg_chat_id = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "")
+
+    if tg_token and tg_chat_id:
+        telegram_bot = TelegramBot(orchestrator, tg_token, tg_chat_id)
+        await telegram_bot.start()
+        slog.info("[API] Telegram bot active.")
+    else:
+        slog.info("[API] Telegram not configured — TELEGRAM_BOT_TOKEN or CHAT_ID missing.")
+
     # Voice system — load after everything else; failure is non-fatal
     try:
         voice = VoiceCoordinator()
@@ -177,6 +192,8 @@ async def lifespan(app: FastAPI):
     if voice:
         voice.unload()
         slog.info("[API] Voice system unloaded.")
+    if telegram_bot:
+        await telegram_bot.stop()
     if mcp_client:
         await mcp_client.disconnect_all()
     await env_watcher.stop()
@@ -388,6 +405,26 @@ async def get_soul():
         slog.error(f"Vitals Error: {e}")
 
     return {**profile, "version": "v2.6"}
+
+
+class QueryRequest(BaseModel):
+    text: str
+
+@app.post("/query")
+async def query_endpoint(req: QueryRequest):
+    """
+    Simple HTTP endpoint for the daily test harness.
+    Fires a query through the full orchestrator pipeline and returns the final answer.
+    Local-only, unauthenticated — do not expose publicly.
+    """
+    if not orchestrator:
+        return {"response": "Error: orchestrator not ready."}
+    try:
+        response = await orchestrator.submit_user_event(text=req.text)
+        return {"response": response}
+    except Exception as e:
+        slog.error(f"[/query] Error: {e}")
+        return {"response": f"Error: {e}"}
 
 
 if __name__ == "__main__":
