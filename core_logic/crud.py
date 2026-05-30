@@ -1,5 +1,7 @@
 import json
 import os
+import time
+import tempfile
 from datetime import datetime
 
 
@@ -14,7 +16,18 @@ class crud:
         try:
             with open(self.filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # Corrupt memory file. Preserve it with a timestamped backup BEFORE
+            # falling back to default memory — otherwise the next _save_memory would
+            # overwrite (and permanently destroy) any recoverable data. Backing up
+            # first keeps the system bootable AND prevents silent data loss.
+            import shutil, time
+            backup = f"{self.filepath}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+            try:
+                shutil.copy2(self.filepath, backup)
+                print(f"⚠️ memory.json corrupt ({e}). Backed up to {backup}; loading default memory.")
+            except Exception:
+                pass
             return self._create_default_memory()
 
     def _create_default_memory(self):
@@ -32,11 +45,49 @@ class crud:
         }
 
     def _save_memory(self):
+        # Atomic write: serialize to a UNIQUE temp file in the same directory, fsync,
+        # then os.replace() (atomic on Windows + POSIX). A crash or hard-kill mid-write
+        # can no longer truncate the live memory file — the worst case is an orphan .tmp.
+        # (Root cause of the 2026-05-29 truncation: the old open('w') zeroed the file
+        # then streamed, and a kill mid-stream left it truncated, losing ~4000 episodes.)
+        #
+        # The temp name MUST be unique per call: memorize_episode runs in a background
+        # thread and log_system_episode fires from autonomous tasks, so two writers can
+        # be in _save_memory at once. A shared temp name would let them interleave the
+        # same file and corrupt it despite os.replace — mkstemp gives each its own.
+        # The ".memory.json." prefix keeps EnvironmentWatcher's ignore rule matching.
+        d = os.path.dirname(self.filepath) or "."
+        tmp = None
         try:
-            with open(self.filepath, 'w', encoding='utf-8') as f:
+            fd, tmp = tempfile.mkstemp(prefix=".memory.json.", suffix=".tmp", dir=d)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(self.memory, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            # os.replace is atomic, but on WINDOWS it raises PermissionError
+            # (ERROR_ACCESS_DENIED / SHARING_VIOLATION) when another handle has the
+            # target open — e.g. the /soul endpoint or a harness python_repl reading
+            # memory.json as we swap. The contention is transient (readers hold the
+            # handle for milliseconds), so retry with a short backoff rather than
+            # silently dropping the write. (Caught in a 12-thread stress test:
+            # bare os.replace lost ~all writes under concurrent reads on Windows.)
+            for attempt in range(10):
+                try:
+                    os.replace(tmp, self.filepath)
+                    tmp = None
+                    break
+                except PermissionError:
+                    time.sleep(0.02 * (attempt + 1))
+            else:
+                print("❌ Failed to save memory: target locked after retries.")
         except Exception as e:
             print(f"❌ Failed to save memory: {e}")
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     # --- PUBLIC TOOLS ---
 

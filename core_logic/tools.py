@@ -119,12 +119,32 @@ def run_python_code(code: str) -> str:
     sys.stdout = redirected_output
 
     try:
-        exec(code)
+        # Inject a UTF-8-defaulting open() so model code that omits encoding= does
+        # not hit Windows cp1252 charmap errors on UTF-8 files (e.g. memory.json
+        # contains multibyte chars). This removes the TRIGGER of the Q08-class
+        # cascade: on Windows bare open() defaults to cp1252 → 'charmap' decode
+        # error → FAST escalates → the model embeds fragile multi-line code in a
+        # JSON Action → malformed JSON. A working open() short-circuits all of it.
+        import builtins as _bi
+
+        def _utf8_open(*a, **kw):
+            mode = a[1] if len(a) > 1 else kw.get("mode", "r")
+            if "b" not in mode and "encoding" not in kw:
+                kw["encoding"] = "utf-8"
+            return _bi.open(*a, **kw)
+
+        # A single namespace dict also serves as BOTH globals and locals. With bare
+        # exec(code), top-level assignments land in the function's locals while
+        # comprehensions resolve free variables against globals — so multiline code
+        # like `content = open(...).read(); [x for x in content]` fails with
+        # "name 'content' is not defined". A shared module-level namespace fixes that.
+        exec_ns: dict = {"open": _utf8_open}
+        exec(code, exec_ns)
         output = redirected_output.getvalue()
-        
+
         if not output.strip():
             output = "Code executed successfully with no output. Check your format and checkcode for return values."
-    
+
     except Exception as e:
         output = f"Error: {str(e)}"
     finally:
@@ -166,7 +186,7 @@ def consult_archive(query: str) -> str:
             return "Error: Knowledge base not found. Please run 'rag.py' first."
     
     slog.debug(f"   [Archive] Searching for: '{query}'")
-    results = RAG_ENGINE.similarity_search(query, k=3)
+    results = RAG_ENGINE.similarity_search(query, k=4)
     
     # Pro-tip: Join with a separator so the LLM knows where one chunk ends and another begins
     return "\n---\n".join([doc.page_content for doc in results])
@@ -282,14 +302,7 @@ def fs_run_command(command: str) -> str:
 
 import base64
 
-# Injected at startup by api.py — allows vision functions to access the
-# live xAI client without circular imports.
-_xai_client_ref = None
-
-def set_xai_client(client) -> None:
-    """Called once by api.py after Client is created."""
-    global _xai_client_ref
-    _xai_client_ref = client
+# Vision uses Gemini 2.5 Flash — no client injection needed (key read from env directly)
 
 
 _VISION_TEXT_KEYWORDS = (
@@ -340,38 +353,59 @@ def analyze_image_grok(
     client,
     path: str,
     question: str = "Describe what you see in this image in detail.",
-    detail: str = "auto",
+    paths=None,
 ) -> str:
     """
-    Analyze an image using Grok Vision API.
-    Reads image from local path, compresses to JPEG (≤1280px, 85% quality),
-    auto-selects detail level based on question intent.
-    detail="auto" → _pick_detail() selects "high" for text/code, "low" otherwise.
-    detail="high"/"low" → forces that level explicitly.
-    Returns description string or error message.
+    Analyze image(s) using Gemini 2.5 Flash (google-genai SDK).
+    'client' parameter kept for API compatibility but unused.
     """
-    if client is None:
-        return "Error: Vision client not initialized. Try again in a moment."
+    import io
+    from google import genai
+    from google.genai import types
+    from PIL import Image
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if not gemini_key:
+        return "Error: GEMINI_API_KEY not set in .env"
+
+    image_paths = []
+    if path:
+        image_paths.append(path)
+    if paths:
+        image_paths += [p for p in paths if p and p != path]
+
+    parts = []
+    for img_path in image_paths:
+        try:
+            p = pathlib.Path(img_path.strip().strip('"').strip("'"))
+            if not p.exists():
+                return f"Error: Image not found at path: {img_path}"
+            with Image.open(p) as img:
+                if img.width > 1280 or img.height > 1280:
+                    img.thumbnail((1280, 1280), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=85)
+                parts.append(types.Part.from_bytes(
+                    data=buf.getvalue(),
+                    mime_type="image/jpeg",
+                ))
+        except Exception as e:
+            return f"Error loading image {img_path}: {e}"
+
+    if not parts:
+        return "Error: No valid images provided"
+
+    parts.append(question)
+
     try:
-        p = pathlib.Path(path.strip().strip('"').strip("'"))
-        if not p.exists():
-            return f"Error: Image not found at path: {path}"
-        if not p.is_file():
-            return f"Error: Path is not a file: {path}"
-
-        resolved_detail = _pick_detail(question) if detail == "auto" else detail
-
-        b64, media_type = _compress_image(p)
-        data_url = f"data:{media_type};base64,{b64}"
-
-        from xai_sdk.chat import user, image as sdk_image
-        llm = client.chat.create(model="grok-4-1-fast-non-reasoning")
-        llm.append(user(sdk_image(data_url, detail=resolved_detail), question))
-        response = llm.sample()
-        return response.content.strip()
-
+        gc = genai.Client(api_key=gemini_key)
+        response = gc.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=parts,
+        )
+        return response.text
     except Exception as e:
-        return f"Error analyzing image: {e}"
+        return f"Vision error: {e}"
 
 
 def analyze_images_grok(
@@ -380,37 +414,8 @@ def analyze_images_grok(
     question: str = "Describe what you see in these images.",
     detail: str = "high",
 ) -> str:
-    """
-    Analyze multiple images in a single Grok Vision API call.
-    paths: list of absolute path strings.
-    """
-    try:
-        from xai_sdk.chat import user, image as sdk_image
-        content_parts = []
-        for path in paths:
-            p = pathlib.Path(path.strip().strip('"').strip("'"))
-            if not p.exists():
-                content_parts.append(f"[Image not found: {path}]")
-                continue
-            ext = p.suffix.lower()
-            media_types = {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".gif": "image/gif",
-                ".webp": "image/webp",
-            }
-            media_type = media_types.get(ext, "image/jpeg")
-            b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
-            data_url = f"data:{media_type};base64,{b64}"
-            content_parts.append(sdk_image(data_url, detail=detail))
-
-        content_parts.append(question)
-        llm = client.chat.create(model="grok-4-1-fast-non-reasoning")
-        llm.append(user(*content_parts))
-        response = llm.sample()
-        return response.content.strip()
-
-    except Exception as e:
-        return f"Error analyzing images: {e}"
+    """Wrapper — delegates to analyze_image_grok with multiple paths."""
+    return analyze_image_grok(client, path=paths[0] if paths else "", question=question, paths=paths[1:] if len(paths) > 1 else None)
 
 
 # ── Task Status Tool ───────────────────────────────────────────────────────

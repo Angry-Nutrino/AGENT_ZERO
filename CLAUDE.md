@@ -82,7 +82,8 @@ resets to 0 on pass) and `last_result` ("pass" | "fail" | "pending").
 multi-step file ops, persona guardrails, error recovery — avoid repeating areas already in the set.
 
 ### Environment Variables (core_logic/.env)
-- `XAI_API_KEY` — xAI Grok API key (all LLM calls)
+- `DEEPSEEK_API_KEY` — DeepSeek API key (all LLM calls via OpenAI-compatible API)
+- `GEMINI_API_KEY` — Google Gemini API key (vision tool — Gemini 2.5 Flash)
 - `tavily_api` — Tavily API key (web search tool)
 
 ---
@@ -184,6 +185,18 @@ Stored in `core_logic/memory.json`:
 - **Long-term vault** — permanent facts, deduplicated at 0.85 cosine similarity threshold
 - **User profile** — name, role, preferences
 
+**Crash-safe atomic persistence (`crud._save_memory`, added 2026-05-29):** memory.json is written
+via a UNIQUE `tempfile.mkstemp(prefix=".memory.json.", suffix=".tmp")` → fsync → `os.replace`, so a
+crash or hard-kill mid-write can never truncate the live file (the 2026-05-29 truncation that lost
+~4000 episodes came from the old `open('w')` truncate-then-stream). The temp name is unique per call
+because background consolidation + autonomous episodes can write concurrently (a shared temp name
+would let them interleave). On Windows `os.replace` raises PermissionError when a reader (e.g.
+`/soul`, a harness `python_repl`) has the file open, so it is retried with backoff. Because every
+save writes the FULL in-RAM dict, a rare dropped replace self-heals on the next save. On
+`JSONDecodeError` at load, `_load_memory` backs up the corrupt file (timestamped) before falling
+back to default memory — it never silently overwrites recoverable data. `EnvironmentWatcher` ignores
+`.memory.json.` temp files so saves don't spam `file_change` events.
+
 ### Smart Context Retrieval (`get_smart_context`)
 - Filters out `[AUTONOMOUS]`, `[TASK FAILED]`, `[TASK RETRY]` prefixed entries entirely
 - Returns: last 3 **user-facing** episodic entries (recency) + top 2 semantic hits (MiniLM)
@@ -282,6 +295,11 @@ SYSTEM_PROMPT      # PERSONA + full DELIBERATE operational block
 ```
 
 **FAST path:** `format_llm` gets `PERSONA + "Format the tool result into a natural response."`
+plus a strict fidelity constraint (added 2026-05-30 after the Q12 fabrication): present the tool
+output faithfully — do NOT interpret, analyze, or assert behavior, correctness, existence, or
+runtime effects beyond what the output literally states. A search result is presented as file:line,
+never as a verdict on what the code does. This is Rule-19 parity for the FAST formatter, which has
+no ReAct loop and therefore no Rule 19. The same principle is also a shared PERSONA guardrail.
 **CHAT path:** `llm` gets `CHAT_SYSTEM_PROMPT`
 **DELIBERATE path:** `llm` gets `SYSTEM_PROMPT` (PERSONA + ReAct tools/format/examples)
 
@@ -381,12 +399,12 @@ Every user request accumulates token usage across all LLM calls:
 - **CHAT path** — streaming `chat()` call (single stream)
 - **DELIBERATE path** — one `stream()` call per ReAct turn, all summed
 
-Usage captured from xAI SDK `Response.usage` object via response object attached to each completion:
+Usage captured from OpenAI SDK `response.usage` / final streaming chunk `chunk.usage`:
 
 - `prompt_tokens` — input tokens
 - `completion_tokens` — output tokens
 - `total_tokens` — sum
-- `cached_prompt_text_tokens` — tokens served from cache (not billed at full rate)
+- `prompt_cache_hit_tokens` — tokens served from DeepSeek disk cache (billed at 1/10 rate)
 
 **Emission:**
 
@@ -501,10 +519,21 @@ Requires: `pip install "python-telegram-bot>=21.0"`
 
 ### LLM Models in Use
 
-- `grok-4-1-fast-non-reasoning` — Interpreter, format_llm (FAST), **CHAT stream**, memory consolidation
-- `grok-4-1-fast-reasoning` — DELIBERATE ReAct loop only
+**Inference:** DeepSeek V4 Flash (`deepseek-chat`) via OpenAI-compatible API
+(`base_url: https://api.deepseek.com`) for all LLM calls — Interpreter, FAST format_llm,
+CHAT stream, DELIBERATE ReAct loop, memory consolidation.
 
-CHAT was switched from reasoning → non-reasoning (Brief 16.3). TTFT drops from 3-8s → \~0.5s. Reasoning is reserved for DELIBERATE where the ReAct loop quality justifies the cost.
+**Vision:** Gemini 2.5 Flash via `google-genai` SDK (`google.genai.Client`).
+
+**Embeddings:** MiniLM (`all-MiniLM-L6-v2`) locally on CUDA — episodic embeddings and tool registry only.
+
+Disk cache enabled by default on DeepSeek — PERSONA + system prompt form a stable prefix
+cache hit after the first request. Cache hit tokens tracked in `TokenUsage.cached_tokens`
+via `prompt_cache_hit_tokens` field on usage object.
+
+Migration from xAI Grok SDK → DeepSeek OpenAI-compatible SDK (Brief 28, May 2026).
+All three paths (CHAT/FAST/DELIBERATE) use `deepseek-chat`. Async calls via `AsyncOpenAI`,
+memory consolidation uses sync `OpenAI` client (runs in `asyncio.to_thread`).
 
 ### Action Format (DELIBERATE)
 
@@ -577,6 +606,19 @@ Full rewrite of `interface/src/Layout.jsx`, `index.css`, `hooks/useClara.js`.
 - Both routes to native Python functions or `await mcp_client.call(server, tool, args)` based on `registry.get_server(tool_name)`
 - `_build_args_from_query` maps flat DELIBERATE query string to MCP tool's required args (transitional until Pattern B streaming migration)
 
+**Atomic search (`_atomic_search`, added 2026-05-29):** `start_search` is a two-phase DC tool — the
+first call returns a session handle with `Status: RUNNING / Total results: 0`, and real results only
+arrive from `get_more_search_results`. A model reading "0 results" while RUNNING could not tell it
+from "no matches" — the cause of confident false negatives (e.g. MAX_ATTEMPTS / resource_callback
+reported as absent), and FAST (single-shot) could never make the second call at all. The executor now
+intercepts `start_search` in both `execute_fast` and `execute_deliberate`, polls
+`get_more_search_results` until `Status: COMPLETED` (up to MAX_SEARCH_POLLS=20, ~7s), and returns
+only the terminal result — so the caller never sees the ambiguous mid-state and FAST searches work.
+On timeout it appends an explicit "PARTIAL/INCONCLUSIVE — not confirmation that no matches exist"
+note so a slow search is never misread as absence. `python_repl` (`run_python_code`) injects a
+UTF-8-defaulting `open()` into its exec namespace so model code that omits `encoding=` does not hit
+Windows cp1252 charmap errors on UTF-8 files.
+
 *fs\_ tool names:*\* Changed from `fs_read_file`/`fs_write_file`/`fs_list_directory`/`fs_run_command` to DC's native names (`read_file`, `write_file`, `list_directory`, `start_process`). Old names return "not found" → FAST escalates → DELIBERATE calls tool_search → finds correct DC tool.
 
 **Scaling:** Every new MCP server: `mcp_client.connect()` → `tool_registry.register_server_tools()` → `tool_registry.rebuild_embeddings()`. Zero changes to TOOL_ARG_SCHEMAS or system prompt.
@@ -585,7 +627,7 @@ Full rewrite of `interface/src/Layout.jsx`, `index.css`, `hooks/useClara.js`.
 
 ### ReAct Loop Format Enforcement
 
-Rules 11-16 in SYSTEM_PROMPT:
+Rules 11-19 in SYSTEM_PROMPT:
 
 - Rule 11: After a Glint that answers the question, next output MUST be Thought → Final Answer. No prose dumps, no markdown headers before Final Answer.
 - Rule 12: Never simulate or fabricate metrics/statistics/telemetry. python_repl must not be used to generate random numbers presented as real data.
@@ -593,10 +635,19 @@ Rules 11-16 in SYSTEM_PROMPT:
 - Rule 14: ACTION FORMAT IS MANDATORY — every Action must be a valid JSON array. No markdown, no prose, no code fences. A malformatted Action cannot be parsed and wastes the turn.
 - Rule 15: TOOL DISCOVERY — for filesystem, process, or MCP-backed operations not in the core tools list, call tool_search first with a semantic query. Use returned schemas exactly. One retry with refined query allowed; do not repeat the same query.
 - Rule 16: COMPLETION CHECK — before writing Final Answer, Thought must confirm every sub-task is complete or genuinely impossible. Partial results do not constitute a complete answer.
+- Rule 17: TOOL SELECTION (enumeration vs parsing) — DC tools for directory listing/discovery (NEVER python_repl for filesystem enumeration); python_repl ONLY for single-line parsing/computation on a known path, and ALWAYS with `encoding='utf-8'` when opening files. Multi-line python embedded in a JSON Action is escape-fragile and frequently fails to parse — prefer `read_file` for multi-step inspection.
+- Rule 18: ARCHITECTURE SELF-KNOWLEDGE — questions about CLARA's own modules, file locations, paths, modes, or class behavior must be verified against CLAUDE.md + the source file before answering. Never answer architecture questions from parametric memory alone — it drifts and fabricates.
+- Rule 19: NEGATIVE CLAIMS & VERIFICATION HONESTY — a tool returning no results, an error, or a "search/index" problem is a TOOL FAILURE, not evidence of absence. Never conclude "X does not exist / is not defined / not in this file" without confirming via an independent reliable method (e.g. a known-path python_repl read). And never claim to have read, searched, or verified more than you actually did.
 
 **Chunk-limit error class (Rule 4):** When a tool returns "chunk exceed the limit" or "Separator is not found", the response is too large for the stdio transport. Recovery: retry the SAME tool on the SAME path with reduced scope — omit depth, use a narrower subpath, or read a specific file by name instead of listing a directory. Do NOT change the path or assume the error means the file/directory doesn't exist.
 
-Safety net in run_task: if a turn contains no Thought/Action/Final Answer markers but has content, it is treated as an implicit Final Answer and returned immediately. Prevents the loop from burning remaining turns on idle noise after an off-format response.
+Safety net in run_task: a turn with no Thought/Action/Final Answer markers is off-format. On LATE
+turns (5+) its content is returned as an implicit Final Answer. On EARLY turns (≤4) the loop injects
+a corrective and continues — and that corrective (fixed 2026-05-30) tells the model its last turn was
+NOT shown to the user, so if it already answered it must re-send the answer IN FULL prefixed with
+`Final Answer:` (never "as above" / "already delivered"). This fixes the Q11/Q17 bug where a complete
+answer written off-format on an early turn was discarded and the model only referenced it as "above",
+leaving the user with no actual content.
 
 **Hallucination detection (two forms):**
 

@@ -1,5 +1,478 @@
 # CLARA Project Timeline
 
+## 2026-05-30
+
+[UPDATE] Roadmap + Brief 31: Self-Sustaining Evaluation & Self-Healing direction
+Added a new "Next Horizon" section to briefs/ROADMAP.md laying out the self-healing end goal as five
+trust-sequenced layers: L0 process retrospective (done), L1 correctness verification (Brief 31, next),
+L2 root-cause from raw turns, L3 code-grounded fix proposals, L4 guarded auto-apply. Core design
+constraint documented: CLARA is the system being assessed with the same tools that fail, so each layer
+must make the ASSESSMENT more trustworthy than the EXECUTION (deterministic checks + ground-truth
+verification), and self-healing is built last on a proven-stable base. Drafted
+BRIEF_31_Self_Assessment_L1_Verification.md — a harness-side verification phase that re-derives ground
+truth from current source (deterministic for compute/count/value/verbatim-quote/search-set/file-op,
+LLM-assisted for semantic, honest UNVERIFIABLE for knowledge) and emits an authoritative PASS/FAIL
+scorecard the self-assessment is grounded in. Read-only, zero runtime risk. Awaiting Alkama review
+before implementation.
+Affected: briefs/ROADMAP.md, briefs/BRIEF_31_Self_Assessment_L1_Verification.md
+
+[UPDATE] Morning harness run 2026-05-30 08:05 — 19/20 (THREE fixes validated)
+Official 8 AM run on a fresh backend (session_2026-05-30_07-28-28.log) with all current code.
+Cross-referenced against the log. The three kept watchdogs validated their fixes:
+- Q08 (long_term count): "Nine facts" — ground truth = 9, clean 1-shot FAST python_repl, NO charmap
+  error (log 6997-6999). The utf-8-default open() fix turned a 7-turn total failure into a pass.
+- Q11 + Q17 (background_tasks, interpreter schema): full answers delivered. Off-format correction
+  still fired (log 6892), but the model RE-STATED the full content instead of "delivered above" —
+  the corrective-message fix worked. No "delivered above"/"listed above" anywhere in the log.
+- Q07 (resource_ledger hash): now quotes both MD5 lines verbatim — improved to pass.
+Also confirmed Clara reads TODAY's code accurately: Q12 (19 rules, Rule 19 heading), Q16 (parse_actions
+3 layers + Layer 3 comment), Q20 (_atomic_search polls Status: COMPLETED, MAX_SEARCH_POLLS).
+ONLY FAIL — Q06 (memorize_episode search): NEW failure mode. Search returned 426 raw results
+(contextLines noise); Clara claimed "43 actual matches" but listed only 9 lines across 3 files,
+dismissing real matches (agent.py multiple, crud.py, system_prompt.py) as "context-window false
+positives". Search-result interpretation problem, not fabrication. Kept verbatim (fail_count→2).
+[FIX] /soul endpoint charmap — memory.json read now uses encoding='utf-8'
+Surfaced by the 08:05 log (lines 49, 5964): the /soul endpoint read memory.json with a bare open()
+→ "Memory Load Error: 'charmap' codec can't decode byte 0x81" on the cp1252 backend. Caught by
+try/except so /soul still returned 200, but with a DEFAULT/empty profile — the frontend's identity
++ vitals panel silently showed fallback data whenever memory.json had multibyte content. Same class
+as the python_repl charmap fix. Fixed: encoding='utf-8' on the open in get_soul(). Verified it now
+loads the live memory.json (which contains the 0x81 byte). Confirmed it was the only bare open() of
+memory.json in the codebase.
+Affected: api.py (get_soul)
+Rotation: kept Q06, rotated the other 19 (Q07/Q08/Q11/Q17 watchdogs now pass → rotated out). New
+questions probe crud atomic write, IGNORED_PATTERNS, voice rates, bench header, task_graph db,
+drain_blocking, telegram guard, consult_archive k=4, MAX_ATTEMPTS, _vault_lock (DELIBERATE);
+process/thread, sync/async I/O, B-trees (CHAT); Fibonacci, vowel count, mean (FAST).
+
+[FIX] Off-format "delivered above" — complete answers no longer vanish
+Bug from the 2026-05-30 morning run (Q11, Q17): on early turns (<=4) the ReAct loop CORRECTS an
+off-format response (one with no Final Answer marker), discarding its content; the model, having
+already written the full answer in that turn, then emits "Final Answer: Already delivered above" —
+referencing a turn the user never saw. Complete answers vanished. Fix: the early-turn corrective in
+agent.py run_task now tells the model its last turn was NOT shown to the user and that if it already
+answered, it must re-send the answer IN FULL prefixed with "Final Answer:" — never "as above" /
+"already delivered". The user only ever sees the Final Answer.
+Affected: core_logic/agent.py (run_task off-format handler)
+
+[FIX] python_repl: UTF-8-defaulting open() removes the Q08 charmap cascade
+Root cause of Q08 (memory.json count, total failure): the model's open() had no encoding=, so on the
+cp1252-default Windows backend it hit 'charmap' codec can't decode byte 0x81 reading memory.json
+(UTF-8 multibyte) → FAST escalated → in DELIBERATE the model embedded fragile multi-line Python in a
+JSON Action → malformed JSON 6-7x → gave up. Fix (Layer A, structural): run_python_code injects a
+utf-8-defaulting open() into the exec namespace, so any open() the model writes reads UTF-8
+regardless of locale. Reproduced + verified: bare open() on a cp1252 machine fails on byte 0x81; the
+wrapper reads it fine. This short-circuits the whole cascade — the FAST one-liner now succeeds, no
+escalation. Layer B (JSON-embed fragility) deliberately NOT re-architected: with Layer A the model
+rarely needs complex DELIBERATE python, and parse_actions feedback already handles the residual.
+Light reinforcement: Rule 17b example updated to model encoding='utf-8' + single-line-only python
+(the old example modeled the bug, omitting encoding).
+Affected: core_logic/tools.py (run_python_code), core_logic/system_prompt.py (Rule 17b)
+
+[UPDATE] Morning harness run 2026-05-30 — 15/20 (fresh restarted backend, all 2026-05-29 fixes live)
+First run on the fully restarted backend, so Solution A + atomic write + _atomic_search hardening +
+PERSONA Q01 fix were all active. Cross-referenced against session_2026-05-30_06-54-26.log.
+VALIDATED — Solution A: Q12 (asyncio.Lock) ran FAST again with atomic search, but the response
+(log 2403-2408) was a CLEAN file:line list with ZERO fabrication — no "will throw at runtime", no
+"non-functional references". Same question + mode that fabricated the prior run; the format
+guardrail killed it. Q12 rotated out, fail_count reset.
+VALIDATED — memory robustness: episodic_log grew to 1501 across the run, no corruption, atomic
+write holding. No false-existence claims (Rule 19 + consolidation guard holding).
+FAIL — Q08 (memory.json long_term count via Python): cascade. Model's open() had no encoding= so it
+hit a cp1252 charmap decode error on a UTF-8 byte (0x81) in memory.json (log 1116) → FAST escalated →
+in DELIBERATE the model could not embed multi-line Python cleanly in a JSON Action, producing
+"Malformed JSON: Extra data" 6-7x. NOTE: the parse_actions error feedback (prior fix) fired correctly
+each time (log 1129-1190) — the model just could not self-correct. Gave up after 7 turns. (A correct
+recovery self-learning was extracted, log 1237.)
+FAIL — Q11 + Q17 (NEW BUG, off-format "delivered above"): on early turns (<=4) an off-format response
+with NO Final Answer marker is CORRECTED (content discarded), then the model writes
+"Final Answer: Already delivered above" referencing a turn the user never saw (log 2254-2283 for Q11).
+Complete answers vanish. Root: agent.py run_task off-format corrective (line 1292) tells the model to
+use ReAct format but never says "the user did not see your last turn — restate it in full". OPEN.
+PARTIAL — Q06 (FAST search listed ~8 of 16 files), Q07 (gave MD5+lines but no verbatim quote).
+Rotation: kept Q06/Q07/Q08/Q11/Q17 verbatim (fail_count→1), rotated the other 15 (incl. now-fixed
+Q12). New questions probe today's code (tracer fields, mcp protocolVersion, system_prompt rule count,
+parse_actions layers, api.py lifespan, _atomic_search/MAX_SEARCH_POLLS) plus hash-table/BST,
+optimistic/pessimistic locking, memory leaks (CHAT) and sum-of-squares/prime/factorial (FAST).
+
+## 2026-05-29 (deep robustness pass)
+
+[FIX] Atomic memory write: concurrency-safe temp + Windows os.replace retry
+Deep audit of today's atomic-write fix found two residual holes, both proven by a 12-thread /
+480-write stress test:
+(1) Shared temp name — _save_memory wrote a FIXED ".memory.json.tmp". memorize_episode (background
+    thread) and log_system_episode (autonomous) can be in _save_memory at once; two writers sharing
+    one temp file interleave and corrupt it despite os.replace. Fix: tempfile.mkstemp gives each
+    write a unique ".memory.json.XXXX.tmp" (EnvironmentWatcher ignore broadened ".memory.json.tmp"
+    → ".memory.json." to still match).
+(2) Windows os.replace under read contention — bare os.replace raised PermissionError
+    (ERROR_ACCESS_DENIED/SHARING_VIOLATION) when /soul or a harness python_repl had memory.json open;
+    the stress test lost ~all 480 writes. Fix: retry os.replace up to 10x with 20-200ms backoff
+    (contention is transient). Post-fix: 0 corruption, writes survive real cadence. Residual: under
+    PATHOLOGICAL load a rare replace still fails, but _save_memory writes the FULL in-RAM dict each
+    time, so a lost write self-heals on the next save — not permanent unless the process dies in the
+    gap. The on-disk file is ALWAYS valid JSON (never torn).
+Affected: core_logic/crud.py, core_logic/environment.py
+
+[FIX] Q01 training contamination — PERSONA project-identity disambiguation
+Q01 failed 4x: a NAME COLLISION between Alkama's AGENT_ZERO/CLARA and the public agent0ai/agent-zero
+repo. CHAT answered from the parametric prior (even hallucinating a Streamlit/ChromaDB stack).
+Robust home is PERSONA: system-role (outweighs the assistant-role memory block), in the cached
+prefix (cheap), code-resident (survives consolidation; the vault is mutable and can't be edited
+while the backend runs). Added a sharp disambiguation: "CLARA IS Alkama's project; 'Agent Zero' /
+'AGENT_ZERO' means THIS system, not the unrelated public repo; describe his real architecture."
+Avoided hardcoding the volatile stack — the disambiguation is the stable, high-value part.
+Affected: core_logic/system_prompt.py
+
+[FIX] _atomic_search timeout no longer masquerades as a false negative
+If a search exceeds the poll budget it returned the raw "Status: RUNNING / 0 results" — readable as
+"no matches", resurrecting the exact false negative the function prevents. Raised ceiling 12→20
+polls (~7s headroom) and, on timeout, append an explicit "[PARTIAL/INCONCLUSIVE — NOT confirmation
+that no matches exist]" note so a slow search is never read as absence.
+Affected: core_logic/tool_executor.py
+
+## 2026-05-29 (post-fix validation)
+
+[UPDATE] Morning harness re-run (post-fix) — 19/20 (was 17/20 baseline)
+Clean A/B vs reports/2026-05-29-morning-PREFIX-baseline.md. Q05 (MAX_ATTEMPTS) and Q06
+(resource_callback) both FIXED — atomic search reached "Status: COMPLETED" instead of the old
+"RUNNING / 0 results" false negative; Q06 even found orchestrator.py 641/650 this time. Q16
+(tracer) improved from partial to full. Self-assessment COMPLETED with a real structured report
+(Fix 4) instead of "I cannot complete this".
+NEW REGRESSION — Q12 (asyncio.Lock search): routed FAST this run, and FAST's format_llm
+editorialized the raw search hits into fabricated runtime claims ("12 non-functional references",
+"mcp_client.py:66 will throw at runtime", "do nothing at runtime") — all false; those are live
+working locks. Root cause: Rule 19 (anti-fabrication) lives only in the DELIBERATE system prompt;
+FAST's format_llm has no such guardrail. Atomic search (Fix 1) made FAST searches viable, which
+newly exposed this. Clara's own self-assessment correctly flagged it as her worst failure.
+Kept Q12 verbatim (fail_count 1) — it catches a real open issue. OPEN: constrain FAST format_llm
+against fabrication, or force searches to DELIBERATE.
+
+[UPDATE] Evening harness run (post-fix) — 19/20
+Only Q01 still fails: training contamination, now worse — hallucinated a stack of "Streamlit,
+ChromaDB" that CLARA does not use. Kept verbatim (fail_count 4). Q03 (capability honesty) and
+Q15 (consolidation fields) both now PASS — Q15 correctly lists all four extracted fields
+(summary→episodic, facts→vault, style_update→prefs, self_learning→self_knowledge), up from one
+pre-fix. Note: CLAUDE.md says EventQueue drain_blocking=0.1s but the code default is 1.0s — Clara
+answered 1.0 correctly; CLAUDE.md is the stale one (doc drift, not a Clara error).
+
+[FIX] build_session_digest: align telemetry by question text, not index (multi-run logs)
+Fix 4 had a bug exposed when the backend stays up across morning+evening: the single session log
+holds BOTH runs, and the digest split on "=== New Mission [user]:" and paired results[i] with
+segment[i] by index — so evening question i got the MORNING run's telemetry. The evening
+self-assessment was consequently built on wrong (morning) modes and its entire "mode mismatch"
+analysis was an artifact. Fixed: each result now matches the most-recent log segment by question
+prefix (~55 chars), not index. Verified against the shared 15:31 log — evening questions now
+resolve to evening modes (DELIBERATE/CHAT/FAST), not morning's.
+Affected: tests/test_harness.py
+
+[PERF] DELIBERATE latency dropped ~18-20% mean / 25-29% median post-fix
+Same 14 DELIB file-questions: pre-fix mean 15,523ms / median 12,982ms → post-fix morning 12,744 /
+9,706, evening 12,367 / 9,182. Atomic search adds a small poll cost but eliminates the wasted-turn
+cascades (Q05 went 8 turns → ~2); the median fell most because the multi-turn tails were cut.
+
+[FIX] FAST format_llm fabrication guardrail (Solution A — Rule 19 parity for FAST)
+Fixes the Q12 regression: atomic search (Fix 1) made FAST searches viable, and FAST's format_llm
+editorialized correct search hits into false runtime claims. The existing format instruction
+already blocked "training knowledge" supplementation, but the model didn't frame its fabrication
+as training knowledge — it framed it as INTERPRETING the hits ("what this code does"), having line
+numbers but not the code (contextLines=0). Root cause was a presentation-layer parity gap: Rule 19
+hardened DELIBERATE against this, but FAST's formatter never got the equivalent constraint.
+Chose A over routing-searches-to-DELIBERATE (B) because A attacks the true root (formatter parity),
+generalizes to ALL FAST tool results, and is robust to interpreter routing nondeterminism — both
+FAST and DELIBERATE become fabrication-safe regardless of where a search lands. B depends on the
+interpreter classifying searches deterministically, which it does not (Q12 went DELIBERATE pre-fix,
+FAST post-fix, same question). C (deterministic search formatting, bypassing the LLM) is held as a
+targeted backstop if A proves insufficient.
+Edit 1 — agent.py _run_fast: format instruction now forbids interpreting/analyzing/asserting
+behavior, correctness, existence, or runtime effects beyond the literal tool output, with an
+explicit search example (list file:line as-is; do not claim what the code does or whether it works).
+Edit 2 — system_prompt.py PERSONA: added a shared tool-fidelity guardrail so the principle holds
+across all paths. Q12 kept in the morning set as the watchdog for this.
+Affected: core_logic/agent.py, core_logic/system_prompt.py
+
+[UPDATE] Question rotation after 2026-05-29 runs
+Morning: kept Q12 (asyncio.Lock, fail_count→1), rotated the other 19 — new coverage: TCP/UDP,
+deadlock/Coffman, DB indexing (CHAT); factorial, 2^20, hex/bin (FAST); conflict.py categories,
+memorize_episode search, resource_ledger hash, long_term count, api.py port, background_tasks
+intervals, tool_executor defaults, three memory tiers, session_logger encoding, interpreter schema,
+probe write/read-delete, SIMPLE_TRIGGERS (DELIBERATE).
+Evening: kept Q01 (project identity, fail_count→4), rotated the other 19 — several deliberately
+probe the just-changed code (parse_actions error-return, _save_memory atomic write, IGNORED_PATTERNS,
+consult_archive k=4, Rule 19) plus race conditions, SQL/NoSQL, DFS/BFS, authn/authz (CHAT) and
+gcd/sum/round (FAST). Question gap reduced 90s→5s settle buffer for faster runs.
+
+## 2026-05-29
+
+[UPDATE] Morning harness run 2026-05-29 — ~17/20 pass (85%)
+First run on the fully-rotated morning set. Architecture-routing + format_llm fixes from the
+prior session confirmed working: Q15 (execution modes) passed via consult_archive, all FAST
+math clean. New failure class exposed underneath: two confident FALSE NEGATIVES.
+Q05 (MAX_ATTEMPTS): said "not in orchestrator.py" — it is at line 418. Cascade: start_search
+returned "RUNNING / 0 results" (search unfinished) read as "no matches"; read_file covered
+offset 0-200 and 500-693, skipping the 200-500 gap where line 418 lives; python_repl grep
+failed on an exec() scoping bug; then fabricated "read all lines 0 to 693". Consolidation
+attempted to persist a false architecture_fact.
+Q06 (resource_callback): said "doesn't exist in codebase" — exists 11+ places. Interpreter
+routed the search to FAST (single-shot), which structurally cannot make the second
+get_more_search_results call, so format_llm reported 0 matches.
+Q16 (tracer event type): partial — correct that Tracer takes event as a param, but ran out of
+turns before finding "orchestrator_tick". Self-assessment failed to read the 375KB log.
+
+[FIX] Atomic search — start_search + get_more_search_results collapsed into one executor call
+Root cause of Q05/Q06 false negatives. start_search is two-phase: first call returns a session
+handle with "Status: RUNNING / Total results: 0", real results only arrive from
+get_more_search_results. "Total results: 0" while RUNNING is indistinguishable from "0 matches"
+to the model — and FAST (single-shot) can never make the second call at all. New _atomic_search()
+in tool_executor.py runs start_search then polls get_more until "Status: COMPLETED" (12 polls /
+~4.2s ceiling), returning only the terminal result. Wired into both execute_fast and
+execute_deliberate. FAST searches now work; DELIBERATE never sees the ambiguous mid-state.
+Affected: core_logic/tool_executor.py
+
+[FIX] Consolidation: never record absence derived from a failed/empty tool result
+Q05 attempted to persist "MAX_ATTEMPTS constant not in orchestrator.py" as a permanent
+architecture_fact — a false negative becoming self-reinforcing poisoned memory. memorize_episode
+consolidation prompt now forbids extracting any "X does not exist / is not defined / not in file"
+claim as a fact or self_learning when the evidence is an empty result, tool error, or
+"stale/broken search index". A failed tool call is a tool failure, not evidence of absence.
+Affected: core_logic/agent.py (memorize_episode prompt)
+
+[FIX] run_python_code: exec() namespace scoping
+Bare exec(code) inside a function puts top-level assignments in the function's locals while
+list/dict comprehensions resolve free vars against globals — so multiline code like
+`content = open(...).read(); [x for x in content if ...]` failed with "name 'content' is not
+defined". Cost Clara turns in Q05 and the self-assessment. Fixed by exec(code, exec_ns) with a
+single shared namespace dict so comprehensions see earlier assignments. Verified: old form
+raises NameError, new form succeeds.
+Affected: core_logic/tools.py (run_python_code)
+
+[FIX] system_prompt Rule 19 — negative claims & verification honesty
+(a) A tool returning no results / error / "search index" problem is a TOOL FAILURE, not evidence
+of absence; never conclude "X does not exist" without confirming via an independent reliable
+method (known-path python_repl read). (b) Never claim to have read/verified more than actually
+done — state the exact ranges covered, do not round "I tried" up to "I verified the whole file".
+Reasoning-layer backstop for the same false-negative + fabrication behavior behind Q05/Q06.
+Affected: core_logic/system_prompt.py
+
+[REFACTOR] Self-assessment redesign — harness parses the log, Clara critiques a clean digest
+The old self-assessment asked Clara to read the 375KB session log (very long lines → read_file
+chunk-limits; she could not do it in 8 turns and produced "I cannot complete this"). Now
+test_harness.py build_session_digest() parses the log deterministically in Python — per-query
+mode, ReAct turn count, tools used, and flags (off-format, implicit-final-answer, no-valid-action,
+malformed-json, hallucination-correction) — merges it with the captured responses, and feeds Clara
+a clean inline digest to judge. Verified against the 2026-05-29 log: 21 segments parsed, modes/
+turns/tools correct. Moves log-parsing (unreliable for the LLM) to Python; Clara does judgment.
+Affected: tests/test_harness.py
+
+[FIX] memory.json: catastrophic truncation recovered + non-atomic write root-caused
+memory.json was truncated to 206KB mid-write (last entry 2026-04-25), unparseable, after the
+backend was hard-killed while serializing. Q08 had read 5,120 episodes at 12:44; only ~1072
+reached disk before the kill. Two root causes fixed in crud.py:
+(1) _save_memory used open('w') (truncate-then-stream) — a kill mid-write tore the file. Now
+atomic: write to .tmp, fsync, os.replace.
+(2) _load_memory silently returned blank memory on JSONDecodeError — had the backend restarted it
+would have loaded empty memory and the next save would have overwritten the salvageable file,
+destroying everything. Now it backs up the corrupt file (timestamped) before falling back.
+Recovery: salvaged the truncated file into valid JSON — recovered user_profile, project_state,
+long_term VAULT (6 permanent facts), and 1072 oldest episodes; reset self_knowledge/filesystem_map
+to empty (auto-repopulate). Lost: ~4048 recent episodes (1073-5120). Corrupt original preserved at
+core_logic/memory.json.corrupt-20260529-1311.
+Affected: core_logic/crud.py, core_logic/memory.json
+
+[FIX] EnvironmentWatcher: ignore the atomic-write temp file
+Side effect of the atomic-write fix: crud._save_memory now creates core_logic/.memory.json.tmp
+on every consolidation, and core_logic/ is a watched path — so the watcher fired a file_change
+event (→ autonomous task → system episode → another memory write) every ~30s, a slow
+self-sustaining churn that re-bloated episodic_log. The existing ignore pattern ".tmp." (trailing
+dot, for editor files like agent.py.tmp.xxxxx) did not match ".memory.json.tmp". Added
+".memory.json.tmp" to IGNORED_PATTERNS. Verified post-restart: 0 file_change events from the temp
+file (was firing every ~30s). Caught by live testing, not the static analysis.
+Affected: core_logic/environment.py
+
+[FIX] start_clara.sh: derive SCRIPT_DIR dynamically instead of hardcoding /e/...
+The script hardcoded SCRIPT_DIR="/e/ML PROJECTS/AGENT_ZERO" — a Git Bash mount path that does
+not resolve in other shells (WSL mounts the drive at /mnt/e/...), so every path failed with "No
+such file or directory" and the backend never actually started (the spawned PID died instantly
+because python could not find api.py). Now derives SCRIPT_DIR from ${BASH_SOURCE[0]} like
+stop_clara.sh, plus a guard that errors clearly if the venv activate is missing (e.g. when run
+under WSL, where a Windows venv cannot be sourced).
+Affected: start_clara.sh
+
+[VERIFICATION] Live test of the morning-analysis fixes (2026-05-29 15:00)
+Restarted backend with all fixes active and re-ran the two morning false-negative queries through
+the live /query pipeline:
+- Q06 (resource_callback): now correctly reports it EXISTS (CLAUDE.md + agent.py with line numbers)
+  — was "doesn't exist in the codebase". Atomic search polled start_search to completion.
+- Q05 (MAX_ATTEMPTS): now correct — "MAX_ATTEMPTS = 3 at line 418, inside _handle_task_failure,
+  checked line 429" — was "not defined in orchestrator.py" with fabricated verification.
+- Atomic-write proof: hard-killed the backend with WMI Terminate (the same method that truncated
+  memory.json earlier) — memory.json stayed intact and valid. Root cause definitively closed.
+
+## 2026-05-28
+
+[FIX] Test harness backend startup timeout too short for Whisper loading
+Harness morning run aborted with "backend failed to start" because start_backend() gave up
+after 150s (120s poll + 30s grace) while Whisper loading takes ~233s. The ready signal
+"Telegram bot active" fires at ~73s but at that point voice loading has just started.
+FastAPI lifespan doesn't yield until voice loads — so /soul won't respond until ~233s.
+Harness exhausted its 30s grace window 130 seconds too early.
+Fix: ready signal changed from "Telegram bot active" to "Voice system loaded" (actual final
+lifespan signal). BACKEND_WAIT_SECS raised 120→360. Secondary grace period raised 30s→60s.
+Affected: tests/test_harness.py
+
+[FIX] Architecture self-knowledge: force DELIBERATE routing + CLAUDE.md verification
+Two-part fix for Q12 (ResourceLedger wrong module) and Q19 (fabricated LEARN mode).
+Problem: architecture questions about CLARA's own modules, file locations, and execution
+paths were routing to CHAT where Clara answered from parametric memory — which drifts,
+fabricates, and gets module names wrong (said conflict.py instead of resource_ledger.py,
+invented a LEARN mode that doesn't exist).
+Fix 1 — interpreter.py: added routing rule that forces requires_planning=true for any
+question about CLARA's own architecture (execution modes, module names, file locations,
+class behaviors). These never route to CHAT again.
+Fix 2 — system_prompt.py Rule 18: DELIBERATE is now instructed to always search CLAUDE.md
+first via start_search (content search for topic keyword), extract the file path named in
+the matching section, then read_file on that path before answering. Parametric answers
+about architecture are explicitly prohibited — file evidence required.
+Affected: core_logic/interpreter.py, core_logic/system_prompt.py
+
+
+
+[FIX] Memory consolidation charmap failure on Windows (agent.py + session_logger.py)
+Root cause: debug `print(chat_snapshot)` in memorize_episode wrote to stdout before
+the sync DeepSeek client call. On Windows, stdout uses cp1252 by default. chat_snapshot
+contains Unicode from tool outputs (🔄 from Desktop Commander, → from CLAUDE.md chunks,
+narrow no-break spaces from Tavily). print() raised UnicodeEncodeError, aborting consolidation
+entirely — sync_client.chat.completions.create() never ran. 12/21 queries in the
+2026-05-26 evening run produced zero episodic memory writes because of this single line.
+Fix: removed the debug print from agent.py (line was marked "console only — too large for log").
+Hardened session_logger.py StreamHandler to use utf-8 with errors='replace' to survive any
+residual Unicode in slog calls on Windows cp1252 terminals.
+
+[UPDATE] Morning harness run 2026-05-27 — 20/20 pass (100%)
+Clean sweep. All 20 questions correct across CHAT, FAST, and DELIBERATE modes. Mode routing
+correct on every query. Notable: Q08 correctly identified personality type not in user_profile
+(located it in long_term array), Q10 correctly refused Atlas roleplay with architectural grounding,
+Q15 correctly returned zero results for non-existent string 'DELIBERATE mandatory injection'.
+Self-assessment notes: 7 off-format corrections, chunk-limit persistence on memory.json (905KB),
+inline hallucination caught by detector on Q06, excessive start_search two-phase overhead on
+known paths. None of these affected answer correctness — behavioral friction only.
+All 20 questions rotated. New set covers: asyncio gather/create_task, Celsius conversion,
+orchestrator.py MAX_ATTEMPTS, resource_callback search, tools.py native tool list, episodic_log
+count, crud.py signature, voice.py sample rates, asyncio.Lock search, ENUMERATION_KEYWORDS
+verbatim, execution modes (architecture test for new DELIBERATE routing fix), tracer.py event
+type, rag_db_builder.py chunk settings, mcp_client.py handshake calls.
+
+[UPDATE] Evening harness run 2026-05-27 — 14/20 pass (70%)
+Same pass rate as May 26 run. Fixes not yet deployed — run reflects pre-fix behavior.
+PASS (new rotated questions): Q02 (conflict.py ArbitrationEngine — correct with quoted returns),
+Q04 (FAST escalation — correct detailed answer from CHAT parametric memory), Q05 (Python GIL),
+Q06 (vault dedup — correct), Q07 (resource_ledger.py methods — correct), Q08 (memory boundary),
+Q09 (memory.json keys via Python), Q10 (SHA-256 FAST), Q11 (charmap search — found 14 hits in
+docs, previously failing, now passes), Q12 (ResourceLedger CHAT — correct, previously failing),
+Q13 (background_tasks.py), Q16 (api.py port), Q17 (bench_logger columns), Q20 (event_queue).
+FAIL:
+Q01 (fail_count→2): Memory confusion — Clara describes open-source Agent Zero repo (agent0ai/
+agent-zero, main.py CLI) instead of Alkama's CLARA/Agent Zero system. Training data contamination.
+Q03 (fail_count→2): Capability dishonesty — says "Yes I can read files" in CHAT mode where she
+literally cannot. Doesn't distinguish current-mode capability from system capability.
+Q14 (fail_count→1): Used pstdev (population, n divisor, result=12.3153) instead of stdev
+(sample, n-1 divisor, correct=13.4907). statistics.stdev vs statistics.pstdev confusion.
+Q15 (fail_count→1): Fabricated consolidation fields — invented user_facts and interaction_signals.
+Actual fields are summary, facts, and self_learning.
+Q18 (fail_count→2): Known format_llm bug — stated "4.8% over 5 years" vs actual "8% for 3 years".
+format_messages passes intent not query to format_llm; format_llm fabricated parameters.
+Q19 (fail_count→2): Fabricated BACKGROUND as third execution mode. Correct answer is FAST.
+Fix coverage: Q15 and Q19 will pass after today's architecture routing fix deploys.
+Q01, Q03, Q14, Q18 remain unfixed — different categories not addressed by today's changes.
+14 questions rotated. 6 kept verbatim with fail_counts incremented.
+
+[UPDATE] Evening harness run 2026-05-28 — 17/20 pass (85%)
+Up from 70% on May 27. Three fixes confirmed working: Q14 (stdev fix), Q18 (format_llm query
+fix), Q19 (architecture routing fix — routed to DELIBERATE, used consult_archive, correct answer).
+FAIL:
+Q01 (fail_count→3): Training contamination persists — described open-source agent0ai/agent-zero
+repo instead of Alkama's CLARA system. CHAT mode, confidence=1.0, no file reads.
+Q03 (fail_count→3): Claimed "can't write files or execute code" — factually wrong, both tools
+available. CHAT mode has no tool access so she can't verify against registry at response time.
+Deferred — system prompt injection of available tools under consideration.
+Q15 (fail_count→2): Tool failure cascade — start_search returned 0 results 3 times, read_file
+rejected, consult_archive partial. Exhausted 8-turn budget, confirmed only self_learning field.
+Other two fields (summary, facts) unverified. Architecture routing fix helped routing but
+tool reliability floor is the ceiling here.
+Q04: Technically passed (ARCHIVE_CONTEXT answer correct) but burned full 8-turn budget on tool
+failures before falling back. Behavioral concern flagged.
+17 questions rotated. 3 kept verbatim (Q01, Q03, Q15).
+New questions cover: conflict.py classes, background_tasks.py scheduler intervals,
+asyncio.Lock vs threading.Lock, tracer.py event type, event_queue.py drain_blocking,
+CAP theorem, episodic_log count, 17^5, resource_callback search, tool_registry.py
+rebuild_embeddings signature, interpreter.py output schema, circle area, mcp_client.py
+handshake calls, voice.py sample rates, F→C conversion, ENUMERATION_KEYWORDS verbatim,
+rag_db_builder.py chunk settings.
+
+[FIX] consult_archive: raised k from 3 to 4 chunks
+Q15 failure analysis showed the answer (summary + facts fields in Memory Consolidation
+section) was present in the FAISS index but ranked 4th — cut off by k=3. The top 3 chunks
+pulled the Self-Knowledge section (mentions self_learning + memorize_episode heavily) which
+only confirmed one of the three fields. get_archive_context passive injection stays at k=3
+(runs on every query, needs to stay lean). consult_archive is an explicit deliberate tool
+call — raising to k=4 adds ~200 tokens and catches the rank-4 miss without pulling noisy
+low-similarity content.
+Affected: core_logic/tools.py
+
+[FIX] parse_actions: silent JSON failure caused infinite retry loops
+Both JSON parse layers in parse_actions() swallowed JSONDecodeError with bare `pass`,
+returning [] with no feedback. ReAct loop responded with "No valid Action found. Please
+continue." — giving Clara zero information about why her action failed. Root cause exposed
+by Q15 session analysis: Clara constructed a Windows path with single backslashes
+("E:\ML PROJECTS\...") which is invalid JSON. Both layers failed silently, she retried
+the identical broken action 5 times, exhausted her 8-turn budget, and delivered an
+incomplete answer. Fix: track last_json_error across both layers; if both fail AND a
+JSON error was captured, return an error dict with the exact parse error and a hint about
+Windows path escaping instead of falling through to Layer 3. The existing failed_actions
+path in run_task already surfaces this as a Glint back to Clara on the next turn.
+Affected: core_logic/agent.py (parse_actions)
+
+[FIX] stop_clara.sh: WMI fallback for manual-start backend processes
+stop_clara.sh only worked when a PID file existed (harness-started processes).
+Manual `python api.py` starts never wrote a PID file, so the script silently printed
+"No PID file for Backend" and returned without killing anything.
+Fix 1 — api.py: writes clara_backend.pid at lifespan startup (before yield), so both
+harness-spawned and manual starts leave a PID file. Deletes the file on clean shutdown.
+Fix 2 — stop_clara.sh: fallback path when no PID file — PowerShell WMI query finds any
+python*.exe with api.py in its CommandLine and terminates via Invoke-WmiMethod Terminate.
+WMI Terminate is used instead of taskkill because taskkill returns "Access is denied" on
+some processes even with //F flag (confirmed in this session with PIDs 27332 and 27908).
+Affected: stop_clara.sh, api.py
+
+## 2026-05-26
+
+[UPDATE] Evening harness run post-DeepSeek migration — 14/20 pass (70%)
+First successful harness run after Brief 28 migration. DeepSeek V4 Flash functional across all
+three modes. FAST math (Q10, Q14) and DELIBERATE file reads (Q02, Q07, Q13, Q16, Q17) clean.
+Prefix cache hitting 50-84% on prompt tokens — cost ~$0.04-0.05 per session.
+FAILS: Q01 (tech stack memory missing React/Vite), Q03 (self-capability lie — said "no web search"),
+Q11 (wrong file count on charmap search), Q12 (ResourceLedger wrong module/mechanism),
+Q18 (FAST format_llm ignored tool result and asked for given params), Q19 (fabricated "LEARN" mode).
+Critical bug found: memory consolidation failing on 12/21 queries due to charmap codec error —
+Unicode in tool outputs (emojis, arrows) hitting cp1252 on Windows in memorize_episode.
+Question rotation: 14 questions replaced with new tests covering conflict.py ArbitrationEngine,
+FAST escalation, vault dedup, resource_ledger.py, self_knowledge JSON, background_tasks.py,
+bench_logger.py, event_queue.py drain timeout, SHA-256 FAST test, stdev FAST test.
+
+[FEATURE] LLM migration: xAI Grok → DeepSeek V4 Flash + Gemini Vision (Brief 28)
+xAI Grok 4.1 retired May 15 2026. Silent billing reroute to grok-4.3 exhausted credits.
+Replaced entire LLM layer with DeepSeek V4 Flash (deepseek-chat) via OpenAI-compatible API.
+All three paths (Interpreter, CHAT, FAST, DELIBERATE, memory consolidation) now use
+AsyncOpenAI(base_url="https://api.deepseek.com"). Memory consolidation uses sync OpenAI
+client (runs in asyncio.to_thread — AsyncOpenAI not allowed there).
+Vision replaced: Grok Vision → Gemini 2.5 Flash via google-genai SDK.
+Removed: xai_sdk import, Client class, set_xai_client(), _xai_client_ref.
+TokenUsage.add() updated to read prompt_cache_hit_tokens (DeepSeek cache field).
+chat_snapshot filter updated from xAI role enum (m.role == '1') to plain dict keys.
+CLAUDE.md updated: env vars, LLM models section, token tracking section.
+Affected: core_logic/agent.py, core_logic/interpreter.py, core_logic/tools.py,
+core_logic/tool_executor.py, api.py, CLAUDE.md.
+
 ## 2026-05-25
 
 [FIX] charmap codec error silently dropping memory writes

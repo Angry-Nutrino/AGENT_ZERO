@@ -36,8 +36,9 @@ def init_session_log():
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
-    # Stream handler — mirrors to console
-    sh = logging.StreamHandler()
+    # Stream handler — mirrors to console (utf-8 + replace to survive Unicode on Windows cp1252)
+    import sys
+    sh = logging.StreamHandler(stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', errors='replace', closefd=False))
     sh.setLevel(logging.DEBUG)
     sh.setFormatter(fmt)
 

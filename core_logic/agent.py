@@ -19,8 +19,23 @@ from .memory_manager import free_gpu_memory
 # from .kokoro_mouth import speak
 import os
 from dotenv import load_dotenv
-from xai_sdk import Client
-from xai_sdk.chat import user, system, assistant
+from openai import AsyncOpenAI
+
+def _ds_client() -> AsyncOpenAI:
+    """Create a fresh DeepSeek async client. Called per request for isolation."""
+    return AsyncOpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com",
+    )
+
+def user(content: str) -> dict:
+    return {"role": "user", "content": content}
+
+def system(content: str) -> dict:
+    return {"role": "system", "content": content}
+
+def assistant(content: str) -> dict:
+    return {"role": "assistant", "content": content}
 from .crud import crud
 from .session_logger import slog
 from .tool_executor import execute_deliberate, execute_fast
@@ -88,7 +103,10 @@ class TokenUsage:
         p = getattr(usage_obj, 'prompt_tokens', 0) or 0
         c = getattr(usage_obj, 'completion_tokens', 0) or 0
         t = getattr(usage_obj, 'total_tokens', 0) or (p + c)
-        cached = getattr(usage_obj, 'cached_prompt_text_tokens', 0) or 0
+        # DeepSeek cache field — fall back to xAI field name for compatibility
+        cached = getattr(usage_obj, 'prompt_cache_hit_tokens', 0) or 0
+        if cached == 0:
+            cached = getattr(usage_obj, 'cached_prompt_text_tokens', 0) or 0
         self.prompt_tokens += p
         self.completion_tokens += c
         self.total_tokens += t
@@ -280,19 +298,13 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         )
         return future.result(timeout=30)
 
-    def load_clara(self, model_name="phi3:mini"):
+    def load_clara(self, model_name="deepseek-chat"):
         try:
-            # self.llm = Ollama(model=model_name,
-            #                   num_ctx=4096,
-            #                    stop=["Observation"])
-            # print("Clara Brain loaded successfully.")
-            self.client = Client(
-                api_key=os.getenv("XAI_API_KEY"),
-                timeout=120, # Override default timeout with longer timeout for reasoning models
-                )
-            self.llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
-            slog.info("Clara Brain loaded successfully.")
-
+            api_key = os.getenv("DEEPSEEK_API_KEY", "")
+            if not api_key:
+                raise ValueError("DEEPSEEK_API_KEY not set in .env")
+            self.client = None  # No longer a persistent client — created fresh per request
+            slog.info("Clara Brain loaded (DeepSeek V4 Flash).")
         except Exception as e:
             slog.error(f"Failed to load Clara Brain: {e}")
         
@@ -329,6 +341,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
         # ── LAYER 1 & 2: JSON array path ──────────────────────────────────────────
         bracket_start = after_action.find("[")
+        last_json_error: str | None = None
         if bracket_start != -1:
             # Layer 1: Direct json.loads on everything from [ onward
             candidate = after_action[bracket_start:]
@@ -339,8 +352,8 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     # (a list of strings = misidentified old format, fall through to Layer 3)
                     if any(isinstance(item, dict) for item in parsed):
                         return self._validate_actions(parsed, VALID_TOOLS)
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                last_json_error = str(e)
 
             # Layer 2: Bracket counting to find true closing ]
             depth = 0
@@ -375,10 +388,15 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         # Only treat as JSON action format if at least one item is a dict
                         if any(isinstance(item, dict) for item in parsed):
                             return self._validate_actions(parsed, VALID_TOOLS)
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    last_json_error = str(e)
 
-            # Both JSON layers failed (or produced no dict items) — fall through to Layer 3
+            # Both JSON layers failed — if we have a JSON error, report it instead of
+            # silently falling through. Clara needs to know her JSON was malformed so
+            # she can fix it, not retry the same broken action indefinitely.
+            if last_json_error:
+                slog.warning(f"   [Parser] JSON parse failed: {last_json_error}")
+                return [{"tool": None, "query": None, "error": f"Malformed JSON in Action: {last_json_error}. Check for unescaped backslashes in Windows paths (use \\\\ not \\)."}]
 
         # ── LAYER 3: Old format fallback  tool_name[input] ────────────────────────
         old_match = re.search(r"(\w+)\[(.+?)\]", after_action, re.DOTALL)
@@ -525,7 +543,9 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             "  * File paths, file counts, file sizes, screenshot metadata, directory listings\n"
             "  * Timestamps, dates of events, or anything time-sensitive\n"
             "  * Tool outputs or Glints (web search results, command output)\n"
-            "  * Anything that could be stale within days or weeks\n\n"
+            "  * Anything that could be stale within days or weeks\n"
+            "  * Negative-existence claims from a tool that returned no results, errored, or reported a "
+            "search/index problem — an empty or failed search is NOT proof that something is absent\n\n"
             "- style_update: If Alkama explicitly stated a response style preference (e.g. 'be more detailed', "
             "'shorter responses', 'stop being verbose', 'I want more detail'), extract as one of: "
             "\"concise\", \"detailed\", \"default\". Otherwise null.\n\n"
@@ -533,6 +553,9 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             "  (a) Clara made a clear mistake then corrected it mid-session (e.g. wrong tool, wrong path, hallucinated result)\n"
             "  (b) Clara discovered a new definitive fact about her own architecture not already in CLAUDE.md\n"
             "  If neither happened, leave null. DO NOT extract routine successes, facts about Alkama, or things documented in CLAUDE.md.\n"
+            "  CRITICAL: NEVER record that something 'does not exist', 'is not defined', 'is not in file X', or "
+            "'the codebase lacks Y' when the evidence is an empty result, a tool error, or a 'stale/broken search index'. "
+            "A failed or empty tool call is a tool failure, NOT evidence of absence — recording it poisons memory with a false fact.\n"
             "  When extracted, provide:\n"
             "  { \"category\": \"architecture_facts|failure_patterns|recovery_methods\",\n"
             "    \"key\": \"one-line summary/trigger/problem (the dedup key for this category)\",\n"
@@ -545,12 +568,21 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         
         try:
             
-            temp_llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
-            
-            temp_llm.append(system(memory_prompt))
-            print(f"Snapshot for Memory Consolidation:\n{chat_snapshot}")  # console only — too large for log
-            temp_llm.append(user(f"Interaction:\n{chat_snapshot}"))
-            content = temp_llm.sample().content
+            from openai import OpenAI as SyncOpenAI
+            sync_client = SyncOpenAI(
+                api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+                base_url="https://api.deepseek.com",
+            )
+            messages = [
+                {"role": "system", "content": memory_prompt},
+                {"role": "user", "content": f"Interaction:\n{chat_snapshot}"},
+            ]
+            _mem_resp = sync_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                stream=False,
+            )
+            content = _mem_resp.choices[0].message.content or ""
             slog.info(f"   [Memory] Raw consolidation output: {content}")
             temp_llm=None
             
@@ -786,10 +818,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             #    CHAT:      non-reasoning — ~0.5s TTFT vs 3-8s for reasoning; no planning needed
             #    DELIBERATE: reasoning — ReAct loop quality requires it
             #    FAST:      reasoning (consolidation-only; model matters less here)
-            if mode == "CHAT":
-                llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
-            else:
-                llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
+            llm = []  # plain message list — populated below with .append()
 
             if mode == "DELIBERATE":
                 llm.append(system(self.system_prompt))
@@ -880,10 +909,10 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
             # 6. Memory consolidation
             chat_snapshot = "\n".join([
-                f"{'User' if str(m.role) == '1' else 'Clara'}: {m.content}"
-                for m in llm.messages
-                if str(m.role) not in ['3', 'system']
-                and "[MEMORY_CONTEXT_BLOCK]" not in m.content
+                f"{'User' if m['role'] == 'user' else 'Clara'}: {m['content']}"
+                for m in llm
+                if m['role'] != 'system'
+                and "[MEMORY_CONTEXT_BLOCK]" not in m['content']
             ])
             mem_task = asyncio.create_task(
                 asyncio.to_thread(self.memorize_episode, chat_snapshot)
@@ -933,12 +962,12 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         resource_callback(tool_name, path, mode)
 
             # Format response with non-reasoning model for speed
-            format_llm = self.client.chat.create(model="grok-4-1-fast-non-reasoning")
+            format_messages = []
             if tool_name == "vision_tool":
                 # Vision responses must describe ONLY what is visually present.
                 # Passing intent (derived from full_context including memory) causes
                 # memory details to bleed into the image description.
-                format_llm.append(system(
+                format_messages.append(system(
                     PERSONA + "\n\n---\n\n"
                     "Describe ONLY what you can see in the image analysis result. "
                     "Do not reference session history, memory, or prior conversations. "
@@ -947,23 +976,32 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 ))
                 prompt_parts = [f"Image analysis result: {tool_result}"]
             else:
-                format_llm.append(system(
+                format_messages.append(system(
                     PERSONA + "\n\n---\n\n"
                     "Format the tool result into a natural response. "
                     "Do not mention tool names or pipeline details. "
                     "Use ONLY the information present in the tool result. "
                     "Do not add, infer, or supplement from your training knowledge. "
+                    "Present the tool output faithfully — you may rephrase and organize it, "
+                    "but do NOT interpret, analyze, or assert anything about behavior, "
+                    "correctness, existence, or runtime effects beyond what the output literally states. "
+                    "For a search result, list the file names and line numbers as returned; "
+                    "do NOT claim what the code does, whether it works, or whether it is a bug. "
                     "If the tool result is empty or an error, say so directly."
                 ))
                 prompt_parts = [f"Request: {intent}"]
                 if tool_result:
                     prompt_parts.append(f"Tool result: {tool_result}")
-            format_llm.append(user("\n".join(prompt_parts)))
+            format_messages.append(user("\n".join(prompt_parts)))
 
-            _fast_response = format_llm.sample()
-            response = _fast_response.content
-            fast_usage = getattr(_fast_response, 'usage', None)
-            format_llm = None
+            ds = _ds_client()
+            _fast_response = await ds.chat.completions.create(
+                model="deepseek-chat",
+                messages=format_messages,
+                stream=False,
+            )
+            response = _fast_response.choices[0].message.content or ""
+            fast_usage = _fast_response.usage
             slog.info(f">> [FAST] Response:\n{response}")
             if on_step_update:
                 await on_step_update(response, type="stream", turn_id=0)
@@ -1015,10 +1053,21 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         slog.info(">> [CHAT] Direct conversational response.")
         raw = ""
         sent_len = 0
-        last_response_obj = None
-        for response_obj, chunk in llm.stream():
-            last_response_obj = response_obj
-            token = chunk.content
+        chat_usage = None
+
+        ds = _ds_client()
+        async for chunk in await ds.chat.completions.create(
+            model="deepseek-chat",
+            messages=llm,
+            stream=True,
+            stream_options={"include_usage": True},
+        ):
+            if chunk.usage:
+                chat_usage = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            token = (delta.content or "") if delta else ""
             if not token:
                 continue
             raw += token
@@ -1026,8 +1075,8 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 await on_step_update(token, type="stream", turn_id=1)
                 sent_len += len(token)
                 await asyncio.sleep(0.01)
+
         response = raw.strip()
-        chat_usage = getattr(last_response_obj, 'usage', None) if last_response_obj else None
         slog.info(f">> [CHAT] Response:\n{response}")
         llm.append(assistant(response))
         return response, chat_usage
@@ -1145,12 +1194,22 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             slog.info(f"[Loop {turn_count}] Thinking (Streaming)...")
 
             raw_content = ""
-            last_response_obj = None
+            turn_usage = None
 
-            # 1. Open the Live Pipe (Native xai_sdk syntax)
-            for response_obj, chunk in llm.stream():
-                last_response_obj = response_obj
-                token = chunk.content
+            # 1. Open the Live Pipe (DeepSeek OpenAI-compatible streaming)
+            ds = _ds_client()
+            async for chunk in await ds.chat.completions.create(
+                model="deepseek-chat",
+                messages=llm,
+                stream=True,
+                stream_options={"include_usage": True},
+            ):
+                if chunk.usage:
+                    turn_usage = chunk.usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                token = (delta.content or "") if delta else ""
                 if not token:
                     continue
 
@@ -1170,10 +1229,8 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         await on_step_update(clean_thought, type="thought", turn_id=turn_count)
 
             # Capture usage from this turn's stream
-            if last_response_obj:
-                turn_usage = getattr(last_response_obj, 'usage', None)
-                if turn_usage:
-                    deliberate_usage_list.append(turn_usage)
+            if turn_usage:
+                deliberate_usage_list.append(turn_usage)
 
             await asyncio.sleep(0.05)  # yield to event loop so UI updates flush before next turn
 
@@ -1234,11 +1291,15 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     )
                     llm.append(user(
                         f"[SYSTEM MODE: TASK] [Turn {turn_count}/{max_turns}]\n"
-                        "System: Your response had no ReAct markers (Thought/Action/Final Answer). "
-                        "You MUST use ReAct format. Structure your response as:\n"
+                        "System: Your last response had no ReAct markers (Thought/Action/Final Answer), "
+                        "so it was NOT shown to the user — they cannot see it. "
+                        "If that response already fully answered the question, re-send it now IN FULL, "
+                        "prefixed with 'Final Answer:'. Do NOT write 'as above', 'already delivered', or "
+                        "otherwise refer to a previous turn — the user only ever sees your Final Answer, "
+                        "so it must contain the complete answer itself.\n"
+                        "If you still need a tool, continue instead with:\n"
                         "Thought: <your reasoning>\n"
-                        "Action: [{\"tool\": \"tool_name\", \"query\": \"...\"}]\n"
-                        "or end with: Final Answer: <answer>"
+                        "Action: [{\"tool\": \"tool_name\", \"query\": \"...\"}]"
                     ))
                     continue
                 else:

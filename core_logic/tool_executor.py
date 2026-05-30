@@ -18,6 +18,7 @@ Never wrap async MCP calls in asyncio.to_thread or asyncio.run.
 
 import asyncio
 import json
+import os
 import re
 from .session_logger import slog
 from .resource_ledger import resource_ledger
@@ -121,6 +122,69 @@ def _extract_param(query: str, *param_names: str, fallback: str = "") -> tuple:
             pass
     return (query,) + (fallback,) * (len(param_names) - 1)
 
+
+# ── Atomic search (Fix 1) ─────────────────────────────────────────────────────
+# start_search is a two-phase tool: the first call returns a session handle with
+# "Status: RUNNING / Total results: 0", and the real results only arrive from
+# get_more_search_results. A model reading "Total results: 0" while RUNNING cannot
+# distinguish it from "0 matches found" — the cause of confident false negatives
+# (Q05 MAX_ATTEMPTS, Q06 resource_callback: both real strings reported as absent).
+# We make search atomic here: start, then poll get_more until COMPLETED, returning
+# only the terminal result so the caller never sees the ambiguous mid-state. This
+# also lets FAST run searches correctly — it could never make the second call.
+SEARCH_POLL_INTERVAL = 0.35   # seconds between get_more polls
+MAX_SEARCH_POLLS     = 20     # ~7s ceiling; DC searches usually finish in 1-2 polls,
+                              # headroom so a slow large search is not cut off mid-scan
+_SESSION_ID_RE = re.compile(r'(search_\d+_\d+)')
+
+
+async def _atomic_search(server: str, mcp_client, args: dict) -> str:
+    """
+    Run start_search and poll get_more_search_results until the search reports
+    COMPLETED (or a timeout / error). Returns the final aggregated result text.
+    Never surfaces the 'RUNNING / 0 results' intermediate state to the caller.
+    """
+    start_raw = await mcp_client.call(server, "start_search", args)
+    start_str = start_raw if isinstance(start_raw, str) else str(start_raw)
+
+    if start_str.lower().startswith(("error", "tool error")):
+        return start_str
+    # If DC did not ask us to paginate, the start result is already terminal.
+    if "get_more_search_results" not in start_str and "Status: RUNNING" not in start_str:
+        return start_str
+    m = _SESSION_ID_RE.search(start_str)
+    if not m:
+        return start_str
+
+    session_id = m.group(1)
+    last = start_str
+    completed = False
+    for _ in range(MAX_SEARCH_POLLS):
+        await asyncio.sleep(SEARCH_POLL_INTERVAL)
+        more_raw = await mcp_client.call(
+            server, "get_more_search_results",
+            {"sessionId": session_id, "offset": 0, "length": 100},
+        )
+        more_str = more_raw if isinstance(more_raw, str) else str(more_raw)
+        if more_str.lower().startswith(("error", "tool error")):
+            return more_str
+        last = more_str
+        # "Status: COMPLETED" is the terminal marker; "Total results found" appears
+        # on the completed payload. Either means polling can stop.
+        if "Status: COMPLETED" in more_str or "Total results found" in more_str:
+            completed = True
+            break
+    if not completed:
+        # Timed out while still RUNNING. Make the incompleteness explicit so a slow
+        # search is never read as "no matches" — that would resurrect the very
+        # false-negative this function exists to prevent.
+        last += (
+            "\n\n[NOTE: this search did not finish within the time budget. The results "
+            "above are PARTIAL and INCONCLUSIVE — this is NOT confirmation that no "
+            "matches exist. Call get_more_search_results with this sessionId to continue.]"
+        )
+    return last
+
 # ── Native tool imports ───────────────────────────────────────────────────────
 from .tools import (
     web_search,
@@ -129,7 +193,6 @@ from .tools import (
     consult_archive,
 )
 from .tools import analyze_image_grok
-from . import tools as _tools_module  # live reference so _tools_module._xai_client_ref is read at call time
 
 # ── NATIVE_TOOLS — handled by Python functions, not MCP ──────────────────────
 NATIVE_TOOLS = frozenset({
@@ -164,13 +227,13 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
             return await asyncio.to_thread(consult_archive, args.get("query", ""))
 
         elif tool_name == "vision_tool":
-            if _tools_module._xai_client_ref is None:
-                return "Error: Vision client not yet initialized. Retry in a moment."
+            if not os.getenv("GEMINI_API_KEY", ""):
+                return "Error: GEMINI_API_KEY not set in .env. Vision unavailable."
             path     = args.get("path", "")
             question = args.get("question", "Describe this image.")
             paths    = args.get("paths", None)
             result   = await asyncio.to_thread(
-                analyze_image_grok, _tools_module._xai_client_ref, path, question, paths
+                analyze_image_grok, None, path, question, paths
             )
             if path and "temp_image_" in path:
                 import pathlib
@@ -203,6 +266,8 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
                             write_lock.release()
                     else:
                         result = await mcp_client.call(server, tool_name, args)
+                elif tool_name == "start_search":
+                    result = await _atomic_search(server, mcp_client, args)
                 else:
                     result = await mcp_client.call(server, tool_name, args)
 
@@ -276,8 +341,8 @@ async def execute_deliberate(
             return await asyncio.to_thread(consult_archive, q or query)
 
         elif tool_name == "vision_tool":
-            if _tools_module._xai_client_ref is None:
-                return "Error: Vision client not yet initialized. Retry in a moment."
+            if not os.getenv("GEMINI_API_KEY", ""):
+                return "Error: GEMINI_API_KEY not set in .env. Vision unavailable."
             if query.strip().startswith("{"):
                 try:
                     parsed = json.loads(query)
@@ -291,7 +356,7 @@ async def execute_deliberate(
                 parts = query.split(",", 1)
                 path = parts[0].strip().strip('"').strip("'")
                 q = parts[1].strip() if len(parts) > 1 else "Describe this image."
-            result = await asyncio.to_thread(analyze_image_grok, _tools_module._xai_client_ref, path, q)
+            result = await asyncio.to_thread(analyze_image_grok, None, path, q)
             if "temp_image_" in path:
                 import pathlib
                 pathlib.Path(path).unlink(missing_ok=True)
@@ -323,6 +388,8 @@ async def execute_deliberate(
                             write_lock.release()
                     else:
                         result = await mcp_client.call(server, tool_name, mcp_args)
+                elif tool_name == "start_search":
+                    result = await _atomic_search(server, mcp_client, mcp_args)
                 else:
                     result = await mcp_client.call(server, tool_name, mcp_args)
 

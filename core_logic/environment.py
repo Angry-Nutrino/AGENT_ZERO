@@ -30,6 +30,7 @@ IGNORED_PATTERNS: list = [
     ".faiss",
     ".pkl",
     ".tmp.",             # Editor temp files (e.g., agent.py.tmp.xxxxx) — ignore, debounce real file
+    ".memory.json.",     # crud._save_memory atomic-write temp (.memory.json.XXXX.tmp, unique per write) — ignore
     ".swp",              # Vim/Neovim swap files
     ".swo",              # Vim/Neovim swap files (older)
 ]

@@ -1,6 +1,13 @@
 import json
-from xai_sdk.chat import user, system
+import os
+from openai import AsyncOpenAI
 from .session_logger import slog
+
+def _ds_client() -> AsyncOpenAI:
+    return AsyncOpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com",
+    )
 
 # Tool argument schemas — tells the Interpreter what args each tool needs.
 # Filesystem tools are NO LONGER listed here. They are discovered via tool_search
@@ -123,6 +130,20 @@ Example:
 - WRONG: {"tool": null, "requires_planning": false, "confidence": 1.0}
 - CORRECT: {"tool": "read_file", "requires_planning": true, "confidence": 0.95}
   Reason: file existence is a filesystem fact, not inferable from the name.
+
+CRITICAL — CLARA architecture self-knowledge:
+Any question about CLARA's own modules, file locations, execution modes, class names,
+behaviors, or implementation details → requires_planning=true, tool=null.
+These questions MUST go to DELIBERATE so Clara can search CLAUDE.md and verify from source.
+Parametric knowledge of CLARA's own architecture is unreliable — never route to CHAT.
+Examples that must route DELIBERATE:
+- "What are the three execution modes in CLARA?" → requires_planning=true
+- "Which file handles conflict arbitration?" → requires_planning=true
+- "What does ResourceLedger do?" → requires_planning=true
+- "How does memory consolidation work?" → requires_planning=true
+- "Where is the orchestrator defined?" → requires_planning=true
+Signal words: "in CLARA", "which file", "what module", "how does CLARA", "where is X handled",
+"what does X do in the system", execution mode names, module/class names from the codebase.
 """
 
 
@@ -140,7 +161,7 @@ async def interpret(
         content:      The raw input text (user message, task goal, trigger description)
         source:       "user" | "system" | "worker"
         context:      Relevant memory context string (from get_smart_context)
-        client:       xai_sdk.Client instance
+        client:       unused (kept for call-site compatibility)
         task_context: Optional task context dict — may contain failure_summary for retries
 
     Returns dict with keys: intent, tool, args, confidence, uncertainty,
@@ -156,8 +177,8 @@ async def interpret(
     }
 
     try:
-        llm = client.chat.create(model="grok-4-1-fast-non-reasoning")
-        llm.append(system(INTERPRETER_SYSTEM_PROMPT))
+        messages = []
+        messages.append({"role": "system", "content": INTERPRETER_SYSTEM_PROMPT})
 
         tool_schema_str = json.dumps(TOOL_ARG_SCHEMAS, indent=2)
 
@@ -179,10 +200,15 @@ async def interpret(
             f"Relevant context:\n{context}\n\n"
             "Output ONLY the JSON object."
         )
-        llm.append(user(prompt))
-        _interp_response = llm.sample()
-        raw = _interp_response.content
-        interp_usage = getattr(_interp_response, 'usage', None)
+        messages.append({"role": "user", "content": prompt})
+        ds = _ds_client()
+        _interp_response = await ds.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            stream=False,
+        )
+        raw = _interp_response.choices[0].message.content or ""
+        interp_usage = _interp_response.usage
         slog.info(f">> [Interpreter] Raw output:\n{raw}")
 
         # Strip markdown fences if present

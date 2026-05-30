@@ -23,7 +23,7 @@ from core_logic.orchestrator import Orchestrator
 from core_logic.background_tasks import BackgroundScheduler
 from core_logic.environment import EnvironmentWatcher
 from core_logic.tracer import Tracer
-from core_logic.tools import set_task_graph, set_xai_client
+from core_logic.tools import set_task_graph
 from core_logic.session_logger import init_session_log, slog
 from core_logic.bench_logger import init_bench_log, close_bench_log
 from core_logic.tool_registry import ToolRegistry
@@ -85,13 +85,17 @@ async def lifespan(app: FastAPI):
 
     # Startup
     slog.info("[API] Starting CLARA system...")
+    _pid_file = os.path.join(os.path.dirname(__file__), "clara_backend.pid")
+    try:
+        with open(_pid_file, "w") as _f:
+            _f.write(str(os.getpid()))
+    except Exception:
+        pass
     init_bench_log("benchmarks")
     slog.info("[API] Benchmark logger initialized.")
     tracer = Tracer(enabled=True, traces_dir="traces")
     slog.info("[API] Tracer initialized.")
     clara = Clara_Agent()
-    set_xai_client(clara.client)
-    slog.info("[API] xAI client reference injected into tools.")
     task_graph = TaskGraph()
     set_task_graph(task_graph)
     slog.info("[API] TaskGraph reference injected into tools.")
@@ -188,6 +192,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     slog.info("[API] Shutting down CLARA system...")
+    try:
+        if os.path.exists(_pid_file):
+            os.remove(_pid_file)
+    except Exception:
+        pass
     close_bench_log()
     if voice:
         voice.unload()
@@ -349,7 +358,10 @@ async def get_soul():
 
     try:
         if os.path.exists("core_logic/memory.json"):
-            with open("core_logic/memory.json", "r") as f:
+            # encoding='utf-8' is required — memory.json is written as UTF-8 and on the
+            # cp1252-default Windows backend a bare open() throws 'charmap' on multibyte
+            # bytes (e.g. 0x81), which silently dropped /soul to a default/empty profile.
+            with open("core_logic/memory.json", "r", encoding="utf-8") as f:
                 memory = json.load(f)
 
             user = memory.get("user_profile", {})
