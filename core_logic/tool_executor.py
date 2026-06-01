@@ -144,6 +144,12 @@ async def _atomic_search(server: str, mcp_client, args: dict) -> str:
     COMPLETED (or a timeout / error). Returns the final aggregated result text.
     Never surfaces the 'RUNNING / 0 results' intermediate state to the caller.
     """
+    # A filePattern of "*"/"**"/"" means "all files" — already the default — so passing
+    # it is redundant and (observed in the 2026-05-31 os.replace false negative) can make
+    # the search return a spurious 0. Drop it so the search uses its correct default.
+    if isinstance(args, dict) and str(args.get("filePattern", "")).strip() in ("*", "**", ""):
+        args = {k: v for k, v in args.items() if k != "filePattern"}
+
     start_raw = await mcp_client.call(server, "start_search", args)
     start_str = start_raw if isinstance(start_raw, str) else str(start_raw)
 
@@ -182,6 +188,16 @@ async def _atomic_search(server: str, mcp_client, args: dict) -> str:
             "\n\n[NOTE: this search did not finish within the time budget. The results "
             "above are PARTIAL and INCONCLUSIVE — this is NOT confirmation that no "
             "matches exist. Call get_more_search_results with this sessionId to continue.]"
+        )
+    elif re.search(r"\b0 (?:matches|results)\b|results found:\s*0\b|results:\s*0\b", last, re.I):
+        # A completed search with zero results is the classic false-negative trap (wrong
+        # path/scope/pattern or a tool hiccup). Attach the Rule-19 reminder to the tool
+        # output itself, so it is seen in the moment — far more effective than the prompt
+        # rule alone (which was violated in the 2026-05-31 os.replace false negative).
+        last += (
+            "\n\n[NOTE: 0 results. This is NOT proof the string is absent — a wrong path, "
+            "scope, or pattern can cause a false 0. If you expected matches, re-check the "
+            "path/pattern and read a known file to confirm before concluding it is absent.]"
         )
     return last
 

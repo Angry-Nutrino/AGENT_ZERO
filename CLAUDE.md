@@ -57,29 +57,54 @@ python -m pytest tests/test_brief13.py -v
 python -m pytest tests/ -v
 ```
 
-### Daily Test Harness — Question Rotation Protocol
+### Daily Test Harness — The Drill (analysis + rotation protocol)
 
 The harness fires 20 questions per session from `tests/questions_morning.json` and
-`tests/questions_evening.json`. Each question carries `fail_count` (consecutive fails,
-resets to 0 on pass) and `last_result` ("pass" | "fail" | "pending").
+`tests/questions_evening.json`, then verifies the answers (Layer 1) and writes a report.
+Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `last_result`
+("pass" | "fail" | "pending"), and an optional `verification` block (see below).
+**Trigger:** Alkama says "same drill" / "analyze the report" after a run — manual only, never automatic.
 
-**When Alkama triggers me after a harness run:**
-1. Read the report at `reports/YYYY-MM-DD-{session}.md`
-2. Determine pass/fail for each question from the Full Responses section:
-   - **Fail:** "Task incomplete", timeout, wrong answer, partial answer on multi-part question
-   - **Pass:** correct, complete response within turn budget
-3. For each **failed** question: increment `fail_count`, set `last_result: "fail"`, keep question verbatim
-4. For each **passed** question: set `last_result: "pass"`, then replace it with a new question:
-   - Generate a question that tests a **different capability** not covered by the remaining set
-   - Match the same `expected_mode` as the question being replaced
-   - Reset `fail_count: 0`, `last_result: "pending"`
-5. Write the updated JSON file
-6. Update TIMELINE.md with a `[UPDATE]` entry describing what rotated
+**The drill, step by step:**
+1. **Read the report** `reports/YYYY-MM-DD-{session}.md`. It now contains a **Verification Scorecard**
+   (Layer 1, `tests/verification.py`, Brief 31) — deterministic PASS / FAIL / UNVERIFIABLE per question,
+   re-derived from current source.
+2. **Determine pass/fail per question, anchored to the scorecard:**
+   - Scorecard **PASS / FAIL is authoritative** — trust it (it is mechanically derived, 100% precision in
+     practice). FAIL = genuinely wrong (search undercount, wrong count, wrong computation).
+   - Scorecard **UNVERIFIABLE** (knowledge, semantic, file_op, multi-line quotes) = judge manually.
+   - Known Layer 1 v1 gaps to catch by hand: it can MISS a real PASS when a quote spans multiple source
+     lines (string-concat / split f-strings), and it does not yet verify list-counts ("said 12, there are
+     14") or whether a verbatim quote is the *relevant* line. Verbatim PASS confirms the quote is real,
+     not that the answer is correct — spot-check the substance.
+3. **Cross-reference the session log** `logs/session_*.log` for every FAIL and anything suspicious:
+   `>> [Router] Mode:`, the actual `>> [FAST] tool=` / `-> Tool:` calls + their raw results, `Off-format`,
+   `Status: COMPLETED / Total results found`, `Malformed JSON`. This reveals the *mechanism* (e.g. format_llm
+   corrupting a number, a search returning a spurious 0, a Rule-19 violation) — not just the symptom.
+   Note: one log can hold multiple runs if the backend stayed up; `build_session_digest` matches by question.
+4. **For each FAILED question:** increment `fail_count`, set `last_result: "fail"`, **keep verbatim** — UNLESS
+   the question itself is flawed (e.g. a project-wide search whose ground truth is dominated by accumulating
+   doc/report mentions). In that case fix the question's *scope* and note it (carry the fail_count).
+5. **For each PASSED question:** set `last_result: "pass"`, replace it with a NEW question that tests a
+   **different capability** not in the remaining set, **same `expected_mode`**, reset `fail_count: 0`,
+   `last_result: "pending"`, and **add a `verification` block** (below).
+6. **Write the JSON**, then update **TIMELINE.md** with an `[UPDATE]` entry (pass rate, what each FAIL was +
+   its mechanism, Layer 1's performance, what rotated).
 
-**Rotation only happens when Alkama explicitly triggers the analysis** — not automatically.
-**No rewording of failed questions** — they stay verbatim until they pass.
-**New questions** should cover: untested modules, edge cases in routing, memory integrity checks,
-multi-step file ops, persona guardrails, error recovery — avoid repeating areas already in the set.
+**`verification` block (add to every new question — the reliable path, Brief 31):**
+- `{"type":"compute","code":"<one-liner that prints the answer>"}` — FAST math. Self-check it runs.
+- `{"type":"count","target_file":"core_logic/memory.json","json_path":"long_term"}` — counts.
+- `{"type":"search_set","pattern":"<regex>","scope":"core_logic"}` — searches. ALWAYS scope to `core_logic/`,
+  never "the project" (doc mentions in reports/briefs/TIMELINE grow over time → unwinnable enumeration).
+- `{"type":"verbatim_quote","target_file":"core_logic/x.py"}` — "quote the line verbatim". Confirm the target
+  string actually exists in the file so the question is answerable AND verifiable.
+- `{"type":"file_op","path":"tests/probe_X.txt"}` — probe write/read/delete.
+- `{"type":"knowledge"}` — CHAT training-knowledge questions (advisory; no source oracle).
+  Validate new questions before saving: compute blocks run, verbatim targets exist in source.
+
+**Rules:** rotation only on explicit trigger; no rewording of failed questions (verbatim until they pass,
+scope-fix excepted); new questions cover untested modules, recent code changes, routing edge cases, memory
+integrity, multi-step file ops, persona guardrails, error recovery — avoid the remaining set's areas.
 
 ### Environment Variables (core_logic/.env)
 - `DEEPSEEK_API_KEY` — DeepSeek API key (all LLM calls via OpenAI-compatible API)
@@ -300,6 +325,11 @@ output faithfully — do NOT interpret, analyze, or assert behavior, correctness
 runtime effects beyond what the output literally states. A search result is presented as file:line,
 never as a verdict on what the code does. This is Rule-19 parity for the FAST formatter, which has
 no ReAct loop and therefore no Rule 19. The same principle is also a shared PERSONA guardrail.
+The prompt also requires reproducing numbers/values/identifiers digit-for-digit. As a structural
+backstop (format_llm is a non-reasoning relay and once transposed `print(2**16)=65536`→`65636`),
+`_run_fast` has a **numeric-fidelity guard**: for `python_repl`, if any number the tool printed is
+not preserved in the formatted response, it returns the RAW tool output. Targeted to numbers, so it
+never over-triggers on legitimate reframing ("True"→"97 is prime") or comma-formatting.
 **CHAT path:** `llm` gets `CHAT_SYSTEM_PROMPT`
 **DELIBERATE path:** `llm` gets `SYSTEM_PROMPT` (PERSONA + ReAct tools/format/examples)
 
@@ -615,8 +645,12 @@ intercepts `start_search` in both `execute_fast` and `execute_deliberate`, polls
 `get_more_search_results` until `Status: COMPLETED` (up to MAX_SEARCH_POLLS=20, ~7s), and returns
 only the terminal result — so the caller never sees the ambiguous mid-state and FAST searches work.
 On timeout it appends an explicit "PARTIAL/INCONCLUSIVE — not confirmation that no matches exist"
-note so a slow search is never misread as absence. `python_repl` (`run_python_code`) injects a
-UTF-8-defaulting `open()` into its exec namespace so model code that omits `encoding=` does not hit
+note so a slow search is never misread as absence. It also (a) drops a meaningless `filePattern`
+(`*`/`**`/empty — that means "all files" = the default and once produced a spurious 0 that became a
+false "os.replace does not exist"), and (b) appends a Rule-19 reminder to any COMPLETED-with-0-results
+search ("0 results... NOT proof the string is absent... read a known file to confirm") — putting the
+reminder in the tool output where it is seen in the moment. `python_repl` (`run_python_code`) injects
+a UTF-8-defaulting `open()` into its exec namespace so model code that omits `encoding=` does not hit
 Windows cp1252 charmap errors on UTF-8 files.
 
 *fs\_ tool names:*\* Changed from `fs_read_file`/`fs_write_file`/`fs_list_directory`/`fs_run_command` to DC's native names (`read_file`, `write_file`, `list_directory`, `start_process`). Old names return "not found" → FAST escalates → DELIBERATE calls tool_search → finds correct DC tool.

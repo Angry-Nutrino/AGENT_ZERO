@@ -1,5 +1,161 @@
 # CLARA Project Timeline
 
+## 2026-06-01
+
+[UPDATE] Morning harness run 2026-06-01 08:07 — 19/20; Layer 1 scorecard 14 PASS / 1 FAIL / 5 UNVERIFIABLE
+Strongest run yet. Layer 1's 14 deterministic verdicts were 100% precise, and the 5 UNVERIFIABLE
+(Q01/Q04/Q10 knowledge, Q18/Q19 file-op) were all correct on manual judgment. Verbatim quotes matched
+on all 13 quote questions; compute verified (factorial 3628800, distinct-chars 4, pstdev 2.0).
+ONLY FAIL — Q06 (memorize_episode search, the watchdog's 4th fail, fail_count→4). Log line 103 confirms
+it routed FAST (not the expected DELIBERATE); the atomic search ran but format_llm SUMMARIZED the
+enumeration to "9 across 3 files" when ground truth is 15 across 4. So the persistent search-undercount
+is now precisely characterized: interpreter sometimes routes a search to FAST, and FAST's format_llm
+condenses the match list instead of listing every hit. Clara's self-assessment (now grounded in the
+scorecard) diagnosed it correctly and proposed the right fixes (force search → DELIBERATE; list_directory
+before searching). OPEN — candidate system fix: force search/enumeration intents to DELIBERATE in the
+interpreter, OR bypass/constrain format_llm for enumeration output (it should list every hit, not
+summarize) — same class as the numeric-fidelity bypass already added for python_repl.
+Rotation: kept Q06, rotated 19 with verification blocks (compute self-checked; verbatim targets across
+agent/tools/crud/voice/event_queue/orchestrator/background_tasks/tool_executor/environment/task_graph/
+mcp_client; monolith-vs-microservices, WAL, symmetric-vs-asymmetric (CHAT); sum/set-bits/median (FAST)).
+
+## 2026-05-31 (fixes)
+
+[FIX] FAST numeric fidelity + search false-negative — structural fixes for the two evening findings
+Both 2026-05-31 evening failures are the same class: an LLM between a deterministic tool result and
+the answer corrupts (Q14) or misjudges (Q11) it. Fixed structurally rather than by prompt alone.
+
+Q14 (format_llm transposed print(2**16)=65536 → 65636):
+- A5 (structural) — agent.py _run_fast: after format_llm, for python_repl, if any number the tool
+  PRINTED is not preserved in the formatted response, return the RAW tool output. Targeted to numbers
+  so it never over-triggers on legitimate reframing ("True"→"97 is prime") or comma-formatting
+  (1419857→"1,419,857"). Verified: 65536→65636 falls back to 65536; faithful cases keep framing.
+- A4 (defense-in-depth) — format_llm prompt now says: "Reproduce every number, value, hash, and
+  identifier from the tool result EXACTLY — digit for digit; never re-derive, round, or alter a value."
+  Covers the non-python_repl numbers (search counts, file values) where A5's check doesn't apply.
+
+Q11 (searched 'os.replace' with filePattern="*", DC returned a spurious 0, Clara trusted it):
+- B2 (structural) — tool_executor _atomic_search: a filePattern of "*"/"**"/"" means "all files" =
+  the default, so it is dropped before the search runs (it was redundant and produced the spurious 0).
+  Real filters (e.g. "*.py") are preserved.
+- B5 (in-the-moment Rule 19) — a COMPLETED search with 0 results now gets a note appended to the tool
+  output itself: "0 results... NOT proof the string is absent... read a known file to confirm before
+  concluding it is absent." Same mechanism as the existing timeout note — puts the reminder where Clara
+  reads it in the moment, which is more effective than the prompt rule she violated. Regex verified to
+  fire only on genuine zeros (not 33/10 matches).
+Affected: core_logic/agent.py, core_logic/tool_executor.py
+
+## 2026-05-31 (evening)
+
+[UPDATE] Evening harness run 2026-05-31 20:05 — ~16/20; Layer 1 caught ALL 3 real failures
+First evening run with verification blocks. Scorecard: PASS 10 · FAIL 3 · UNVERIFIABLE 7 — and the 3
+deterministic FAILs were every real failure in the run, each high-value:
+- Q11 (FALSE NEGATIVE, most severe): Clara searched 'os.replace' across the project with
+  filePattern="*", DC returned a spurious "Status: COMPLETED / 0 matches" (os.replace is plainly in
+  crud.py), and she answered "no files contain it". Her own Thought NOTICED the contradiction with
+  memory but DISMISSED it — a Rule 19 violation (absence concluded from a 0-result tool without
+  independent verification). The false-negative class is not fully dead; it recurs when search returns
+  a bad zero and she trusts it. search_set verifier: 33 across 7, recall 0% → FAIL.
+- Q14 (format_llm digit corruption): she ran print(2 ** 16) — python printed 65536 — but format_llm
+  rendered "65636" (digit transposition). The tool output was correct; the FAST formatter altered the
+  literal value. Solution A forbids interpreting/asserting, but not altering a literal number. compute
+  verifier (true 65536) → FAIL. FIX CANDIDATE: add a literal-fidelity line to the format_llm constraint
+  ("reproduce numbers/values from the tool output exactly, digit for digit").
+- Q09 (stale count): episodic_log 2,397 stated vs 2,436 true; ran FAST, returned an outdated value.
+  count verifier → FAIL.
+Clara's self-assessment, GROUNDED IN THE SCORECARD, correctly identified all 3 FAILs with accurate
+severity and root causes ("treated tool absence as evidence of absence", "digit transposition...
+memory recall not computation") — the self-sustaining loop working as designed.
+Layer 1 v1 gaps confirmed live: Q20 (off-format corrective quote) marked UNVERIFIABLE because the
+sentence spans two string-concat source lines — a real PASS missed (multi-line-quote limitation). Q19
+borderline (4/6 recall → UNVERIFIABLE).
+
+[UPDATE] Evening rotation + Q11 re-scope
+Kept Q09 (count, fail 1), Q14 (compute, fail 1), Q11 (search, fail 2, re-scoped 'the project' →
+'core_logic/' — project scope + filePattern bug + doc noise). Rotated 17 with explicit verification
+blocks (validated: compute self-checks, verbatim targets exist; fixed Q02 which wrongly targeted
+voice.py for the F4 PTT key — that lives in the frontend — now WHISPER_MODEL). Several probe recent
+code (run_python_code utf-8, mkstemp prefix, Rule 12, SEARCH_POLL_INTERVAL, MCPError, deepseek-chat).
+
+[DOC] Persisted "The Drill" into CLAUDE.md (Daily Test Harness section)
+Rewrote the rotation-protocol section into the full current drill so it stays in context every session:
+anchor pass/fail to the Layer 1 scorecard (authoritative), cross-reference the session log for every
+FAIL's mechanism, keep failed verbatim (except scope-fixes for flawed questions), rotate passed with a
+different-capability same-mode question CARRYING a verification block, scope searches to core_logic/,
+validate blocks before saving, update TIMELINE. Includes the known Layer 1 v1 gaps to catch by hand.
+
+## 2026-05-31 (morning)
+
+[UPDATE] Morning harness run 2026-05-31 08:06 — ~18/20 + FIRST live Layer 1 scorecard
+First run with Layer 1 wired in. The report now carries a "Verification Scorecard": PASS 9 · FAIL 1 ·
+UNVERIFIABLE 10. Layer 1's first live performance was excellent — ALL 10 definitive verdicts correct
+(9 PASS, all genuine verbatim quotes; 1 FAIL = Q06 undercount), ZERO false positives/negatives. The
+trust-safe design held in production. It also GROUNDED Clara's self-assessment: she reasoned from the
+verifier ("Verifier FAIL: 1 (Q6)...accepted start_search's first batch...FAST was the wrong mode") — a
+correct, sharp diagnosis instead of guessing. That is Layer 1 working as designed.
+Two coverage gaps surfaced (Layer 1.1 candidates): (1) no list-count verifier — Q07 listed all 14
+IGNORED_PATTERNS correctly but SAID "Twelve"; Layer 1 marked it UNVERIFIABLE and missed the wrong
+count. (2) line-by-line matching misses reformatted multi-line quotes — Q09 quoted the bench header
+f-string as one joined line, so it didn't match the 3-line source; UNVERIFIABLE (a real PASS missed).
+Both honest abstentions, not errors.
+Manual: ~18/20. Q06 FAIL (memorize_episode: ran FAST, format_llm summarized "34 across 10" — internally
+inconsistent, no line numbers; true 98 across 29). Q07 soft (right list, wrong count word). Off-format
+recoveries (Q09/Q12/Q16/Q17) all delivered full content — the off-format fix held again.
+Coverage note: morning set had NO verification blocks, so compute/file_op → UNVERIFIABLE; the rotation
+below adds blocks (→ ~16/20 deterministic next run).
+
+[FIX] Q06 re-scoped: 'the project' → 'core_logic/' (search question design)
+Root finding: "every place in THE PROJECT where 'memorize_episode' appears" now matches ~98 across 29
+files because accumulating daily reports + briefs + TIMELINE all mention it — doc noise that grows over
+time, making the question an unwinnable enumeration rather than a fair search-completeness test. Both
+this and the evening Q11 (os.replace) FAILs are partly this artifact. Re-scoped Q06 to 'core_logic/'
+(code-only, stable ~8-10 matches) so it's a meaningful, winnable test of complete enumeration with line
+numbers. Kept as the search watchdog (fail_count carried → 3). Future search questions should scope to
+code, not the whole project.
+
+[UPDATE] Morning question rotation after 2026-05-31 run
+Kept Q06 (re-scoped, fail_count 3). Rotated 19 with explicit `verification` blocks (Brief-31 reliable
+path → ~16/20 deterministic). Validated: every verbatim target exists in source (answerable AND
+verifiable), compute self-checks pass (10! , distinct-chars, pstdev). Several probe recent fixes
+(_load_memory corrupt-backup, parse_actions error-return, session_logger encoding, get_archive_context
+threshold) plus core modules (tracer, mcp handshake, resource_ledger hash, SIMPLE_TRIGGERS, conflict
+classes, uvicorn port). CHAT=knowledge (cache/REST-vs-GraphQL/eventual-consistency), FAST=compute.
+
+[UPDATE] Evening harness run 2026-05-30 21:42 (official) — 19/20, Q01 PERSONA fix VALIDATED
+Analyzed 2026-05-31. Headline: Q01 (project identity), which had FAILED 4x straight on training
+contamination, now PASSES — "Agent Zero (CLARA), a custom modular autonomous agent framework in
+Python, from scratch, no LangChain/CrewAI" with no hallucinated stack. The PERSONA disambiguation
+fix landed. All questions probing today's code answered correctly (parse_actions 3 layers, _save_memory
+atomic mkstemp+os.replace+retry verbatim, IGNORED_PATTERNS 14 incl .memory.json., consult_archive k=4,
+Rule 19, MCPError, tasks.db). The ONE failure was caught by Layer 1, NOT by manual review: Q11
+(os.replace search) — Clara reported "7 matches across two files" but ground truth is 22 across 6
+(missed TIMELINE.md/briefs occurrences). Same search-undercount class as the 05-30 morning Q06.
+Clara self-assessed "20/20, 0 false negatives" — exactly the Layer-0 blind spot (no ground truth).
+
+[FEATURE] Self-Assessment Layer 1 (Brief 31) — implemented, validated, wired into the harness
+New tests/verification.py: deterministic ground-truth verifier. Re-derives truth from CURRENT source
+(re-run search/compute, re-read file, count) → authoritative PASS/FAIL/UNVERIFIABLE per question.
+CRITICAL BUG found by testing it against real runs before trusting it (per the brief's acceptance
+gate): the first verbatim/value verifiers grepped a GUESSED identifier and false-FAILed correct
+answers (Q04/Q12/Q13/Q16/Q17 evening were perfect verbatim quotes marked FAIL) — the exact
+confident-wrong-assessment the brief warns against. Fixed by reversing the check: confirm HER quote
+actually appears in the source, and make quote/value verifiers PASS-or-UNVERIFIABLE (never a confident
+false FAIL); only search_set/count/compute emit FAIL (robust). Re-validated: morning Q06 FAIL (11%),
+evening Q11 FAIL (33%) — both REAL undercounts; zero false FAILs across 40 questions. Wired into
+test_harness.py as Phase 1.5: the scorecard is injected into the self-assessment (grounding it in
+verified verdicts) and written as a "## Verification Scorecard" report section. Read-only, no backend
+change, no runtime risk. v1 limitation (honest): verbatim/value verifiers confirm-or-abstain, so a
+WRONG verbatim/value answer is UNVERIFIABLE not FAIL — completeness improves in Layer 1.1.
+Affected: tests/verification.py (new), tests/test_harness.py
+
+[UPDATE] Evening question rotation after 2026-05-30 official run
+Kept Q11 (os.replace undercount, fail_count→1) as the search-completeness watchdog. Rotated the other
+19 — Q01 finally rotated OUT (passed after 4 fails). New questions carry explicit `verification` blocks
+(the Brief-31 reliable path → ~16/20 deterministic coverage next run) and several probe recent fixes
+(run_python_code utf-8 open, /soul utf-8, _save_memory retry, _atomic_search, off-format corrective,
+MAX_SEARCH_POLLS). CHAT=knowledge (advisory), FAST=compute (self-checked: 129/65536/9), plus
+search_set + count + verbatim_quote targets.
+
 ## 2026-05-30
 
 [UPDATE] Roadmap + Brief 31: Self-Sustaining Evaluation & Self-Healing direction

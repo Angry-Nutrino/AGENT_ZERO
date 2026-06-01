@@ -982,6 +982,8 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     "Do not mention tool names or pipeline details. "
                     "Use ONLY the information present in the tool result. "
                     "Do not add, infer, or supplement from your training knowledge. "
+                    "Reproduce every number, value, hash, and identifier from the tool result "
+                    "EXACTLY as it appears — digit for digit. Never re-derive, round, or alter a value. "
                     "Present the tool output faithfully — you may rephrase and organize it, "
                     "but do NOT interpret, analyze, or assert anything about behavior, "
                     "correctness, existence, or runtime effects beyond what the output literally states. "
@@ -1002,6 +1004,23 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             )
             response = _fast_response.choices[0].message.content or ""
             fast_usage = _fast_response.usage
+
+            # Numeric-fidelity guard: format_llm is a non-reasoning relay and can
+            # transpose a digit (observed: print(2**16)=65536 rendered as 65636). For
+            # python_repl the tool output IS the answer, so if any number it printed is
+            # not preserved in the formatted response, fall back to the raw output.
+            # Targeted to numbers, so it never over-triggers on legitimate reframing
+            # (e.g. a bare "True" becoming "97 is prime").
+            if tool_name == "python_repl" and tool_result:
+                raw = str(tool_result).strip()
+                raw_nums = re.findall(r"\d[\d,]*\.?\d*", raw)
+                if raw_nums:
+                    resp_stripped = response.replace(",", "")
+                    if any(n.replace(",", "") not in resp_stripped for n in raw_nums):
+                        slog.warning("[FAST] format_llm altered a python_repl value — "
+                                     "returning raw tool output for numeric fidelity.")
+                        response = raw
+
             slog.info(f">> [FAST] Response:\n{response}")
             if on_step_update:
                 await on_step_update(response, type="stream", turn_id=0)
