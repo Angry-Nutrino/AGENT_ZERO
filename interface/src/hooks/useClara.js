@@ -13,6 +13,7 @@ export default function useClara() {
   const [input, setInput]     = useState("");
   const [status, setStatus]   = useState("disconnected");
   const [selectedImage, setSelectedImage] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);   // { name, data } — non-image document upload
   const [streamingContent, setStreamingContent] = useState("");
   const [lastTokenUsage, setLastTokenUsage] = useState(null);
   const [voiceActive, setVoiceActive]       = useState(false);
@@ -307,30 +308,40 @@ export default function useClara() {
   }, []);
 
   const sendMessage = () => {
-    if (!input.trim() && !selectedImage) return;
+    if (!input.trim() && !selectedImage && !selectedFile) return;
     const messageId = crypto.randomUUID();
-    addMessage("User", input, selectedImage, messageId);
-    openCard(makeCard(messageId, input));
+    const bubbleText = selectedFile && !input.trim() ? `📎 ${selectedFile.name}` : input;
+    addMessage("User", bubbleText, selectedImage, messageId);
+    openCard(makeCard(messageId, bubbleText));
     socketRef.current?.readyState === WebSocket.OPEN &&
-      socketRef.current.send(JSON.stringify({ text: input, image: selectedImage, message_id: messageId }));
+      socketRef.current.send(JSON.stringify({
+        text: input, image: selectedImage, file: selectedFile, message_id: messageId,
+      }));
     setInput("");
     setSelectedImage(null);
+    setSelectedFile(null);
     setStatus("thinking");
   };
 
+  // One picker for both: images go to the vision path, everything else (PDF/DOCX/
+  // XLSX/PPTX/…) goes to the document path (convert_to_markdown) as { name, data }.
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
+    if (!file) return;
+    const reader = new FileReader();
+    if (file.type.startsWith("image/")) {
       reader.onloadend = () => setSelectedImage(reader.result);
-      reader.readAsDataURL(file);
+    } else {
+      reader.onloadend = () => setSelectedFile({ name: file.name, data: reader.result });
     }
+    reader.readAsDataURL(file);
+    e.target.value = "";   // allow re-selecting the same file
   };
 
   return {
     messages, queryCards, systemLogs, tasks,
     input, setInput, sendMessage, cancelTask, toggleCard, status,
-    selectedImage, setSelectedImage, handleImageUpload,
+    selectedImage, setSelectedImage, selectedFile, setSelectedFile, handleImageUpload,
     streamingContent, clearHistory, lastTokenUsage,
     voiceActive, claraIsSpeaking,
   };

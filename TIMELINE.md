@@ -1,6 +1,170 @@
 # CLARA Project Timeline
 
+## 2026-06-02
+
+[UPDATE] Morning harness drill 2026-06-02 — clean 20/20 + verifier self-test live + Q06 watchdog RESOLVED
+First run with the Phase 1.4 verifier self-test wired in: it ran automatically and the report shows "Verifier
+self-test: 13/13 passed — scorecard engine healthy" — the automation works end-to-end. Scorecard 15 PASS / 0 FAIL
+/ 5 UNVERIFIABLE; correctness effectively 20/20 (the 5 UNVERIFIABLE — Q1/4/10 knowledge, Q18/19 file_op — all
+correct manually). Did NOT relax on 0 FAILs — cross-checked every verbatim-PASS against ground truth and found two
+things the verifier cannot see (both Layer-1 extension candidates, NOT regressions): (1) LINE-NUMBER DRIFT — Clara's
+quoted lines are correct but her cited line NUMBERS are often wrong (Q20 said raise@86 actual 84, class@9-10 actual
+19, start@66 actual 62; Q12 guard@426 actual 431); verbatim_quote checks the string, not the line. (2) Q16
+mis-routed FAST where DELIBERATE was expected (source-read verbatim, Rule 18). THE PERSISTENT Q06 WATCHDOG IS
+RESOLVED — memorize_episode search = 12 across 4 files, 100% coverage, independently verified; the undercount that
+failed 4× (05-30, 06-01) is closed and graduates out of rotation. The drain_blocking "0.1 vs 1.0" was NOT a bug:
+method default is 1.0 (Clara's correct answer), orchestrator drives it at 0.1 (CLAUDE.md's intent) — clarified the
+CLAUDE.md one-liner. ROTATION: climbed the L1-heavy set up the ladder on DIFFERENT modules than evening (task_graph
+crash recovery, event_queue, background scheduler, environment watcher, telegram gate, conversation-hold code,
+mcp_client), using the new key_facts/absence_honesty types; Q12 now uses key_facts requiring the correct line 420
+to mechanically probe the line-number finding. 5 L1 anchors held (Q1,Q2,Q5,Q10,Q13). All validated (compute runs,
+verbatim targets exist, key_facts/absence PASS on correct answers, _save_memory search = 13 across 2 files).
+
+[ENHANCEMENT] Layer 1 hardening + extension — verifier self-test + two new deterministic verifier types
+After the 06-01 evening drill exposed a verifier bug that false-failed CORRECT answers (search_set counted
+memory.json mentions as code), hardened Layer 1 so a verifier regression is caught mechanically, not by hand-grep:
+• tests/test_verification.py — NEW fixture-based self-test (13 cases): builds an isolated mini-repo with known
+  content and asserts each verifier returns the expected verdict, including the exact bug classes (memory.json
+  exclusion INVARIANT = "3 across 2" not 8, **"..."**-decorated verbatim → PASS, severe undercount → FAIL,
+  digit-corruption → FAIL). The meta-guardrail the self-healing pyramid rests on. Result: 13/13. WIRED INTO THE
+  HARNESS as a Phase 1.4 pre-flight (test_harness.py) — runs automatically every harness run; if the engine fails
+  its own fixtures the report's scorecard is stamped "⚠️ VERIFIER SELF-TEST FAILED — suspect this run". No manual
+  step (also runnable by hand: `python tests/test_verification.py`, exit 1 on deviation; pytest test_self_test).
+• Two new deterministic verifier types in verification.py: absence_honesty (L5 — when a searched string is
+  GENUINELY absent, PASS if Clara reports absence, FAIL if she fabricates a file:line — Rule-19, fully checkable)
+  and key_facts (L3/L4 — answer must CONTAIN the required terminal facts of a chain, e.g. python_repl +
+  run_python_code; necessary-condition check, method=key_facts conf 0.75, still spot-checked). Registered in
+  _VERIFIERS; explicit-type questions route straight to them.
+• Upgraded the evening suite: 6 L3 questions {knowledge}→key_facts, 1 L5 {knowledge}→absence_honesty, so they
+  auto-grade instead of needing manual judgment. Validated each PASSes on a correct answer. Scope boundary held:
+  mechanize only the crisply-checkable; L4-synthesis and L6 self-diagnosis stay manual rather than fake-mechanized
+  (a confident wrong grader is worse than an honest UNVERIFIABLE — the exact lesson of the 06-01 evening bug).
+
+[FEATURE] Coherence Phase 2 — active-discourse state (crud.py + agent.py + system_prompt.py)
+Builds on Phase 1's verbatim window. memorize_episode's consolidation prompt now extracts a `discourse` field
+(1-5 concrete subject tags of the exchange); crud.update_discourse_state() keeps a rolling, deduped, most-recent-
+first, cap-8 `discourse_state` in memory.json (stale topics fall off as the conversation moves). get_smart_context
+injects it as [CURRENTLY DISCUSSING: …] beneath the recent-conversation window. PERSONA gained a calibrated-
+inference directive: resolve implicit references ('it','the same one') from the recent window + discourse tags,
+"infer when the referent is clear, ask only when genuinely ambiguous" — deliberately PRESERVING good pushback
+(the 'which girl?' clarification), not training it away. Mechanics verified (rolling/dedup/cap/injection);
+entity-extraction quality + conversational feel are validated live (no mechanical metric until Phase 4's
+Coherence Drill). Phases 3-4 remain on the roadmap.
+
 ## 2026-06-01
+
+[UPDATE] Evening harness drill — CORRECTED to effectively 20/20 + two Layer-1 verifier fixes + ladder climb
+Scorecard reported PASS 11 / FAIL 2 / UNVERIFIABLE 7. Cross-referencing every FAIL against independent
+ground truth (my own grep) overturned BOTH "failures" — they were verifier/question artifacts, not Clara errors:
+• Q11 ('os.replace') FALSE FAIL and Q19 ('asyncio.Lock') FALSE partial: verification.py's search_set counted
+  matches inside core_logic/memory.json (2989 episodic summaries that mention those very strings because we keep
+  discussing them). True CODE counts — 7 across 2 files, 12 across 4 files — matched Clara EXACTLY. She even
+  wrote a self-critique about "search-result credulity" she never committed, having trusted the bad scorecard.
+  FIX: search_set now restricts to CODE_EXT {.py,.js,.jsx,.sh} (new _grep_project exts param), excluding
+  memory.json + .md/.txt docs. Verified: Q11/Q19 now PASS at 100% coverage.
+• Q13 (Rule 12 verbatim) UNVERIFIABLE only because Clara wrapped a genuinely verbatim quote (system_prompt.py:174)
+  in **"..."**. FIX: _extract_quote_candidates now also emits decoration-stripped variants (surrounding "/'/`/*).
+  Verified: Q13 now PASS.
+• Q09 (count episodic_log) is ILL-POSED — the array grows every request (2949 at read -> 2988 at scorecard ->
+  2989 now); a live-growing target can't have a stable ground truth. Replaced in rotation.
+Also corrected CLAUDE.md drill guidance: the scorecard is "strong but NOT infallible" — confirm every FAIL
+against independent ground truth before accepting (a verifier bug looks exactly like a Clara failure).
+ROTATION (difficulty-ladder climb): the set was ~17/20 single-hop L1. Held 5 L1 regression anchors fixed
+(Q1,Q2,Q5,Q10,Q14) and promoted the rest — added L3 multi-hop (Q3,Q4,Q7,Q12,Q17,Q19), L4 doc-vs-code synthesis
+(Q6,Q16,Q20), L5 guardrail/honesty (Q9 absent-string Rule-19 test), FAST algorithm climb (Q18 primes), and two
+harder CHAT topics (Q8 WAL, Q15 optimistic/pessimistic locking). L3/L4/L5 marked {type:knowledge} → MANUAL
+(Claude) verification = Layer-1 extension candidates. Q11 kept as the L2 completeness regression anchor (guards
+the search_set fix). All new questions validated: compute blocks run (650/65536/15), verbatim anchor lines exist.
+Net: Clara's real evening performance was essentially PERFECT; the work was fixing the grader, not the agent.
+
+[FIX] Q06 search-undercount — route completeness enumeration to DELIBERATE (interpreter.py + system_prompt.py)
+Root cause (from the morning run): the interpreter routed "list every occurrence of X" to FAST, and
+FAST's format_llm summarized the match list ("9 across 3 files" vs true 15 across 4). Fix is two-sided:
+(1) interpreter.py — new "completeness enumeration" rule: queries asking to find/list EVERY occurrence /
+ALL matches / EACH place a pattern appears across files → requires_planning=true (DELIBERATE), because
+only the ReAct loop's reasoning-model Final Answer preserves the full set; the FAST relay summarizes.
+Single-value lookups (does file X exist, one web fact, find a path) explicitly stay FAST. (2) system_prompt.py
+Rule 16 — added ENUMERATION COMPLETENESS clause: the Final Answer must reproduce EVERY item from the Glint
+(each file+line), never a count/summary. Decided AGAINST a format_llm bypass (B): detection is fragile
+(can't crisply extract a result set like we do numbers), the raw-dump fallback is ugly, and it leaves the
+single-shot PARTIAL-search leg unfixed. The principle: completeness-bearing answers belong in DELIBERATE.
+
+[ENHANCEMENT] Harness auto-stops backend after each session (tests/test_harness.py)
+New stop_backend() reads clara_backend.pid and taskkill /F /T on the process tree (native, no bash
+dependency — more reliable on Windows than shelling to stop_clara.sh). Called at the END of run() after
+report write + Telegram, so it fires only on normal completion — a crash mid-run leaves the backend up
+for diagnosis. Frees the 4GB VRAM + loaded models when a session is done.
+
+[FEATURE] MarkItDown-MCP document conversion (api.py + venv)
+Added Microsoft's markitdown-mcp STDIO server, registered under "markitdown" in the tool registry
+(mirrors the DC wiring in the api.py lifespan). One tool: convert_to_markdown(uri) — converts PDF / DOCX /
+XLSX / PPTX / EPUB / and 20+ formats to clean Markdown. Fills a real gap: DC read_file cannot parse binary
+office formats (returns gibberish). Installed markitdown-mcp + markitdown[pdf] into jarvis_v2. CAVEAT FIXED:
+markitdown's magika dep pulled in CPU onnxruntime which SHADOWED onnxruntime-gpu (CUDAExecutionProvider
+vanished → would have dropped Kokoro TTS to CPU). Removed the CPU build and force-reinstalled
+onnxruntime-gpu 1.23.2 — CUDA provider restored, magika/markitdown still import. Verified end-to-end:
+XLSX → Markdown table. OCR plugin (markitdown-ocr → Gemini) for scanned/complex PDFs is a deferred follow-up.
+
+[FIX] parse_actions bracket-collision bug — bare-object Actions with code brackets (agent.py)
+Diagnosed from session_2026-06-01_17-50-49.log: Clara could not run python_repl in DELIBERATE to read an
+encrypted PDF — every attempt failed with "Malformed JSON in Action: Expecting value: line 1 column 2 (char 1)".
+Root cause: parse_actions extracted the action via after_action.find("[") (it assumes a JSON array). Clara emitted
+a bare {...} object (violating the array rule) AND her code contained slice/comprehension brackets (text[:3000],
+[p... for p in doc]); find("[") latched onto the FIRST '[' INSIDE the code string, extracting garbage like
+"[:3000]" → json.loads error (verified: json.loads('[:3000]') gives that exact error). The misleading error
+message ("check unescaped backslashes") compounded it — Clara chased a backslash problem that didn't exist and
+concluded it was "session-specific". Fix: (1) new _extract_balanced(text, open, close) string-aware helper;
+(2) parse_actions now strips ```json fences and, when a '{' precedes any '[', parses the bare object directly
+and wraps it as a single-action list — BEFORE the array path, so it can't collide with code brackets; a bare
+object that fails to parse reports the real cause instead of falling through; (3) rewrote both error messages to
+name the true fix (emit a JSON array, \n for newlines, forward-slash paths, no code block). Verified against the
+exact logged failing strings (both now parse) with no regression on the correct [{...}] array format.
+The convert_to_markdown failure in the same session ("Invalid IV size (0) for CBC") was unrelated — that PDF is
+genuinely encrypted; the next PDF converted cleanly, confirming the document pipeline itself is sound.
+
+[FEATURE] Document upload pipeline — attach PDF/DOCX/XLSX/PPTX in the UI (frontend + api.py + orchestrator.py + agent.py)
+Completes PS2. Previously convert_to_markdown could only read a doc already on disk by path; now a document can be
+attached in the chat UI end-to-end, mirroring the image path. Frontend (Layout.jsx + useClara.js): file picker
+widened to docs; handleImageUpload branches — image/* → selectedImage (vision), else → selectedFile {name,data};
+sent under a new `file` WS field; document-attached chip + send/paperclip guards updated. Backend: api.py reads
+payload.get("file") and threads file_data through submit_user_event → _handle_user_input (task context) →
+process_request(file_data=) — exactly parallel to image_data. process_request base64-decodes to temp_doc_<uuid><ext>
+(extension preserved) and injects a [SYSTEM: document saved at PATH, use convert_to_markdown with uri file:///PATH]
+note; the ReAct loop calls convert_to_markdown, _build_args_from_query maps the URI to its single required `uri` arg
+(verified required=['uri']). Image+document in one turn both keep their notes (doc block appends to final_prompt).
+Verified: Python compiles, frontend builds, MCP convert works, arg mapping confirmed.
+
+[UPDATE] Documented vision tool as NON-FUNCTIONAL (null) + Grok as gone (CLAUDE.md)
+Ground-truth correction triggered by Alkama. The vision tool (analyze_image_grok in tools.py) calls
+model="gemini-2.5-flash" via google-genai, but GEMINI_API_KEY is NOT set in .env → every call returns
+"Error: GEMINI_API_KEY not set in .env". So vision is inert by design (Alkama's explicit decision: keep it null —
+do NOT add a key or revert). History: vision was Grok Vision (grok-4-1-fast-non-reasoning via xai_sdk) until commit
+edf81a8 (2026-05-30), rewritten to a Gemini stub there but the key was never provisioned; the function/wrapper are
+still vestigially named *_grok. Updated CLAUDE.md: Vision Tool section now states NON-FUNCTIONAL status + history;
+env-var + LLM-Models lines corrected; stale "Grok" pipeline labels (Interpreter, consolidation, memory-context log
+marker) changed to DeepSeek (Grok is gone since Brief 28); dead-files note updated. No code changed in tools.py.
+
+[FEATURE] Conversation hold Phase 1 — verbatim recent-conversation window (crud.py + agent.py)
+The working-memory tier for human-like coherence (Topic 4, deep-reasoning session). Until now cross-turn
+continuity flowed ONLY through consolidated summaries (last 3) — lossy for implicit references ("in india",
+"the same one"). New crud.append_recent_exchange() stores the raw last-10 user↔Clara exchanges (user query +
+final answer ONLY — never the ReAct loop), each side length-bounded (600/900 chars). get_smart_context now
+injects the last 6 as a "[RECENT CONVERSATION — verbatim]" block on top, coexisting with the existing
+summary-based [RELEVANT PAST INTERACTIONS] beneath (kept, per the design — recency-verbatim + semantic
+summaries together let her draw better inferences). Write fires as a background task in process_request for
+source=="user" only, decoupled from memorize_episode so a consolidation parse-failure never costs a turn.
+Verified: persists across reload, injects verbatim user text + answer. Phases 2-4 (active-discourse state,
+stronger retrieval, multi-turn Coherence Drill) deferred to ROADMAP.
+
+[ENHANCEMENT] Drill rotation now climbs an L1→L6 difficulty ladder (CLAUDE.md)
+Diagnosed that the suite was circling at fixed altitude — ~85% single-hop retrieval (mastered at 19/20),
+rotated sideways not deeper. Encoded an L1-L6 ladder (retrieval → completeness → multi-hop → cross-source
+synthesis → adversarial/guardrail → self-diagnosis) into the drill; PASS now promotes a capability one rung
+higher (same mode), holding ~5 L1 regression anchors fixed. Resolved the verification-coupling question:
+the ladder is NOT gated by CLARA's own Layer-1 verifier near-term — Claude verifies the rungs Layer 1 can't
+mechanically grade (L3/L4/L6), and each such rung is flagged as a Layer-1 extension target (questions lead,
+her self-verification follows). Topics 2/3/4-phases-2-4 + a document-upload pipeline added to ROADMAP's new
+Capability & Coherence track. Dynamic turns (Topic 3) deliberately deferred until agentic work makes 8 bind.
 
 [UPDATE] Morning harness run 2026-06-01 08:07 — 19/20; Layer 1 scorecard 14 PASS / 1 FAIL / 5 UNVERIFIABLE
 Strongest run yet. Layer 1's 14 deterministic verdicts were 100% precise, and the 5 UNVERIFIABLE

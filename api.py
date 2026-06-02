@@ -153,6 +153,16 @@ async def lifespan(app: FastAPI):
     else:
         slog.warning("[API] DC_NODE_PATH or DC_CLI_PATH not set. DC tools unavailable.")
 
+    # MarkItDown — STDIO MCP server (Microsoft). One tool: convert_to_markdown(uri).
+    # Fills the gap DC read_file cannot: PDF / DOCX / XLSX / PPTX / EPUB and other
+    # binary office formats → clean Markdown. Runs in the same venv as the backend.
+    try:
+        md_tools = await mcp_client.connect("markitdown", sys.executable, ["-m", "markitdown_mcp"])
+        tool_registry.register_server_tools("markitdown", md_tools)
+        slog.info(f"[API] MarkItDown connected: {len(md_tools)} tools registered.")
+    except MCPError as e:
+        slog.warning(f"[API] MarkItDown connection failed: {e}. Continuing without document-conversion tools.")
+
     await tool_registry.rebuild_embeddings(clara._encode)
     slog.info(f"[API] Tool registry ready: {tool_registry.tool_count} tools indexed.")
 
@@ -252,7 +262,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if ack:
                 voice.speak(ack, block=False)
 
-    async def handle_message(user_text: str, image_data, message_id: str, via_voice: bool = False):
+    async def handle_message(user_text: str, image_data, file_data, message_id: str, via_voice: bool = False):
         try:
             async def on_step(content, type="thought", turn_id=None, extra=None):
                 await send_update(
@@ -262,6 +272,7 @@ async def websocket_endpoint(websocket: WebSocket):
             response = await orchestrator.submit_user_event(
                 text=user_text,
                 image_data=image_data,
+                file_data=file_data,
                 message_id=message_id,
                 on_step_update=on_step,
                 on_interpreted=_speak_ack if via_voice else None,
@@ -307,7 +318,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "message_id": message_id,
                             })
                             asyncio.create_task(
-                                handle_message(text, None, message_id, via_voice=True)
+                                handle_message(text, None, None, message_id, via_voice=True)
                             )
                     continue
 
@@ -329,14 +340,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 user_text  = payload.get("text", "")
                 image_data = payload.get("image", None)
+                file_data  = payload.get("file", None)
             except json.JSONDecodeError:
                 user_text  = raw_data
                 image_data = None
+                file_data  = None
                 message_id = str(_uuid.uuid4())
 
             # Fire and forget — do NOT await
             asyncio.create_task(
-                handle_message(user_text, image_data, message_id)
+                handle_message(user_text, image_data, file_data, message_id)
             )
 
     except WebSocketDisconnect:

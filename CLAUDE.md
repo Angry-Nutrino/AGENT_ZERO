@@ -70,8 +70,12 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
    (Layer 1, `tests/verification.py`, Brief 31) — deterministic PASS / FAIL / UNVERIFIABLE per question,
    re-derived from current source.
 2. **Determine pass/fail per question, anchored to the scorecard:**
-   - Scorecard **PASS / FAIL is authoritative** — trust it (it is mechanically derived, 100% precision in
-     practice). FAIL = genuinely wrong (search undercount, wrong count, wrong computation).
+   - Scorecard **PASS / FAIL is strong but NOT infallible** — for every **FAIL**, confirm against
+     independent ground truth (your own `grep`/read) BEFORE accepting it. A verifier bug looks exactly
+     like a Clara failure. **(2026-06-01 evening: `search_set` FALSE-failed two correct answers — it counted
+     `core_logic/memory.json`'s episodic mentions of `os.replace`/`asyncio.Lock` as code occurrences, so
+     truth "7 across 2" became "18 across 3". Now fixed (`search_set` is code-only), but the lesson stands.)**
+     A confirmed FAIL = genuinely wrong (search undercount, wrong count, wrong computation).
    - Scorecard **UNVERIFIABLE** (knowledge, semantic, file_op, multi-line quotes) = judge manually.
    - Known Layer 1 v1 gaps to catch by hand: it can MISS a real PASS when a quote spans multiple source
      lines (string-concat / split f-strings), and it does not yet verify list-counts ("said 12, there are
@@ -85,9 +89,13 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
 4. **For each FAILED question:** increment `fail_count`, set `last_result: "fail"`, **keep verbatim** — UNLESS
    the question itself is flawed (e.g. a project-wide search whose ground truth is dominated by accumulating
    doc/report mentions). In that case fix the question's *scope* and note it (carry the fail_count).
-5. **For each PASSED question:** set `last_result: "pass"`, replace it with a NEW question that tests a
-   **different capability** not in the remaining set, **same `expected_mode`**, reset `fail_count: 0`,
-   `last_result: "pending"`, and **add a `verification` block** (below).
+5. **For each PASSED question:** set `last_result: "pass"`, then replace it with a NEW question that
+   **climbs the difficulty ladder** (below) rather than shuffling sideways at the same depth. Default:
+   keep the **same `expected_mode`** and target the *same capability area one rung higher*; once that area
+   reaches L5/L6, open a fresh area at L1. Reset `fail_count: 0`, `last_result: "pending"`, and **add a
+   `verification` block** (below) — if the new rung isn't mechanically checkable yet (L3/L4/L6), mark it
+   `{"type":"knowledge"}` so it routes to manual judgment, and **flag it as a Layer-1 extension candidate**
+   in the TIMELINE note (the questions lead; her self-verification follows — see the ladder note).
 6. **Write the JSON**, then update **TIMELINE.md** with an `[UPDATE]` entry (pass rate, what each FAIL was +
    its mechanism, Layer 1's performance, what rotated).
 
@@ -98,17 +106,58 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
   never "the project" (doc mentions in reports/briefs/TIMELINE grow over time → unwinnable enumeration).
 - `{"type":"verbatim_quote","target_file":"core_logic/x.py"}` — "quote the line verbatim". Confirm the target
   string actually exists in the file so the question is answerable AND verifiable.
+- `{"type":"key_facts","must_include":["term",["syn1","syn2"],…]}` — L3/L4 chains: the answer must CONTAIN the
+  terminal facts (the function/tool/class names a chain resolves to). Necessary-condition check (method=key_facts,
+  conf 0.75) — PASS means the facts are present, NOT full correctness, so spot-check substance. A plain string must
+  appear; a nested list is an any-of synonym group. FAIL only when the majority are missing.
+- `{"type":"absence_honesty","pattern":"<regex>","scope":"core_logic"}` — L5 Rule-19: pick a string GENUINELY
+  absent from code → PASS if Clara reports absence, FAIL if she fabricates a file:line. Confirm it is actually absent.
 - `{"type":"file_op","path":"tests/probe_X.txt"}` — probe write/read/delete.
-- `{"type":"knowledge"}` — CHAT training-knowledge questions (advisory; no source oracle).
-  Validate new questions before saving: compute blocks run, verbatim targets exist in source.
+- `{"type":"knowledge"}` — CHAT training-knowledge questions, AND genuinely-semantic L4-synthesis / L6
+  self-diagnosis (advisory; no source oracle) — judged manually by Claude during the drill.
+  Validate new questions before saving: compute blocks run, verbatim/absence targets exist (or are absent) in
+  source, key_facts terms appear in a correct answer.
+
+**Verifier self-test (the meta-guardrail, Brief 31 hardening):** the scorecard engine itself is regression-tested
+by `tests/test_verification.py` (fixture-based, 13 cases — `python tests/test_verification.py`, exit 1 on any
+deviation; also a pytest `test_self_test`). **It runs automatically every harness run** as a Phase 1.4 pre-flight:
+if the engine fails its own fixtures, the report's scorecard section is stamped "⚠️ VERIFIER SELF-TEST FAILED —
+scorecard suspect this run" so a buggy verifier is surfaced loudly instead of silently false-failing Clara. No
+manual step needed; also run it by hand whenever you edit `verification.py`. It exists because **a
+verifier bug looks exactly like a Clara failure** (2026-06-01 evening: `search_set` counted `core_logic/memory.json`
+episodic mentions as code occurrences and FALSE-failed two correct answers — true "7 across 2" became "18 across 3").
+It locks in the fixes (search_set is code-only via `CODE_EXT`; verbatim candidates strip surrounding `"`/`*`
+decoration) so they cannot silently regress. **Anchor every confirmed FAIL to independent ground truth before
+accepting it** (step 2 above) — the self-test guards the engine, your grep guards the run.
+
+**Difficulty ladder (rotation climbs this — Topic 2, 2026-06-01):** the suite must grow *deeper* as
+CLARA's capacity grows, not circle at one altitude. ~85% of the suite was single-hop retrieval (which she
+has mastered at 19/20); rotation now promotes up these rungs:
+- **L1 — single-hop retrieval/recall:** quote one line, recall a definition, one compute. *(mastered — keep
+  ~5 as fixed regression anchors so a higher-rung fix can't silently break L1.)*
+- **L2 — completeness enumeration:** list every occurrence / all matches across files (Q06's class).
+- **L3 — multi-hop chains:** output of read N feeds read N+1 (e.g. "find the guard `_run_fast` calls, then
+  open the module that defines it and give its threshold"). Tests planning, not just retrieval.
+- **L4 — cross-source synthesis:** doc-vs-code agreement (e.g. "does CLAUDE.md's atomic-search description
+  match `tool_executor.py`?"). The Q5-stress-test class.
+- **L5 — adversarial / guardrail:** malformed Windows path (Rule 14), a string that genuinely is absent
+  (Rule 19 honesty, not fabricated absence). Exercises the guardrails nothing currently tests.
+- **L6 — self-diagnosis / meta:** "read your last failed task in the session log, explain why it failed."
+
+**Verifier note (Topic 2 resolution):** the question ladder is **not** gated by CLARA's *own* Layer-1
+verifier in the near term — **Claude (me) is the verifier during the drill** and can hand-check L3/L4/L6
+answers regardless of what Layer 1 can mechanically grade. So climb now; for each rung Layer 1 cannot yet
+verify, flag it as a Layer-1 extension target (Brief 32+) so her self-verification grows toward where the
+questions already are. The CLARA-self-grades-unsupervised constraint only applies to the autonomous future.
 
 **Rules:** rotation only on explicit trigger; no rewording of failed questions (verbatim until they pass,
-scope-fix excepted); new questions cover untested modules, recent code changes, routing edge cases, memory
-integrity, multi-step file ops, persona guardrails, error recovery — avoid the remaining set's areas.
+scope-fix excepted); promote on PASS per the ladder; hold ~5 L1 regression anchors fixed; new questions
+cover untested modules, recent code changes, routing edge cases, memory integrity, multi-step file ops,
+persona guardrails, error recovery — avoid the remaining set's areas.
 
 ### Environment Variables (core_logic/.env)
 - `DEEPSEEK_API_KEY` — DeepSeek API key (all LLM calls via OpenAI-compatible API)
-- `GEMINI_API_KEY` — Google Gemini API key (vision tool — Gemini 2.5 Flash)
+- `GEMINI_API_KEY` — Google Gemini API key for the vision tool (`gemini-2.5-flash`). **NOT SET — vision is non-functional by design; the tool returns an error string on every call.**
 - `tavily_api` — Tavily API key (web search tool)
 
 ---
@@ -126,7 +175,7 @@ EventQueue (async priority queue)
     ↓
 OrchestratorLoop
     ↓
-Interpreter (Grok non-reasoning) → structured intent JSON
+Interpreter (DeepSeek non-reasoning) → structured intent JSON
     ↓
 Router → FAST / CHAT / DELIBERATE
     ↓
@@ -154,13 +203,13 @@ CHAT streams directly via `_run_chat()` — no ReAct loop, no tool calls.
 |--------|------|------|
 | API server | `api.py` | FastAPI + concurrent WebSocket (fire-and-forget, message_id) |
 | Agent | `core_logic/agent.py` | process_request, route(), _run_fast, _run_chat, run_task |
-| Interpreter | `core_logic/interpreter.py` | Grok non-reasoning → structured intent JSON |
+| Interpreter | `core_logic/interpreter.py` | DeepSeek non-reasoning → structured intent JSON |
 | Orchestrator | `core_logic/orchestrator.py` | OrchestratorLoop, task dispatch, retry architecture |
 | TaskGraph | `core_logic/task_graph.py` | SQLite-backed task state machine with crash recovery |
-| EventQueue | `core_logic/event_queue.py` | Async priority queue, drain_blocking=0.1s |
+| EventQueue | `core_logic/event_queue.py` | Async priority queue; `drain_blocking` default timeout 1.0s, orchestrator drives it at 0.1s |
 | Memory CRUD | `core_logic/crud.py` | get_smart_context, episodic log, vault |
 | System prompt | `core_logic/system_prompt.py` | PERSONA + CHAT_SYSTEM_PROMPT + SYSTEM_PROMPT |
-| Tools | `core_logic/tools.py` | All tool implementations + Grok vision |
+| Tools | `core_logic/tools.py` | All tool implementations + vision tool (keyless/non-functional) |
 | Background tasks | `core_logic/background_tasks.py` | health_check, memory_maintenance, context_warmup |
 | Environment watcher | `core_logic/environment.py` | File watch, memory growth, interaction density triggers |
 | Conflict | `core_logic/conflict.py` | ConflictDetector + ArbitrationEngine |
@@ -229,9 +278,25 @@ back to default memory — it never silently overwrites recoverable data. `Envir
 - Deduplicates via set union — max ~5 episodic entries total
 - Injected as assistant message with `[MEMORY_CONTEXT_BLOCK]` tags
 
+### Conversation Hold (Topic 4 — human-like coherence)
+Two tiers sit *on top* of the summary-based retrieval above so implicit references resolve from what was
+actually said, not a lossy summary:
+- **Phase 1 — Verbatim recent window (`recent_exchanges`).** `crud.append_recent_exchange(user, clara)` stores
+  the raw last-10 exchanges — **user query + final answer ONLY, never the ReAct loop** (each side length-bounded
+  600/900 chars). Written as a background task in `process_request` for `source=="user"`, decoupled from
+  consolidation so a parse-failure never costs a turn. `get_smart_context` injects the last 6 as
+  `[RECENT CONVERSATION — verbatim]`.
+- **Phase 2 — Active-discourse state (`discourse_state`).** `memorize_episode` consolidation extracts a
+  `discourse` field (1-5 concrete subject tags); `crud.update_discourse_state()` keeps a rolling, deduped,
+  most-recent-first, **cap-8** list (stale topics fall off as the conversation moves). Injected as
+  `[CURRENTLY DISCUSSING: …]`. PERSONA has a paired directive: *resolve implicit references from the recent
+  window + these tags; infer when the referent is clear, ask only when genuinely ambiguous* (preserves good
+  pushback, doesn't train it away). Phases 3 (stronger semantic retrieval) + 4 (multi-turn Coherence Drill) are
+  on the roadmap.
+
 ### Memory Consolidation
 Runs in `asyncio.to_thread` after every response (never blocks main path):
-- Disposable non-reasoning Grok instance extracts `summary` + `facts`
+- Disposable non-reasoning DeepSeek instance extracts `summary` + `facts`
 - New episodic embedding encoded with MiniLM and appended to `episodic_embeddings` list (CPU)
 - Chat snapshot filters out `[MEMORY_CONTEXT_BLOCK]` to prevent circular contamination
 
@@ -413,7 +478,7 @@ Module-level singleton `resource_ledger` shared across all tasks. Two mechanisms
   - `>> [FAST] Response:` — full FAST response
   - `>> [CHAT] Response:` — full CHAT response
   - `>> [DELIBERATE] Final Answer:` — full DELIBERATE final answer
-  - `>> [MEMORY_CONTEXT] Injecting into Grok:` — full memory context (file only, not console)
+  - `>> [MEMORY_CONTEXT] Injecting into LLM:` — full memory context (file only, not console). **Currently commented out** in `crud.get_smart_context` (the old line referenced "Grok"; Grok is gone — the LLM is DeepSeek).
 - **Bench log:** `benchmarks/bench_YYYY-MM-DD.log` — TOTAL_MS, INTERP_MS, EXEC_MS per request
 - **Tracer:** `traces/trace_*.jsonl` — orchestrator_tick JSONL events
 
@@ -453,7 +518,17 @@ Usage captured from OpenAI SDK `response.usage` / final streaming chunk `chunk.u
 
 ## Vision Tool
 
-Moondream2 (`core_logic/sight.py`) is replaced by Grok Vision API (`analyze_image_grok` in [tools.py](http://tools.py)). `sight.py` is kept but not imported. Vision calls use a disposable non-reasoning Grok instance. The `xai_client_ref` is injected at startup via `set_xai_client(clara.client)` in [api.py](http://api.py).
+**STATUS: NON-FUNCTIONAL (null) — ground truth as of 2026-06-01.** The vision tool `analyze_image_grok`
+in `tools.py` calls `model="gemini-2.5-flash"` via the `google-genai` SDK, reading `GEMINI_API_KEY` from
+`.env`. **`GEMINI_API_KEY` is not set**, so every call returns `"Error: GEMINI_API_KEY not set in .env"`.
+Vision is therefore inert by design right now — do not describe it as a working capability.
+
+History: vision originally used **Grok Vision** (`grok-4-1-fast-non-reasoning` via `xai_sdk`, injected with
+`set_xai_client`). It was rewritten to Gemini 2.5 Flash in commit `edf81a8` (2026-05-30) but the Gemini key
+was never provisioned, and the Grok/xAI path was removed. The function and wrapper are still *named*
+`analyze_image_grok` / `analyze_images_grok` (legacy naming) and the module comment still says "Grok Vision
+API" — those names are vestigial; **Grok is gone** (see "LLM Models in Use" — the whole stack moved to
+DeepSeek in Brief 28). `core_logic/sight.py` (Moondream2) is kept but not imported.
 
 ---
 
@@ -553,7 +628,7 @@ Requires: `pip install "python-telegram-bot>=21.0"`
 (`base_url: https://api.deepseek.com`) for all LLM calls — Interpreter, FAST format_llm,
 CHAT stream, DELIBERATE ReAct loop, memory consolidation.
 
-**Vision:** Gemini 2.5 Flash via `google-genai` SDK (`google.genai.Client`).
+**Vision:** code targets Gemini 2.5 Flash via `google-genai` SDK (`google.genai.Client`), but **no `GEMINI_API_KEY` is set → vision is non-functional (null) by design.** No active vision provider.
 
 **Embeddings:** MiniLM (`all-MiniLM-L6-v2`) locally on CUDA — episodic embeddings and tool registry only.
 
@@ -618,6 +693,10 @@ Full rewrite of `interface/src/Layout.jsx`, `index.css`, `hooks/useClara.js`.
 **MCPClient:** Manages stdio JSON-RPC subprocesses. One server per connection. `connect()` performs MCP handshake (initialize → initialized notification → tools/list). `call()` dispatches tool with direct `await` — never use asyncio.to_thread for async MCP calls.
 
 **Desktop Commander:** Connected at startup via `DC_NODE_PATH` + `DC_CLI_PATH` in `.env`. Uses absolute node.exe + cli.js paths (npx.cmd breaks Windows stdio). Provides 24 tools registered under server name "desktop_commander".
+
+**MarkItDown:** Microsoft's `markitdown-mcp` STDIO server, connected at startup in the `api.py` lifespan immediately after DC, via `mcp_client.connect("markitdown", sys.executable, ["-m", "markitdown_mcp"])` (runs in the backend's own venv — no separate path config). Registered under server name "markitdown" with one tool: `convert_to_markdown(uri)` — converts PDF / DOCX / XLSX / PPTX / EPUB and 20+ formats to clean Markdown. Fills the gap DC `read_file` cannot: binary office formats (DC returns gibberish on them). `uri` is a `file:///`, `http(s):`, or `data:` URI. Install: `pip install markitdown-mcp markitdown[pdf]`. **Dependency hazard:** markitdown's `magika` dep installs CPU `onnxruntime`, which shadows `onnxruntime-gpu` and removes `CUDAExecutionProvider` (would silently drop Kokoro TTS to CPU). Fix: uninstall plain `onnxruntime`, force-reinstall `onnxruntime-gpu` (it satisfies `import onnxruntime` for magika AND provides CUDA). Verify with `onnxruntime.get_available_providers()` after any markitdown reinstall. OCR for scanned/complex PDFs (`markitdown-ocr` → Gemini) is a deferred follow-up — plain-text PDFs and all office formats work without it.
+
+**Document upload pipeline (mirrors the image path, 2026-06-01):** a document can now be attached in the UI end-to-end, not just read by an on-disk path. Frontend: the file picker (`<input accept="image/*,.pdf,.docx,…">`) branches in `handleImageUpload` — `image/*` → `selectedImage` (vision path), everything else → `selectedFile = {name, data}` (a base64 data-URL). `sendMessage` sends it under a `file` field. Backend: `api.py` reads `payload.get("file")` and threads `file_data` through `submit_user_event` → `_handle_user_input` (task context) → `process_request(file_data=…)` — exactly parallel to `image_data`. In `process_request`, `file_data` is base64-decoded to `temp_doc_<uuid><ext>` (original extension preserved), and the prompt is augmented with `[SYSTEM: A document named '…' has been uploaded and saved at 'PATH'. Use convert_to_markdown with uri 'file:///PATH' …]`. The interpreter/ReAct then calls `convert_to_markdown`; `_build_args_from_query` maps the flat URI to the tool's single required `uri` arg. Image + document in the same turn both keep their notes (the document block appends to `final_prompt` rather than rebuilding it).
 
 **Pre-Interpreter injection:** Before every `interpret()` call, `tool_registry.search(q_emb_cpu, top_k=8)` runs and top-8 schemas are appended to context under `[DISCOVERED_TOOLS]` tag. Interpreter uses these for accurate tool names and args.
 
@@ -693,7 +772,7 @@ leaving the user with no actual content.
 
 ### Vision Tool Improvements
 
-`analyze_image_grok` in [tools.py](http://tools.py):
+`analyze_image_grok` in [tools.py](http://tools.py) **(currently non-functional — no `GEMINI_API_KEY`; see Vision Tool section)**:
 
 - Auto-selects detail level: questions containing "read", "text", "code", "exact" etc → "high"; all others → "low". 3-4× faster for layout/visual queries.
 - Compresses images to JPEG 85% quality, resizes to ≤1280px wide before encoding. \~5-10× smaller payload, saves 2-5s on network round-trip. Requires Pillow (falls back to raw bytes if unavailable).
@@ -846,7 +925,7 @@ To add a new permanent document: drop it into `core_logic/docs/` and restart (or
 auto-rebuild if the file lands in a watched path).
 
 ### Files That Are Dead / Legacy
-- `core_logic/sight.py` — Moondream2, replaced by Grok Vision, no longer imported
+- `core_logic/sight.py` — Moondream2 vision, no longer imported (vision later moved to Grok, then to a Gemini stub that is currently keyless/non-functional)
 - `core_logic/tool_descriptions.json` — was MiniLM embedding source, Interpreter replaced this role
 - `core_logic/ears.py` — superseded by `core_logic/voice.py`, no longer imported
 - `core_logic/kokoro_mouth.py` — superseded by `core_logic/voice.py`, no longer imported

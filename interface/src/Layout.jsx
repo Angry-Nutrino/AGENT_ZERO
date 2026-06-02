@@ -370,6 +370,7 @@ export default function Layout() {
   const {
     messages, queryCards, systemLogs, tasks, input, setInput,
     sendMessage, cancelTask, toggleCard, status, selectedImage, setSelectedImage,
+    selectedFile, setSelectedFile,
     handleImageUpload, streamingContent, clearHistory, lastTokenUsage,
     voiceActive, claraIsSpeaking,
   } = useClara();
@@ -734,6 +735,19 @@ export default function Layout() {
             </div>
           )}
 
+          {/* document preview (PDF/DOCX/XLSX/…) */}
+          {selectedFile && (
+            <div className="mb-2 ml-1 flex items-center gap-2 bg-black/80 border border-emerald-500/20
+              rounded-xl px-2.5 py-1.5 w-fit max-w-xs">
+              <Paperclip size={13} className="text-emerald-400/70 shrink-0" />
+              <span className="text-[10px] text-emerald-400/70 font-mono truncate">{selectedFile.name}</span>
+              <button onClick={() => setSelectedFile(null)}
+                className="ml-1 text-white/25 hover:text-white/60 transition-colors shrink-0">
+                <X size={12} />
+              </button>
+            </div>
+          )}
+
           <div className={`
             relative flex items-end gap-2 px-3 py-2.5 rounded-2xl border transition-all duration-300
             ${status === "thinking" || status === "typing"
@@ -745,10 +759,12 @@ export default function Layout() {
           `}>
             <button onClick={() => document.getElementById("file-upload").click()}
               className={`p-2.5 rounded-xl transition-colors shrink-0
-                ${selectedImage ? "text-emerald-400 bg-emerald-900/20" : "text-white/30 hover:text-white/60 hover:bg-white/5"}`}>
+                ${selectedImage || selectedFile ? "text-emerald-400 bg-emerald-900/20" : "text-white/30 hover:text-white/60 hover:bg-white/5"}`}>
               <Paperclip size={18} />
             </button>
-            <input type="file" id="file-upload" className="hidden" accept="image/*" onChange={handleImageUpload} />
+            <input type="file" id="file-upload" className="hidden"
+              accept="image/*,.pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.csv,.txt,.md,.epub,.html,.json,.xml"
+              onChange={handleImageUpload} />
 
             <textarea
               ref={textareaRef}
@@ -779,9 +795,9 @@ export default function Layout() {
             />
 
             <button onClick={sendMessage}
-              disabled={!input.trim() && !selectedImage}
+              disabled={!input.trim() && !selectedImage && !selectedFile}
               className={`p-2.5 rounded-xl transition-all duration-200 shrink-0
-                ${input.trim() || selectedImage
+                ${input.trim() || selectedImage || selectedFile
                   ? "bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.35)] hover:bg-emerald-500 hover:shadow-[0_0_30px_rgba(16,185,129,0.5)] active:scale-95"
                   : "bg-white/5 text-white/20 cursor-not-allowed"
                 }`}>

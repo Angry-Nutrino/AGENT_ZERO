@@ -138,7 +138,7 @@ class Orchestrator:
         return True
 
     async def submit_user_event(
-        self, text: str, image_data=None,
+        self, text: str, image_data=None, file_data=None,
         on_step_update=None, on_interpreted=None,
         message_id: str = None,
     ) -> str:
@@ -154,6 +154,7 @@ class Orchestrator:
             payload={
                 "text": text,
                 "image_data": image_data,
+                "file_data": file_data,
                 "message_id": message_id,
                 "on_step_update": on_step_update,
                 "on_interpreted": on_interpreted,
@@ -266,18 +267,19 @@ class Orchestrator:
         payload = event.payload
         text = payload.get("text", "")
         image_data = payload.get("image_data")
+        file_data = payload.get("file_data")
         message_id = payload.get("message_id")
         on_step_update = payload.get("on_step_update")
         on_interpreted = payload.get("on_interpreted")
         future = payload.get("response_future")
 
-        # Add task with only serializable context (image_data is base64 str — safe)
+        # Add task with only serializable context (image_data/file_data are base64 str — safe)
         task = self._task_graph.add_task(
             goal=text,
             priority=1.0,
             reversibility="reversible",
             dependencies=[],
-            context={"text": text, "image_data": image_data, "message_id": message_id},
+            context={"text": text, "image_data": image_data, "file_data": file_data, "message_id": message_id},
             origin="user",
         )
 
@@ -652,6 +654,7 @@ class Orchestrator:
                 result = await self._agent.process_request(
                     query=ctx["text"],
                     image_data=ctx.get("image_data"),
+                    file_data=ctx.get("file_data"),
                     on_step_update=ctx.get("on_step_update"),
                     source="user",
                     task_context=ctx,

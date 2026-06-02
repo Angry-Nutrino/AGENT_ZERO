@@ -185,6 +185,36 @@ class crud:
                 context += f" ({style_note})"
             context += "\n"
 
+        # Verbatim recent conversation window (Topic 4, Phase 1) — the working-memory
+        # tier. Raw last-6 exchanges (user query + Clara's final answer ONLY, never the
+        # ReAct loop) so implicit references resolve from what was actually said rather
+        # than a lossy summary. Coexists with the summarized [RELEVANT PAST INTERACTIONS]
+        # below — recency-verbatim on top, semantic/older summaries beneath.
+        recent = self.memory.get("recent_exchanges", [])
+        if recent:
+            context += (
+                "\n[RECENT CONVERSATION — your actual last exchanges with Alkama, "
+                "verbatim, oldest first. Use this to resolve implicit references "
+                "('it', 'that', 'the same', 'in india') and to hold the thread of "
+                "what is being discussed]:\n"
+            )
+            for ex in recent[-6:]:
+                ts = ex.get("timestamp", "")[:16]
+                context += f"- [{ts}] Alkama: {ex.get('user', '')}\n"
+                context += f"           Clara: {ex.get('clara', '')}\n"
+
+        # Active-discourse state (Topic 4, Phase 2) — salient subjects of the current
+        # conversation, most-recent first. Lets implicit references resolve against an
+        # explicit list rather than a guess.
+        discourse = self.memory.get("discourse_state", [])
+        if discourse:
+            context += (
+                "\n[CURRENTLY DISCUSSING — the salient subjects of this conversation, "
+                "most recent first. Resolve implicit references ('it', 'that one', 'the "
+                "same') against these before asking]: "
+                + " · ".join(discourse) + "\n"
+            )
+
         # Known file system locations
         env = profile.get('environment', {})
         known_locations = env.get('known_locations', {})
@@ -297,6 +327,54 @@ class crud:
             except Exception as e:
                 print(f"   [Memory] Embedding encode failed: {e}")
         return None
+
+    def append_recent_exchange(self, user_text: str, clara_text: str, cap: int = 10):
+        """Verbatim short-term conversation buffer (Topic 4, Phase 1).
+
+        Stores ONLY the raw user query + Clara's final answer — never the ReAct
+        loop, thoughts, or Glints. This is the working-memory tier that lets
+        get_smart_context inject the last few exchanges word-for-word, so Clara
+        can resolve implicit references ("in india", "the same one") from what
+        was actually said rather than from a lossy summary.
+
+        Capped to the last `cap` exchanges (oldest drop off). Independent of
+        episodic consolidation so a consolidation parse-failure never costs a turn.
+        Each side is length-bounded to keep per-request context cost predictable.
+        """
+        if not user_text or not clara_text:
+            return
+        buf = self.memory.setdefault("recent_exchanges", [])
+        buf.append({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "user": user_text.strip()[:600],
+            "clara": clara_text.strip()[:900],
+        })
+        if len(buf) > cap:
+            del buf[:-cap]
+        self._save_memory()
+
+    def update_discourse_state(self, entities, cap: int = 8):
+        """Active-discourse state (Topic 4, Phase 2) — the salient concrete subjects/topics
+        of the current conversation, so implicit references ('it', 'the same one') resolve
+        against an explicit list rather than a guess.
+
+        Rolling + most-recent-first: new entities are prepended, deduped case-insensitively,
+        and the list is capped — so stale topics naturally fall off the end as the
+        conversation moves on. Entities come from the consolidation LLM (memorize_episode).
+        """
+        new = [e.strip() for e in (entities or []) if isinstance(e, str) and e.strip()]
+        if not new:
+            return
+        existing = self.memory.get("discourse_state", [])
+        seen = set()
+        merged = []
+        for e in new + existing:           # new first (most recent), then prior
+            k = e.lower()
+            if k not in seen:
+                seen.add(k)
+                merged.append(e)
+        self.memory["discourse_state"] = merged[:cap]
+        self._save_memory()
 
     def add_long_term_fact(self, fact):
         """

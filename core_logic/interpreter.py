@@ -144,6 +144,22 @@ Examples that must route DELIBERATE:
 - "Where is the orchestrator defined?" → requires_planning=true
 Signal words: "in CLARA", "which file", "what module", "how does CLARA", "where is X handled",
 "what does X do in the system", execution mode names, module/class names from the codebase.
+
+CRITICAL — completeness enumeration:
+Queries that ask to find or list EVERY occurrence, ALL matches, EACH place a string/pattern
+appears across files, or to enumerate a result set where missing a single item is a failure
+→ requires_planning=true (DELIBERATE), even if the tool is obvious (start_search).
+Rationale: the FAST path's formatter summarizes lists and silently drops items (it once
+reported "9 across 3 files" for a search whose true result was 15 across 4). Only the ReAct
+loop preserves the full set, because its Final Answer is composed by the reasoning model
+(which sees the raw results and is bound by the completeness check), not by a one-shot relay.
+Examples that must route DELIBERATE:
+- "Search for every place in core_logic/ where 'memorize_episode' appears, list each file+line"
+  → requires_planning=true
+- "List all functions that call run_task" → requires_planning=true
+- "Find every file that imports torch" → requires_planning=true
+This does NOT apply to single-value lookups: "does file X exist", "search the web for today's
+gold price", "find the path of agent.py" → those stay FAST (the answer is one value, not a set).
 """
 
 

@@ -314,6 +314,39 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         self.llm = None
     
 
+    @staticmethod
+    def _extract_balanced(text: str, open_ch: str, close_ch: str) -> str | None:
+        """Return the balanced substring starting at text[0] (which must be open_ch),
+        respecting JSON string literals + escapes. None if no matching close is found.
+
+        Used so brackets/braces INSIDE a quoted JSON string (e.g. Python code like
+        text[:3000] or a list comprehension) never affect structural balancing.
+        """
+        if not text or text[0] != open_ch:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return text[:i + 1]
+        return None
+
     def parse_actions(self, llm_output: str) -> list:
         """
         Three-layer parser for batched JSON action format.
@@ -339,9 +372,42 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
         after_action = llm_output[action_match.end():]
 
-        # ── LAYER 1 & 2: JSON array path ──────────────────────────────────────────
-        bracket_start = after_action.find("[")
+        # Strip markdown code fences (```json ... ```) — the model often wraps the
+        # Action in one, and the fence markers interfere with JSON extraction.
+        after_action = re.sub(r"```(?:json)?", "", after_action)
+
         last_json_error: str | None = None
+
+        # ── BARE-OBJECT PATH (2026-06-01 fix) ─────────────────────────────────────
+        # The model sometimes emits {...} instead of the required [{...}]. The array
+        # path below uses find("[") and would latch onto a [ INSIDE the code string
+        # (e.g. text[:3000], a list comprehension), extracting garbage like "[:3000]"
+        # → "Expecting value: line 1 column 2". So when a { precedes any [ (or there is
+        # no [), parse the object directly and wrap it as a single-action list.
+        bracket_pos = after_action.find("[")
+        brace_pos = after_action.find("{")
+        if brace_pos != -1 and (bracket_pos == -1 or brace_pos < bracket_pos):
+            obj_str = self._extract_balanced(after_action[brace_pos:], "{", "}")
+            if obj_str:
+                try:
+                    parsed = json.loads(obj_str)
+                    if isinstance(parsed, dict):
+                        return self._validate_actions([parsed], VALID_TOOLS)
+                except json.JSONDecodeError as e:
+                    last_json_error = str(e)
+            # A bare object must NOT fall through to the array path — find("[") there
+            # would re-trigger the bracket collision. Report the real cause instead.
+            if last_json_error:
+                slog.warning(f"   [Parser] Object-action JSON parse failed: {last_json_error}")
+                return [{"tool": None, "query": None, "error": (
+                    f"Malformed JSON in Action: {last_json_error}. The Action must be a JSON "
+                    f"array, e.g. [{{\"tool\": \"python_repl\", \"code\": \"...\"}}]. Put any "
+                    f"multi-line code in ONE JSON string using \\n for newlines; do not wrap "
+                    f"the Action in a markdown code block."
+                )}]
+
+        # ── LAYER 1 & 2: JSON array path ──────────────────────────────────────────
+        bracket_start = bracket_pos
         if bracket_start != -1:
             # Layer 1: Direct json.loads on everything from [ onward
             candidate = after_action[bracket_start:]
@@ -396,7 +462,12 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # she can fix it, not retry the same broken action indefinitely.
             if last_json_error:
                 slog.warning(f"   [Parser] JSON parse failed: {last_json_error}")
-                return [{"tool": None, "query": None, "error": f"Malformed JSON in Action: {last_json_error}. Check for unescaped backslashes in Windows paths (use \\\\ not \\)."}]
+                return [{"tool": None, "query": None, "error": (
+                    f"Malformed JSON in Action: {last_json_error}. Emit the Action as a single "
+                    f"JSON array, e.g. [{{\"tool\": \"python_repl\", \"code\": \"...\"}}]. Put any "
+                    f"multi-line code in ONE JSON string using \\n for newlines (not real line "
+                    f"breaks); use forward slashes in Windows paths; do not wrap it in a code block."
+                )}]
 
         # ── LAYER 3: Old format fallback  tool_name[input] ────────────────────────
         old_match = re.search(r"(\w+)\[(.+?)\]", after_action, re.DOTALL)
@@ -561,9 +632,13 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             "    \"key\": \"one-line summary/trigger/problem (the dedup key for this category)\",\n"
             "    \"detail\": \"specific actionable detail/correct_approach/method\",\n"
             "    \"confidence\": 0.75 }\n\n"
+            "- discourse: 1-5 SHORT noun-phrase tags naming the concrete subjects/topics being "
+            "discussed in THIS exchange (e.g. [\"Seiko Presage watch\", \"Omega Seamaster\", \"price by region\"] "
+            "or [\"parse_actions bracket bug\", \"JSON action format\"]). Concrete subjects only — NOT process/meta "
+            "terms, NOT 'Alkama', NOT 'Clara', NOT execution-mode names. Empty list for a pure greeting/acknowledgment.\n\n"
             "Output ONLY a JSON object, no extra text:\n"
-            "{ \"summary\": \"Alkama asked X. Clara did Y.\", \"facts\": [], \"style_update\": null, \"self_learning\": null }\n"
-            "If no permanent facts qualify, leave 'facts' as []. If no style change, leave 'style_update' as null. If no learning, leave 'self_learning' as null."
+            "{ \"summary\": \"Alkama asked X. Clara did Y.\", \"facts\": [], \"style_update\": null, \"self_learning\": null, \"discourse\": [] }\n"
+            "If no permanent facts qualify, leave 'facts' as []. If no style change, leave 'style_update' as null. If no learning, leave 'self_learning' as null. If purely a greeting, leave 'discourse' as []."
         )
         
         try:
@@ -613,6 +688,14 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             if style_update and style_update in ("concise", "detailed", "default"):
                 self.db.update_response_style(style_update, note=f"Alkama requested {style_update} responses")
                 slog.info(f"   [Memory] Response style updated to: {style_update}")
+
+            # 4c. Active-discourse state (Topic 4, Phase 2) — salient subjects of this exchange
+            disc = data.get("discourse")
+            if isinstance(disc, list) and disc:
+                tags = [d for d in disc if isinstance(d, str)]
+                if tags:
+                    self.db.update_discourse_state(tags)
+                    slog.info(f"   [Memory] Discourse state updated: {tags}")
 
             # 5. Save to The Vault (Long Term) - Only if facts exist
             facts = data.get("facts", [])
@@ -681,7 +764,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         except Exception as e:
             slog.error(f"   [Memory] Consolidation failed: {e}")
 
-    async def process_request(self, query, image_data=None, on_step_update=None,
+    async def process_request(self, query, image_data=None, file_data=None, on_step_update=None,
                                source="user", task_context=None):
         try:
             if self._event_loop is None:
@@ -707,6 +790,32 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     )
                 except Exception as e:
                     slog.error(f"   Failed to save image: {e}")
+
+            # Document upload (PDF / DOCX / XLSX / PPTX / etc.) — mirrors the image path
+            # but routes to convert_to_markdown (MarkItDown) instead of vision. Appends to
+            # final_prompt so an image + document in the same turn both keep their notes.
+            if file_data:
+                try:
+                    import uuid as _uuid_mod
+                    doc_name = file_data.get("name", "document")
+                    doc_b64 = file_data.get("data", "")
+                    if "," in doc_b64:
+                        doc_b64 = doc_b64.split(",", 1)[1]
+                    ext = os.path.splitext(doc_name)[1] or ".bin"
+                    doc_path = f"temp_doc_{_uuid_mod.uuid4().hex[:8]}{ext}"
+                    with open(doc_path, "wb") as f:
+                        f.write(base64.b64decode(doc_b64))
+                    abs_doc_path = os.path.abspath(doc_path)
+                    file_uri = "file:///" + abs_doc_path.replace("\\", "/")
+                    final_prompt = (
+                        f"{final_prompt} \n\n[SYSTEM: A document named '{doc_name}' has been uploaded "
+                        f"and saved at '{abs_doc_path}'. To read its contents, use the "
+                        f"convert_to_markdown tool with uri '{file_uri}' — it returns the document "
+                        f"(PDF/DOCX/XLSX/PPTX/etc.) as clean Markdown. Do NOT use read_file on it; "
+                        f"binary office formats are unreadable that way.]"
+                    )
+                except Exception as e:
+                    slog.error(f"   Failed to save uploaded document: {e}")
 
             # 1. Get memory context (always — feeds Interpreter)
             q_emb = await self._encode(final_prompt, convert_to_tensor=True)
@@ -907,7 +1016,15 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     token_usage=token_usage,
                 )
 
-            # 6. Memory consolidation
+            # 6. Verbatim recent-conversation buffer (Topic 4, Phase 1) — user turns only.
+            # Stores raw query + final answer (NOT the ReAct loop). Decoupled from
+            # consolidation so a parse-failure in memorize_episode never costs a turn.
+            if source == "user" and final_answer:
+                asyncio.create_task(
+                    asyncio.to_thread(self.db.append_recent_exchange, query, final_answer)
+                )
+
+            # 6b. Memory consolidation
             chat_snapshot = "\n".join([
                 f"{'User' if m['role'] == 'user' else 'Clara'}: {m['content']}"
                 for m in llm
