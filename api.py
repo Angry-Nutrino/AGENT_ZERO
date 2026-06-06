@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI):
     orchestrator = Orchestrator(clara, event_queue, task_graph, tracer=tracer)
     await orchestrator.start()
     orchestrator._broadcast_fn = broadcast_task_event  # inject callback — avoids circular import
+    orchestrator._send_message_fn = _broadcast  # general WS push for Brief 35 proactive retry delivery
     slog.info("[API] Orchestrator running.")
     scheduler = BackgroundScheduler(task_graph, event_queue, clara)
     await scheduler.start()
@@ -450,6 +451,21 @@ async def query_endpoint(req: QueryRequest):
     except Exception as e:
         slog.error(f"[/query] Error: {e}")
         return {"response": f"Error: {e}"}
+
+
+@app.post("/reset_conversation")
+async def reset_conversation_endpoint():
+    """Clear ONLY the short-term conversational substrate (recent_exchanges + discourse_state)
+    — episodic memory, vault and self_knowledge are untouched. Used by the Coherence Drill to
+    isolate scripted dialogues. Local-only, unauthenticated — do not expose publicly."""
+    if not clara:
+        return {"ok": False, "error": "agent not ready"}
+    try:
+        cleared = clara.db.reset_conversation_state()
+        return {"ok": True, "cleared": cleared}
+    except Exception as e:
+        slog.error(f"[/reset_conversation] Error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 if __name__ == "__main__":

@@ -246,6 +246,13 @@ async def interpret(
                 )
                 return FALLBACK, None
 
+        # Normalize a stringified null tool → real None. The model sometimes emits
+        # "tool": "null" (quoted) instead of JSON null; left as the string "null" it
+        # passes route()'s `tool is not None` check, mis-routes to FAST, and fails with
+        # "Tool 'null' not found" before a wasteful DELIBERATE escalation. (2026-06-02)
+        if isinstance(result.get("tool"), str) and result["tool"].strip().lower() in ("null", "none", ""):
+            result["tool"] = None
+
         slog.info(
             f">> [Interpreter] Parsed → tool={result['tool']} | "
             f"confidence={result['confidence']:.2f} | "

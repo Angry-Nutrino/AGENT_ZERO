@@ -376,6 +376,17 @@ class crud:
         self.memory["discourse_state"] = merged[:cap]
         self._save_memory()
 
+    def reset_conversation_state(self):
+        """Clear ONLY the short-term conversational substrate — recent_exchanges (Phase 1
+        verbatim window) + discourse_state (Phase 2 active-discourse tags). Episodic memory,
+        the vault, self_knowledge and the filesystem map are untouched. Used by the Coherence
+        Drill to isolate scripted dialogues so a prior dialogue's tail cannot forge a referent
+        for the next. One atomic save."""
+        self.memory["recent_exchanges"] = []
+        self.memory["discourse_state"] = []
+        self._save_memory()
+        return {"recent_exchanges": 0, "discourse_state": 0}
+
     def add_long_term_fact(self, fact):
         """
         Saves a permanent fact to the Vault. Exact string dedup guard.

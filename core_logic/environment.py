@@ -33,6 +33,11 @@ IGNORED_PATTERNS: list = [
     ".memory.json.",     # crud._save_memory atomic-write temp (.memory.json.XXXX.tmp, unique per write) — ignore
     ".swp",              # Vim/Neovim swap files
     ".swo",              # Vim/Neovim swap files (older)
+    "node_modules",      # JS deps. An npm install under core_logic/interface/ emitted 12,640
+                         # file_change events in ONE harness run (2026-06-04) — each spawned an
+                         # autonomous task and saturated the orchestrator until user requests
+                         # (Q17-Q20) timed out at 180s. node_modules must never reach the watcher.
+    ".git",              # VCS metadata churn
 ]
 
 

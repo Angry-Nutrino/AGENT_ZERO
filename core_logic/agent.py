@@ -65,6 +65,44 @@ def _extract_resource_path(tool_input: str) -> str:
     return stripped
 
 
+_TASK_MARKER_RE = re.compile(r"\[\[\s*TASK\s*:\s*(COMPLETE|INCOMPLETE)\b[^\]]*\]\]", re.IGNORECASE)
+
+
+def _parse_completion(text: str):
+    """Brief 35 — extract + STRIP the [[TASK: COMPLETE|INCOMPLETE — reason]] marker from a
+    DELIBERATE final answer. Returns (clean_text, status, reason).
+
+    Marker is authoritative. If absent → default COMPLETE, with a conservative phrase-backstop
+    that flips to INCOMPLETE ONLY on process-failure language and NEVER when a confident negative
+    is present ("does not exist" / "no matches" are COMPLETE — flipping them would wrongly trigger
+    a retry and pressure fabrication, the rule-19 dual / Brief 35 trap 1).
+    """
+    if not text:
+        return text, "COMPLETE", ""
+    m = _TASK_MARKER_RE.search(text)
+    if m:
+        status = m.group(1).upper()
+        reason = ""
+        if status == "INCOMPLETE":
+            rm = re.search(r"INCOMPLETE\b[\s\-—:]*([^\]]+?)\s*\]\]", m.group(0), re.IGNORECASE)
+            reason = rm.group(1).strip() if rm else ""
+        clean = _TASK_MARKER_RE.sub("", text).strip()
+        return clean, status, reason
+    low = text.lower()
+    PROCESS_FAIL = (
+        "i was unable to", "i could not complete", "could not complete the", "i couldn't complete",
+        "no filesystem tools", "no tools were available", "the tool failed", "i failed to",
+        "unable to access", "couldn't access", "ran out of turns", "turn budget",
+    )
+    NEGATIVE_OK = (
+        "does not exist", "doesn't exist", "not found", "no matches", "no occurrence",
+        "there are no", "zero matches", "is absent", "does not appear", "doesn't appear",
+    )
+    if any(p in low for p in PROCESS_FAIL) and not any(n in low for n in NEGATIVE_OK):
+        return text, "INCOMPLETE", "inferred from failure language (no marker emitted)"
+    return text, "COMPLETE", ""
+
+
 def _turn_message(current_turn: int, max_turns: int, body: str) -> str:
     """
     Prepend [Turn N/M] to every Glint message so the model knows its budget.
@@ -494,6 +532,21 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 result.append({"tool": None, "query": None, "error": f"Item {i} is not a dict"})
                 continue
 
+            # Graceful remap of the LangChain ReAct format the model sometimes drifts into:
+            # {"action": "web_search", "action_input": {...} | "..."} → {"tool": ..., <named/query>}.
+            # We parse it (so the turn isn't wasted) but flag it so run_task intimates Clara that
+            # her format was off and she should use {"tool": ..., "query": ...} next. (2026-06-02)
+            reformatted = False
+            if "tool" not in item and isinstance(item.get("action"), str):
+                item = dict(item)  # copy — don't mutate the caller's parsed list
+                item["tool"] = item.pop("action")
+                ai = item.pop("action_input", None)
+                if isinstance(ai, dict):
+                    item.update(ai)        # merge named params (query / code / path / etc.)
+                elif ai is not None:
+                    item["query"] = str(ai)
+                reformatted = True
+
             tool = str(item.get("tool", "")).strip()
 
             if tool not in valid_tools:
@@ -542,7 +595,10 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 })
                 continue
 
-            result.append({"tool": tool, "query": query})
+            action = {"tool": tool, "query": query}
+            if reformatted:
+                action["_reformatted"] = True
+            result.append(action)
 
         return result
     
@@ -586,7 +642,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         zero_emb = torch.zeros(384, dtype=torch.float32)  # MiniLM output dim
         self.episodic_embeddings.append(zero_emb)
 
-    def memorize_episode(self, chat_snapshot: str):
+    def memorize_episode(self, chat_snapshot: str, source: str = "user"):
         """
         Dual-Layer Memory Processing:
         1. Summarizes the last session for the Episodic Stream (Always).
@@ -689,13 +745,18 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 self.db.update_response_style(style_update, note=f"Alkama requested {style_update} responses")
                 slog.info(f"   [Memory] Response style updated to: {style_update}")
 
-            # 4c. Active-discourse state (Topic 4, Phase 2) — salient subjects of this exchange
-            disc = data.get("discourse")
-            if isinstance(disc, list) and disc:
-                tags = [d for d in disc if isinstance(d, str)]
-                if tags:
-                    self.db.update_discourse_state(tags)
-                    slog.info(f"   [Memory] Discourse state updated: {tags}")
+            # 4c. Active-discourse state (Topic 4, Phase 2) — salient subjects of this exchange.
+            # USER turns ONLY: discourse_state anchors "what WE are discussing", so a system/
+            # autonomous task (health_check, memory_maintenance, a cancelled task) must not leak
+            # into it. (episodic/facts/self_learning above stay universal — Clara learns from
+            # autonomous work too; only discourse is conversation-scoped, like recent_exchanges.)
+            if source == "user":
+                disc = data.get("discourse")
+                if isinstance(disc, list) and disc:
+                    tags = [d for d in disc if isinstance(d, str)]
+                    if tags:
+                        self.db.update_discourse_state(tags)
+                        slog.info(f"   [Memory] Discourse state updated: {tags}")
 
             # 5. Save to The Vault (Long Term) - Only if facts exist
             facts = data.get("facts", [])
@@ -816,6 +877,19 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     )
                 except Exception as e:
                     slog.error(f"   Failed to save uploaded document: {e}")
+
+            # Brief 35 — retry context: this is a detached re-attempt of a task that soft-failed.
+            # Tell Clara what was already achieved + why it failed, so she CONTINUES from progress
+            # (idempotency — don't redo a write that succeeded) and adapts where she was blocked.
+            if task_context and task_context.get("is_retry"):
+                _reason = task_context.get("failure_reason", "") or "unknown"
+                _partial = (task_context.get("partial_answer", "") or "")[:600]
+                final_prompt = (
+                    f"{final_prompt}\n\n[SYSTEM: This is a RE-ATTEMPT of a task that did NOT complete on "
+                    f"the previous try. Why it failed: {_reason}. What was already achieved (do NOT redo "
+                    f"this — continue from it): {_partial or 'nothing usable yet'}. Take a different "
+                    f"approach where the last attempt was blocked, and finish the task.]"
+                )
 
             # 1. Get memory context (always — feeds Interpreter)
             q_emb = await self._encode(final_prompt, convert_to_tensor=True)
@@ -973,6 +1047,25 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 final_answer, deliberate_usage_list = await self.run_task(on_step_update=on_step_update, llm=llm, resource_callback=resource_callback, task_id=task_id)
             exec_ms = exec_timer.elapsed_ms()
 
+            # Brief 35 — task completion status (DELIBERATE only). Parse + STRIP the [[TASK: …]]
+            # marker so the user never sees it, and record the status on the task context so the
+            # orchestrator worker can decide whether to spawn a detached retry. FAST/CHAT have no
+            # marker and are always COMPLETE (a single tool / one conversational turn — nothing to retry).
+            # ALWAYS strip any [[TASK: …]] marker so it never leaks — incl. on a FAST→DELIBERATE
+            # escalation (the answer then comes from run_task and carries the marker even though
+            # mode is still "FAST"; escalation is detected by fast_usage being a list of turn usages).
+            # Honor the status for the RETRY decision ONLY when a ReAct loop actually ran; pure
+            # FAST (single tool) and CHAT (one turn) have nothing to retry → always COMPLETE.
+            final_answer, _mstatus, _mreason = _parse_completion(final_answer)
+            ran_react = (mode == "DELIBERATE") or (mode == "FAST" and isinstance(fast_usage, list))
+            completion_status = _mstatus if ran_react else "COMPLETE"
+            incomplete_reason = _mreason if ran_react else ""
+            _is_retry = bool(task_context.get("is_retry")) if task_context else False
+            will_retry = (completion_status == "INCOMPLETE" and not _is_retry)
+            if task_context is not None:
+                task_context["completion_status"] = completion_status
+                task_context["incomplete_reason"] = incomplete_reason
+
             # 6. Token aggregation
             token_usage = TokenUsage()
             if interp_usage:
@@ -1024,22 +1117,29 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     asyncio.to_thread(self.db.append_recent_exchange, query, final_answer)
                 )
 
-            # 6b. Memory consolidation
-            chat_snapshot = "\n".join([
-                f"{'User' if m['role'] == 'user' else 'Clara'}: {m['content']}"
-                for m in llm
-                if m['role'] != 'system'
-                and "[MEMORY_CONTEXT_BLOCK]" not in m['content']
-            ])
-            mem_task = asyncio.create_task(
-                asyncio.to_thread(self.memorize_episode, chat_snapshot)
-            )
-            def _on_memorize_done(t):
-                if not t.cancelled() and t.exception():
-                    slog.error(
-                        f"   [Memory] memorize_episode failed: {t.exception()}"
-                    )
-            mem_task.add_done_callback(_on_memorize_done)
+            # 6b. Memory consolidation — SKIP the first soft-failed attempt that will be retried.
+            # Don't canonize a failure the retry may resolve (a "I couldn't" episode that resurfaces
+            # becomes self-narrative ground truth — the exact Q15/Shobha class). The detached retry's
+            # TERMINAL outcome consolidates instead. recent_exchanges above still captured this turn
+            # (short-term coherence — she remembers she said she'd retry). Brief 35.
+            if not will_retry:
+                chat_snapshot = "\n".join([
+                    f"{'User' if m['role'] == 'user' else 'Clara'}: {m['content']}"
+                    for m in llm
+                    if m['role'] != 'system'
+                    and "[MEMORY_CONTEXT_BLOCK]" not in m['content']
+                ])
+                mem_task = asyncio.create_task(
+                    asyncio.to_thread(self.memorize_episode, chat_snapshot, source)
+                )
+                def _on_memorize_done(t):
+                    if not t.cancelled() and t.exception():
+                        slog.error(
+                            f"   [Memory] memorize_episode failed: {t.exception()}"
+                        )
+                mem_task.add_done_callback(_on_memorize_done)
+            else:
+                slog.info("   [Memory] Skipping consolidation — first INCOMPLETE attempt, retry pending (Brief 35).")
 
             return final_answer
 
@@ -1523,6 +1623,17 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         slog.info(f"   -> Glint: {glint[:120]}...")
                         slog.debug(f">> [Glint] {action['tool']}:\n{result}")
 
+                    # Format correction (non-fatal): the action was parsed from the LangChain
+                    # {"action","action_input"} format. It ran — but tell Clara to use the
+                    # canonical format next so she self-corrects instead of wasting turns. (2026-06-02)
+                    if any(a.get("_reformatted") for a in valid_actions):
+                        glints.append(
+                            "System: Your last Action used the {\"action\": ..., \"action_input\": ...} "
+                            "format. I parsed it this time, but going forward emit the canonical format: "
+                            "Action: [{\"tool\": \"tool_name\", \"query\": \"...\"}]."
+                        )
+                        slog.info("   [Loop] Reformatted LangChain-style Action; advised canonical format.")
+
                 # Feed all Glints back as a single combined message
                 combined_glints = "\n".join(glints)
                 llm.append(user(_turn_message(turn_count, max_turns, combined_glints)))
@@ -1533,7 +1644,10 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         # Fallback: exhausted all turns without a Final Answer.
         # Should be rare after final-turn wrap-up — model was told to conclude on last turn.
         slog.warning("[DELIBERATE] Turn budget exhausted without Final Answer.")
+        # Brief 35: the model never got to declare a marker — auto-tag INCOMPLETE so the
+        # orchestrator can spawn a retry (turn-exhaustion is the canonical retriable failure).
+        _exhausted = "\n[[TASK: INCOMPLETE — turn budget exhausted before completion]]"
         if last_response_text:
             slog.info(f">> [DELIBERATE] Final Answer (turn limit — last content):\n{last_response_text}")
-            return last_response_text, deliberate_usage_list
-        return "Task incomplete — turn limit reached.", deliberate_usage_list
+            return last_response_text + _exhausted, deliberate_usage_list
+        return "Task incomplete — turn limit reached." + _exhausted, deliberate_usage_list

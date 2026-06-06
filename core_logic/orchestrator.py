@@ -31,6 +31,7 @@ class Orchestrator:
         self._arbitration_engine = ArbitrationEngine()
         self._tracer = tracer
         self._broadcast_fn = None  # injected by api.py after startup — avoids circular import
+        self._send_message_fn = None  # injected by api.py — general WS message push (Brief 35 proactive delivery)
 
     def _trace(self, event: str, **fields) -> None:
         if self._tracer:
@@ -660,6 +661,22 @@ class Orchestrator:
                     task_context=ctx,
                 )
 
+                # Brief 35 — task-level persistence (user tasks only). A DELIBERATE task that
+                # soft-failed (status INCOMPLETE) gets ONE detached background retry: the live
+                # future resolves NOW with Clara's honest answer + a retry notice, and a fresh
+                # task re-attempts and delivers proactively when done. A retry's OWN terminal
+                # outcome (is_retry) is delivered proactively here — there is no live future.
+                _status = ctx.get("completion_status", "COMPLETE")
+                _is_retry = bool(ctx.get("is_retry"))
+                if _status == "INCOMPLETE" and not _is_retry:
+                    await self._spawn_detached_retry(task, ctx, ctx.get("incomplete_reason", ""), result)
+                    result = result.rstrip() + (
+                        "\n\n*(I couldn't finish this on the first pass — I'm taking another "
+                        "run at it now and will follow up.)*"
+                    )
+                elif _is_retry:
+                    await self._deliver_retry_result(task, ctx, result, _status)
+
             self._trace(
                 "worker_complete",
                 task_id=task.id[:8],
@@ -694,3 +711,80 @@ class Orchestrator:
             self._task_resources.pop(task.id, None)   # clean up Layer 3 ledger
             from .resource_ledger import resource_ledger as _rl
             _rl.release_task(task.id)                  # clean up read hashes + write locks
+
+    # ── Brief 35: task-level persistence (detached retry + proactive delivery) ──────────
+    async def _spawn_detached_retry(self, orig_task, orig_ctx: dict, reason: str, partial: str) -> None:
+        """Spawn a DETACHED (no-future) background retry of a soft-failed user task.
+
+        It runs through the normal pipeline (is_retry=True → process_request injects the failure
+        context so Clara continues from progress), and delivers its result proactively when done.
+        Capped at ONE retry: the spawned task carries is_retry=True, so if IT soft-fails again the
+        worker will NOT spawn another (no retry chains)."""
+        retry_ctx = {
+            "text": orig_ctx.get("text", orig_task.goal),
+            "image_data": orig_ctx.get("image_data"),
+            "file_data": orig_ctx.get("file_data"),
+            "message_id": orig_ctx.get("message_id", ""),
+            "is_retry": True,
+            "retry_of": orig_task.id,
+            "failure_reason": reason,
+            "partial_answer": partial,
+        }
+        retry_task = self._task_graph.add_task(
+            goal=orig_task.goal,
+            priority=orig_task.priority,
+            reversibility=orig_task.reversibility,
+            dependencies=[],
+            context=retry_ctx,
+            origin="user",
+        )
+        retry_task.context["task_id"] = retry_task.id   # no response_future — detached
+        await self._broadcast_task("pending", retry_task)
+        slog.info(f"[Orchestrator] Brief 35: detached retry {retry_task.id[:8]} of "
+                  f"{orig_task.id[:8]} spawned — reason: {reason[:60]}")
+        try:
+            self._agent.log_system_episode(
+                f"[TASK SOFT-RETRY] '{orig_task.goal[:60]}' soft-failed ({reason[:50]}); "
+                f"detached retry {retry_task.id[:8]} spawned."
+            )
+        except Exception:
+            pass
+
+    async def _deliver_retry_result(self, task, ctx: dict, result: str, status: str) -> None:
+        """Proactively deliver a detached retry's terminal outcome — the live future is long gone.
+
+        Never lost: process_request already consolidated this outcome into episodic memory (the
+        retry is the TERMINAL attempt, so will_retry was False → it memorized normally). Here we
+        PUSH it to Alkama's channels, re-anchored to the original request: a fresh WS message
+        (best-effort) + Telegram (reliable, purpose-built for proactive outbound)."""
+        import uuid as _uuid
+        goal = ctx.get("text", task.goal)
+        lead = ("I went back and finished it:" if status == "COMPLETE"
+                else "I retried but still couldn't complete it:")
+        msg = f"Following up on your earlier request — \"{goal[:120]}\". {lead}\n\n{result}"
+
+        # WS push — a fresh assistant bubble (new message_id so it's distinct from the resolved one)
+        try:
+            if getattr(self, "_send_message_fn", None):
+                await self._send_message_fn({
+                    "type": "final_answer",
+                    "content": msg,
+                    "message_id": f"retry-{_uuid.uuid4().hex[:8]}",
+                })
+        except Exception as e:
+            slog.warning(f"   [Brief35] WS proactive push failed: {e}")
+
+        # Telegram — reliable fallback / primary if the web UI is closed; no-ops if unconfigured.
+        try:
+            from .telegram_bot import notifier
+            await notifier.send(msg)
+        except Exception as e:
+            slog.warning(f"   [Brief35] Telegram proactive push failed: {e}")
+
+        slog.info(f"[Orchestrator] Brief 35: delivered retry outcome for '{task.goal[:50]}' (status {status}).")
+        try:
+            self._agent.log_system_episode(
+                f"[TASK SOFT-RETRY] delivered retry outcome for '{task.goal[:50]}' — status {status}."
+            )
+        except Exception:
+            pass

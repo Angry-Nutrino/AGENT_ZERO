@@ -65,6 +65,17 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
 ("pass" | "fail" | "pending"), and an optional `verification` block (see below).
 **Trigger:** Alkama says "same drill" / "analyze the report" after a run — manual only, never automatic.
 
+**Coherence Drill (Phase 4) — wired into the MORNING run only (2026-06-05).** After the morning
+scorecard/report is written and BEFORE the backend is stopped, `test_harness.py` Phase 3 runs
+`coherence_drill.run_drill()` and APPENDS a "## Coherence Drill (multi-turn — Phase 4)" section to the
+morning report. This is a SEPARATE axis from the single-turn scorecard: scripted multi-turn dialogues
+(`tests/coherence_dialogues.json`) measure conversational memory — entity-recall, didn't-need-to-ask
+(infer when the referent is clear), and appropriately-asked (the ambiguity CONTROLS — ask when genuinely
+ambiguous). Scorer + self-test in `tests/coherence_drill.py` / `tests/test_coherence_drill.py`; docs in
+`tests/COHERENCE_DRILL.md`. Morning only and once/day by design (coherence is a slow-moving capability
+metric, not a per-change regression guard like the L1-L5 scorecard — twice-daily would just double cost).
+Evening runs the L1-L5 scorecard alone. Wrapped so a coherence hiccup never fails the main harness.
+
 **The drill, step by step:**
 1. **Read the report** `reports/YYYY-MM-DD-{session}.md`. It now contains a **Verification Scorecard**
    (Layer 1, `tests/verification.py`, Brief 31) — deterministic PASS / FAIL / UNVERIFIABLE per question,
@@ -119,7 +130,7 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
   source, key_facts terms appear in a correct answer.
 
 **Verifier self-test (the meta-guardrail, Brief 31 hardening):** the scorecard engine itself is regression-tested
-by `tests/test_verification.py` (fixture-based, 13 cases — `python tests/test_verification.py`, exit 1 on any
+by `tests/test_verification.py` (fixture-based, 14 cases — `python tests/test_verification.py`, exit 1 on any
 deviation; also a pytest `test_self_test`). **It runs automatically every harness run** as a Phase 1.4 pre-flight:
 if the engine fails its own fixtures, the report's scorecard section is stamped "⚠️ VERIFIER SELF-TEST FAILED —
 scorecard suspect this run" so a buggy verifier is surfaced loudly instead of silently false-failing Clara. No
@@ -287,8 +298,10 @@ actually said, not a lossy summary:
   consolidation so a parse-failure never costs a turn. `get_smart_context` injects the last 6 as
   `[RECENT CONVERSATION — verbatim]`.
 - **Phase 2 — Active-discourse state (`discourse_state`).** `memorize_episode` consolidation extracts a
-  `discourse` field (1-5 concrete subject tags); `crud.update_discourse_state()` keeps a rolling, deduped,
-  most-recent-first, **cap-8** list (stale topics fall off as the conversation moves). Injected as
+  `discourse` field (1-5 concrete subject tags) — **user turns only** (`memorize_episode(..., source)` gates the
+  discourse update to `source=="user"` so system/autonomous tasks don't pollute "what WE are discussing";
+  episodic/facts/self-learning still extract from all sources). `crud.update_discourse_state()` keeps a rolling,
+  deduped, most-recent-first, **cap-8** list (stale topics fall off as the conversation moves). Injected as
   `[CURRENTLY DISCUSSING: …]`. PERSONA has a paired directive: *resolve implicit references from the recent
   window + these tags; infer when the referent is clear, ask only when genuinely ambiguous* (preserves good
   pushback, doesn't train it away). Phases 3 (stronger semantic retrieval) + 4 (multi-turn Coherence Drill) are
@@ -440,6 +453,17 @@ Debounce is per-path — two different files changed within 5s both trigger inde
 rebuild in background thread + hot-reload of the in-memory FAISS engine.
 
 Watched paths: `core_logic/`, `CLAUDE.md`, `briefs/ROADMAP.md`.
+
+`IGNORED_PATTERNS` (in `environment.py`) filters high-churn noise before it ever reaches the queue —
+`__pycache__`, `.pyc`, `tasks.db*`, `.log`, `session_`, `.faiss`/`.pkl`, atomic-write temps, editor
+swaps, **and `node_modules` / `.git`**. The `node_modules` entry is load-bearing: on 2026-06-04 an
+`npm install` under `core_logic/interface/` emitted **12,640** `file_change` events in a single harness
+run, each spawning an autonomous task, saturating the orchestrator until user requests timed out at 180s.
+Anything matching a pattern (substring) is dropped by `_should_ignore`. **Root cause fixed (2026-06-05):**
+the frontend had been living *inside* `core_logic/` (`core_logic/interface/`), which is what put `node_modules`
+— and the interface source files — in the watched tree (they kept generating `[AUTONOMOUS]` file_change
+episodes on every run). It was **moved back to repo-root `interface/`**, removing the frontend from the
+watched tree entirely. The `node_modules`/`.git` ignore patterns remain as defense-in-depth.
 
 ### SIMPLE_TRIGGERS
 Known lightweight system tasks bypass the Interpreter and go directly to `run_background_task`.
@@ -932,4 +956,4 @@ auto-rebuild if the file lands in a watched path).
 - Architecture PNG (`Clara_Architecture_Fixed_And_Updated.png`) — outdated, does not reflect current system
 
 ### Branch
-All work on `features/stream-and-functionality`. Never merge to main until full system validated.
+All work on `autonomous`. (`features/stream-and-functionality` was the old dev branch — closed long ago; do not reference it.) Never merge to `main` until the full system is validated.

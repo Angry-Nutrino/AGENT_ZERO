@@ -217,6 +217,34 @@ NATIVE_TOOLS = frozenset({
 })
 
 
+def _number_read_file_lines(raw: str, offset) -> str:
+    """Stamp correct ABSOLUTE line numbers onto Desktop Commander read_file output.
+
+    DC's read_file returns '[Reading N lines from line M ...]' + a blank line + raw
+    content with NO per-line numbers, AND its offset is 0-indexed while the header
+    prints the raw offset — so the header is off by one and the model then derives line
+    numbers from a wrong base and drifts (the long-standing coordinate-drift bug:
+    369->368, 377->378, etc.). We re-stamp each content line as 'ABS: <line>' where
+    ABS = offset + i (i 1-indexed → first shown line is offset+1, matching the file's
+    1-indexed lines, verified: offset 15 shows line 16). Only touches DC '[Reading' output;
+    must be applied to the RETURNED value AFTER resource_ledger.record_read (which needs
+    the raw bytes so its hash matches check_write's hash of the on-disk file). (2026-06-02)
+    """
+    try:
+        off = int(offset) if offset is not None else 0
+    except (TypeError, ValueError):
+        off = 0
+    parts = raw.split("\n")
+    if not parts or not parts[0].lstrip().startswith("[Reading"):
+        return raw
+    header, body = parts[0], parts[1:]
+    lead = ""
+    if body and body[0].strip() == "":
+        lead, body = "\n", body[1:]
+    numbered = "\n".join(f"{off + i + 1}: {ln}" for i, ln in enumerate(body))
+    return f"{header}{lead}\n{numbered}" if numbered else raw
+
+
 async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id: str = None) -> str:
     """
     Execute a tool called from the FAST path.
@@ -296,6 +324,9 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
                         resource_ledger.record_read(task_id, path, result_str)
 
                 _update_filesystem_map(tool_name, args, result_str)
+                # Coordinate-drift fix: stamp absolute line numbers (after ledger/raw use).
+                if tool_name == "read_file" and not result_str.lower().startswith(("error:", "tool error:")):
+                    result_str = _number_read_file_lines(result_str, args.get("offset", 0))
                 return result_str
             elif server is None:
                 return f"Error: Tool '{tool_name}' not found in registry."
@@ -418,6 +449,9 @@ async def execute_deliberate(
                         resource_ledger.record_read(task_id, path, result_str)
 
                 _update_filesystem_map(tool_name, mcp_args, result_str)
+                # Coordinate-drift fix: stamp absolute line numbers (after ledger/raw use).
+                if tool_name == "read_file" and not result_str.lower().startswith(("error:", "tool error:")):
+                    result_str = _number_read_file_lines(result_str, mcp_args.get("offset", 0))
                 return result_str
             elif server is None:
                 return (

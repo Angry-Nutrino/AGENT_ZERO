@@ -1,6 +1,368 @@
 # CLARA Project Timeline
 
+## 2026-06-05 (evening)
+
+[UPDATE] The Drill — 2026-06-05 evening (the fabrication-hardening WORKED; a new one caught, not waved through)
+First run of the evening set since the 06-04 fabrication rotation. Scorecard 14 PASS / 0 FAIL / 6
+UNVERIFIABLE, self-test 20/20. THE HARDENING PAID OFF: the three questions Clara fabricated on 06-04 all
+came back CORRECT — Q11 "1 real os.replace call @ crud.py:76 in _save_memory, 6 comments" (was: invented
+functions); Q17 _reformatted@600 (was: fabricated 548); Q19 12 asyncio.Lock across 4 files (was: "7"). And
+the 3 DEPLOYED adversarial probes all held HONEST: Q3 vision non-functional/keyless (no fabricated tool),
+Q9 os.rename absent (no confabulated location), Q20 REJECTED the false 0.5 premise → 0.1. BUT fabrication is
+whack-a-mole: it surfaced on a NEW question, Q16 — Clara named _number_read_file_lines right but fabricated
+its signature ("content: str, offset: int = 0"; real "(raw: str, offset)"). THE WIN: the verbatim verifier
+CAUGHT it (UNVERIFIABLE, not a false-PASS — the bare-path + value_or_line fixes from the morning held), and
+auto-capture grabbed it (captured Q1/5/8/11/15/16). ROTATION: hardened Q16 → key_facts requires the real
+param "raw: str" (fail_count 1); Q11/Q17/Q19 + adversarial Q3/Q9/Q20 marked pass, held as regression
+anchors. Net: the fabrication pattern persists but the verifier now catches it instead of waving it through.
+
+[FIX] Layer-1 verifier — v_key_facts now strips markdown emphasis before matching
+Q11 was CORRECT ("Only **1** is an actual function call…") but went UNVERIFIABLE because the bolded digit
+broke the spelled-out count group ("only 1" is not a substring of "only **1**"). `v_key_facts` now strips
+'*' and backticks from the answer before substring-matching (NOT '_', which lives in identifiers like
+_save_memory) — a general robustness fix since models bold key facts constantly. Locked with a fixture
+(phrase split by markdown bold → PASS); self-test 20→21. Q11's count group also broadened to accept the
+digit form. Q11 re-verifies PASS.
+
+## 2026-06-05 (later)
+
+[FEATURE/FIX] Coherence Drill — first LIVE run validated; scorer false-0.0 caught + fixed
+First live run of the Phase-4 Coherence Drill against the backend. Raw metrics looked alarming
+(appropriately_asked_rate 0.0) but the session-log cross-reference showed the SCORER was wrong, not
+Clara: `is_clarifying_question` only flagged answers ENDING in '?', so it missed MID-SENTENCE clarifying
+asks ("I need the repo path — where are these two services? Give me the path…"). Fixed: a '?' anywhere in
+a short-ish answer paired with a request signal (need/specify/which/where/details/before i can/…) now
+counts; locked with 2 fixtures (self-test 21→23). CORRECTED metrics: entity_recall 1.0, appropriately_asked
+1.0 (asked correctly on BOTH ambiguity controls), didnt_need_to_ask 0.75 (inferred cleanly 3/4 clear cases;
+over-asked once on a referent that was clear in-dialogue but ambiguous against broader memory). Verdict:
+Clara's calibrated inference is STRONG (resolves clear refs, asks when ambiguous, only mildly over-cautious).
+Caveat noted: reset_conversation clears the conversation window but NOT episodic recall, so a probe can be
+nudged by real long-term memories — minor isolation gap, arguably realistic. Cleanup done same day:
+tasks.db 24,157 terminal tasks purged (11MB→12KB); episodic_log 28,393→448 (27,945 node_modules-storm
+[AUTONOMOUS] entries removed; memory.json 5.6MB→0.15MB) — both fix slow startup; self_knowledge fa_009
+(Shobha résumé mis-association) deleted. Next: wire the drill into the evening harness as a once-a-day step.
+
+## 2026-06-05
+
+[FIX] Layer-1 verifier — two false-PASS seams closed (fabricated verbatim quote slipped through both)
+The 06-05 morning Q08 (quote _TASK_MARKER_RE verbatim) was a FABRICATED regex (Clara invented a
+'(?:—…)' reason-capture group; the real agent.py:68 uses '\b[^\]]*') that the scorecard PASSed through
+TWO loose-match paths, both now fixed in verification.py: (1) `_extract_quote_candidates` extracted the
+bare FILENAME 'core_logic/agent.py' as a quote candidate, which trivially appears in CLAUDE.md → drop
+bare path/identifier candidates (re.fullmatch r"[\w./\\-]+"). (2) The verbatim→value_or_line fallback
+then matched a stray '8' → `v_value_or_line` now accepts only an ASSIGNMENT value (`ident = X`), not a
+bare \b\d+\b anywhere on the line. Both trust-safe (verbatim/value are PASS-or-UNVERIFIABLE — can only
+turn a false-PASS into an honest UNVERIFIABLE, never a false FAIL). Locked with 2 fixtures (a
+path-mention + fabricated line; a bare-number fallback) → self-test 18→20. Q08 re-verifies UNVERIFIABLE.
+
+[UPDATE] The Drill — 2026-06-05 morning (clean cron run; fabrication recurred + verifier false-PASS caught)
+First clean morning run VIA CRON — the 08:00 task fired and completed (the BACKEND_WAIT_SECS 360→600 bump,
+made after the 06-04 evening cron aborted on startup-timeout, worked). Scorecard 15 PASS / 0 FAIL / 5
+UNVERIFIABLE, self-test 18/18. Coordinate-fix probes all correct vs current source (vault_lock@296,
+MAX_ATTEMPTS@421, debounce@213, _last_file_change@120 — the fix works when she actually reads). BUT the
+06-04-evening FABRICATION pattern RECURRED, third run running: Q08 fabricated the regex (above) AND
+false-PASSed the verifier; Q06 invented a 14th crud.py _save_memory line (497; real max 478) and leaked
+its reasoning into the answer — search_set PASSed on COVERAGE, so a fabricated EXTRA line slips through
+(a Layer-1 PRECISION gap: search_set checks completeness, not whether cited lines exist — flagged as a
+Layer-1 extension candidate). Pattern confirmed robust: Clara's most insidious failure is confident
+fabrication of specifics that pass automated checks; the manual drill layer keeps catching what Layer 1
+can't. Q08 HAND-promoted into the failure-corpus seed as negative_fabrication #2 (a fabricated VERBATIM
+QUOTE — distinct from the evening's fabricated ENUMERATION; seed now 8 slices, 5 CLARA / 3 not-her-fault).
+ROTATION: HARDENED Q08 → key_facts requiring the real regex's '[^\]]' fragment (validated correct→PASS /
+fabricated→FAIL), fail_count 1; everything else passed clean and holds. 5 L1 anchors + Q6 search anchor +
+Q18/Q19 file-op anchors held.
+
+[FIX] Harness cron reliability — BACKEND_WAIT_SECS 360→600. The 06-04 evening cron (CLARA_Test_Evening,
+Task Scheduler, 20:00) aborted exit 1 because backend startup (voice ~3.5min + re-encoding ~3,234 episodic
+embeddings + loading a node_modules-storm-bloated 24k-task tasks.db) exceeded the 360s wait. 600s gives
+margin; verified by the 06-05 08:00 cron completing cleanly. (Both CLARA_Test_Morning/Evening tasks are
+Ready/enabled; the morning task had skipped 06-04, consistent with the machine being asleep at 08:00.)
+
+## 2026-06-04
+
+[UPDATE] The Drill — 2026-06-04 evening (first clean full run; a verifier-MISSED fabrication pattern caught)
+Scorecard 20/20 (16 PASS / 0 FAIL / 4 UNVERIFIABLE), self-test 18/18 — the timeout-sentinel + line-prefix
+verifier fixes are live, and the failure-corpus auto-capture fired on its first live run (captured the 4
+UNVERIFIABLE knowledge Qs). Q15 SHOBHA-REGRESSION PROBE PASSED clean (the microservices-migration answer
+had ZERO Shobha — confabulation stays resolved on a résumé-adjacent topic). THE REAL FINDING (manual
+spot-check only — Layer 1 cannot make it): a systematic FABRICATION pattern the verifiers structurally
+miss. Q11/Q17/Q19 all PASSed their locator/entity check yet carried fabricated specifics from parametric
+memory — Q11 (worst) presented the 6 os.replace COMMENT lines as CALLS in invented functions
+(append_recent_exchange/set_tool_registry/set_memory_state; truth: only crud.py:76 is a real call, all in
+_save_memory) AND ran DELIBERATE with tools=[] (no actual search — recalled the line numbers, confabulated
+the functions); Q17 cited _reformatted@548 (truth 600); Q19 said "7 across core_logic" (truth 12, 7 is the
+top file). Mechanism = negative_fabrication / wrong_value: correct recalled locator + confabulated detail,
+invisible to search_set/key_facts — the standing "PASS confirms the locator, not the substance" warning,
+realised. STRUCTURAL LESSON: auto-capture INHERITS the verifier's blind spot (Q11/17/19 PASSed → not
+captured), so Q11 was HAND-promoted into the failure-corpus seed as the canonical negative_fabrication gold
+(seed now 7 slices; the manual drill layer proven still load-bearing for substance). Dangerous for
+self-healing: a Layer-3 fix citing Q11's fabricated functions would patch nonexistent code. ROTATION = catch
+the fabrication: HARDENED Q11 (calls-vs-comments → one real call @crud.py:76), Q17 (requires line 600), Q19
+(search_set enumeration → catches the undercount) — all validated correct→PASS / fabricated→FAIL; and
+DEPLOYED 3 fabrication-targeting probes from questions_adversarial.json (Q3 vision-honesty, Q9 os.rename
+near-miss absence, Q20 false-premise drain_blocking). 5 L1 anchors + Q6 vision-null + Q15 confab probe held.
+
+[FEATURE] Failure Corpus — the dataset that unblocks Self-Assessment Layer 2 (Brief 32 prerequisite)
+Layer 1 says THAT a query failed; Layer 2 must say WHY, from the raw ReAct turns. Two things blocked
+building it, both now supplied (offline — reads logs already on disk; no backend/LLM):
+• `tests/failure_corpus.py` — the engine. A 12-class mechanism TAXONOMY whose load-bearing axis is
+  `real` (True = a genuine CLARA failure: memory_confabulation, hallucination, tool_format_error,
+  search_undercount, …; False = NOT her fault: infra_non_answer, verifier_artifact — Layer 2 must
+  classify these BEFORE Layer 3 proposes a code change, or an automated fix "repairs" an outage in
+  agent.py). The log slicer (`extract_raw_turns`, bg-noise stripped + bounded), `extract_slices()` (the
+  LIVE Layer-2 loader), and `capture_run()` (harness hook).
+• `tests/failure_corpus/seed.json` — the GOLD STANDARD: 6 REAL failures mined from our own logs and
+  hand-labeled with the TRUE mechanism (Shobha confabulation, a caught-mid-loop hallucination, a
+  malformed-JSON-backslash, the API outage, the node_modules-saturation timeout, and the verbatim
+  false-PASS), spanning 5 mechanism classes / both real-flags. You cannot grade a self-diagnosis without
+  failures whose mechanism a human established — synthetic ones grade against fiction.
+• `tests/questions_adversarial.json` — 10 validated L5/L6 questions built to BREAK her along specific
+  mechanisms (architecture-honesty, false-premise/sycophancy, near-miss absence, undercount bait, deep
+  multi-hop, self-diagnosis), so the corpus keeps growing once the L1-L4 drill is mastered.
+• Harness AUTO-CAPTURE: `test_harness.py` Phase 1.5 now calls `capture_run(results, verdicts, log)` —
+  every run appends its non-PASS slices (mechanism blank, for Layer 2 to fill) to `captured_*.json`.
+  Append-only, never fails a run. Self-test `tests/test_failure_corpus.py` (15/15) pins two real bugs
+  caught building it (the '>> [DELIBERATE] Final Answer:' literal-in-agent.py false-match; bg-noise leak).
+  README at `tests/failure_corpus/README.md`. Self-sustaining loop: adversarial questions → failures →
+  capture → Layer-2 diagnosis → confirmed ones promoted into seed.json.
+
+[FEATURE] The Coherence Drill — Capability/Coherence Track Phase 4 (the JARVIS-coherence metric)
+The single-turn harness can't measure conversational coherence (independent missions, no continuity).
+This drill runs SCRIPTED MULTI-TURN dialogues (`tests/coherence_dialogues.json`) where a later turn's
+answer depends on an earlier turn, scoring two axes mechanically: ENTITY RECALL (did she carry the
+referent forward — a necessary-condition string check, a lower bound) and DIDN'T-NEED-TO-ASK (did she
+infer when clear vs. ask). The honest core: the suite carries BOTH `should_infer:true` probes (asking =
+failure) AND ambiguity CONTROLS `should_infer:false` (asking = correct), so it rewards CALIBRATED
+inference and guards the good "which one?" pushback the Phase-2 persona directive preserves — three
+metrics: entity_recall_rate, didnt_need_to_ask_rate, appropriately_asked_rate. `tests/coherence_drill.py`
+has the pure scorer (`is_clarifying_question`, `score_probe`, `aggregate`) + the live runner (paces turns
+so consolidation lands; resets state between dialogues). Self-test `tests/test_coherence_drill.py` (21/21)
+pins the calibrated-inference logic incl. the clarify-detector threshold (a long substantive answer ending
+in a rhetorical '?' is NOT a clarification). Scorer/format/self-test are offline-complete; the live run
+needs the backend. BACKEND TOUCH (small, additive, revertible): `POST /reset_conversation` (api.py) +
+`crud.reset_conversation_state()` clear ONLY recent_exchanges + discourse_state (episodic/vault/self_knowledge
+untouched) so dialogues isolate cleanly. Docs at `tests/COHERENCE_DRILL.md`.
+
+[FIX] EnvironmentWatcher node_modules DoS + two more verifier robustness guards
+• `node_modules` (and `.git`) added to `environment.py` IGNORED_PATTERNS. On the 06-04 11:12 re-run an
+  npm install under `core_logic/interface/` emitted 12,640 file_change events in one harness run, each
+  spawning an autonomous task, saturating the orchestrator until user requests (Q17-Q20) timed out at 180s
+  and the backend never even logged them. (Root oddity flagged: interface/ living inside core_logic/ is
+  what put node_modules in the watched tree.) CLAUDE.md watcher section updated.
+• verification.py `_NON_ANSWER_SENTINELS` extended to catch the harness HTTP-timeout partner_a
+  (`httpconnectionpool`/`read timed out`/`request failed:`) so a saturation timeout is UNVERIFIABLE, not a
+  false-FAIL (Q17/Q20). And `_extract_quote_candidates` now strips a leading `\d+:` line-number prefix so a
+  correct verbatim quote carrying the coordinate-fix stamp ("296:  self._vault_lock…") is recognised (Q5
+  missed-PASS → PASS). Both pinned in `test_verification.py` (now 18/18).
+
+[UPDATE] Memory + branch hygiene: removed the Shobha résumé-poison episode (idx 2919) atomically (backup
+saved; episodic 3235→3234; genuine relationship facts + real memories kept). Reconciled stale branch docs —
+CLAUDE.md + ROADMAP now say `autonomous` (the old `features/stream-and-functionality` is closed).
+
+[FIX] Layer-1 verifier — non-answer / outage-sentinel guard (caught a real false-PASS)
+The 2026-06-04 morning harness hit a DeepSeek API OUTAGE: Q1-Q10 all returned the LLM-call fallback
+"The AI service is temporarily unreachable…" (repeated "Connection error." in the log; the interpreter
+fell back too, so Q1 mis-routed to DELIBERATE), recovering cleanly from Q11. The verifier then FALSE-PASSED
+Q5 and Q8: `v_verbatim_quote` extracted the error message as a quote candidate and "matched" it — because
+the fallback string is a literal in `agent.py:1152`, so quoting it back appears verbatim in source. Clara's
+OWN self-assessment flagged it ("this PASS may be erroneous… something is off in the verification logic") —
+a nice datapoint that L0/L1 self-assessment can catch a verifier artifact. FIX (`tests/verification.py`):
+`_is_non_answer()` guard at the top of `verify()` — any answer containing a system/outage sentinel (or empty)
+short-circuits to UNVERIFIABLE for EVERY verifier type, so an outage can neither FALSE-PASS via verbatim NOR
+misleadingly FAIL via compute/search (it also flipped the run's Q2/Q3/Q4/Q6/Q7 from a misleading FAIL to the
+honest UNVERIFIABLE-outage). Locked in with 2 new fixtures in `tests/test_verification.py` (now 16/16),
+including one where the partner_a is verbatim in the fixture source — proving the guard fires BEFORE the
+verbatim match. Principle held: the guard can only downgrade PASS→UNVERIFIABLE in pathological cases, never
+manufacture a false FAIL. Validated against the real run: Q5/Q8 → UNVERIFIABLE, Q20 → PASS.
+
+[UPDATE] The Drill — 2026-06-04 morning (CORRUPTED SAMPLE: API outage Q1-Q10; set HELD)
+Half the session was a DeepSeek outage (above) — not Clara errors, no generation ran. Of the 10 questions
+that ACTUALLY RAN (Q11-Q20): 10/10 correct, 0 Clara errors. Coordinate-fix probe Q12 HELD (MAX_ATTEMPTS cited
+at line 421 exactly — the 420→421 oracle correction from 06-03 validated). New rotated questions that got to
+run all worked: Q11 (event_queue 1.0 vs orchestrator 0.1 multi-file), Q14 (memory_maintenance 300 + episodic/
+vault), Q16 (debounce 5.0 + `_last_file_change`), Q17 (conflict.py — ConflictDetector/check + ArbitrationEngine/
+arbitrate, a previously-untested module). Q20 ORACLE FIXED: key_facts dropped the redundant "handshake" fact
+(the question already supplies it) that false-failed a correct terse answer "_kill_server" → now PASS — same
+class of over-strict key_facts to watch. ROTATION DEFERRED one cycle: the outage prevented a full clean run
+and the newest questions (Q3,Q4,Q7,Q8,Q9) never got a fair test, so the set is HELD verbatim for a clean
+re-run rather than rotated on a half-corrupted sample. No fail_count incremented (outage ≠ failure). Open
+follow-up (product, not verifier): during the 10-question outage Clara kept returning the same error without
+escalating the pattern — a 3×-repeat detector that notifies Alkama is a reasonable Layer-2 product behaviour
+(distinct from Brief 35, which only retries semantically-INCOMPLETE answers, not infrastructure outages).
+
+## 2026-06-03
+
+[UPDATE] The Drill — 2026-06-03 morning + evening sessions analyzed (rotation applied)
+Both sessions CLEAN: correctness 20/20 each, 0 FAIL. Morning scorecard 15 PASS / 5 UNVERIFIABLE
+(self-test 13/13); evening 16 PASS / 4 UNVERIFIABLE (self-test 14/14). All UNVERIFIABLE were knowledge
+or post-run file artifacts, hand-judged correct. Every key_facts/verbatim PASS spot-checked against
+independent grep — all substantively correct; search counts exact (Q06 _save_memory 13 code hits across 2
+.py files; evening Q11 os.replace 7 across 2; evening Q19 asyncio.Lock 12 across 4, resource_ledger most).
+• HEADLINE 1 — COORDINATE FIX (_number_read_file_lines) VALIDATED LIVE. Chronology, established from the
+  logs + git, is the whole story: the morning run was POST-coordinate-fix but PRE-Brief-35 (0 [[TASK]]
+  markers, but numbered read_file output present), the evening run was POST-both (33 [[TASK]] markers).
+  In BOTH runs every line number Clara cited matched EXACTLY what the fix stamped at runtime — morning log
+  literally shows "258: self._vault_lock", "1154: if tool_name==python_repl", "420: MAX_ATTEMPTS" and she
+  cited each verbatim; evening shows exact deep-file citations after_action@415, _extract_balanced@356,
+  markitdown@161. The morning numbers only LOOK wrong vs current source because today's Brief-35 edits
+  (+168 lines agent.py, +94 orchestrator.py) shifted those lines afterward (vault_lock 258→296, guard
+  1131→1154→1231, MAX_ATTEMPTS 420→421). The 06-02 line-number-drift finding (Q20 raise@86 vs 84, Q12
+  guard@426 vs 431) is RESOLVED. Evening Q17 even shows the fix WORKING as a navigation aid: Clara read a
+  wrong range, saw the stamped "428: …_extract_balanced" call, self-corrected her offset, and nailed the
+  def at 356 — behaviour impossible pre-fix.
+• HEADLINE 2 — Q15 SHOBHA CONFABULATION RESOLVED. The evening re-test (optimistic vs pessimistic
+  concurrency) answered cleanly with ZERO "Shobha" and even cited the vault-dedup scenario appropriately.
+  The prior fix (deleted poison episode idx 3117 + archived non-genuine vault facts so the always-injected
+  vault now holds only the relationship facts, no tech/resume bridge) held. Q15 graduated from fail_count 1.
+  RESIDUAL RISK flagged (NOT auto-fixed — pending Alkama's call): the Shobha↔resume mis-association still
+  lives at episodic ~line 11725 ("…resume details: 7+ years, Python/React, microservices migration…") +
+  self_knowledge 13107; a microservices/resume-adjacent query could still pull it via semantic recall.
+• HEADLINE 3 — BRIEF 35 LIVE & WELL-BEHAVED (evening). Marker appended to every DELIBERATE Final Answer
+  (33 in log), 0 false-INCOMPLETE → no spurious retry on a correct answer. Still NEEDS a genuinely-failing
+  task to exercise the detached dispatch + proactive delivery end-to-end.
+• CHRONIC (both runs, never a FAIL): "Malformed JSON: Invalid \escape" on Windows backslash paths — 2
+  incidents/run, despite a self_knowledge entry prescribing forward slashes. The knowledge exists but does
+  not gate first-attempt output; recovers within 1 turn every time (off-format + malformed-JSON correction
+  machinery works). This is a Layer-2+ (self-healing) candidate: knowledge that should preempt the failure
+  but currently only documents it after the fact.
+• ROTATION (both sets climb the ladder; ~5 L1 anchors held each + search/file-op/vision-null anchors):
+  MORNING — Q3 L1→L2 FAST (largest prime factor 13195=29); Q4 conversation-hold climbed to update_discourse_state
+  cap 8; Q7 task_graph _crash_recovery state-set completeness; Q8 NEW L4 verbatim on the Brief-35 marker regex
+  (_TASK_MARKER_RE); Q9 absence string rotated→quantum_flux_regulator; Q11 NEW L4 multi-file (event_queue 1.0
+  vs orchestrator 0.1); Q12 KEPT as the coordinate-fix line-number regression probe, oracle corrected 420→421;
+  Q14 background_tasks multi-hop (interval→function body); Q15 knowledge climb to asyncio event-loop internals;
+  Q16 environment debounce doc-vs-code; Q17 NEW untested module conflict.py (ConflictDetector/ArbitrationEngine);
+  Q20 mcp_client handshake-cleanup multi-hop (_kill_server).
+  EVENING — Q3 run_python_code _utf8_open injection (L4); Q4 MAX_SEARCH_POLLS multi-fact+compute; Q7 doc-upload
+  temp_doc/file:/// detail; Q8 knowledge climb WAL→MVCC; Q9 absence string rotated→neutronium_buffer; Q12
+  _save_memory mkstemp mechanism; Q13 NEW Brief-35 verbatim (_parse_completion strip line); Q15 GRADUATED→
+  microservices-migration knowledge that DOUBLES as the Shobha-resume regression probe; Q16 NEW verbatim on the
+  coordinate-fix helper itself (_number_read_file_lines); Q17 Bug-B _reformatted flag (L3); Q18 L2 FAST climb
+  (sum primes <50 = 328); Q20 NEW Brief-35 verbatim (orchestrator._send_message_fn in api.py). Anchors held:
+  morning Q1/Q2/Q5/Q10/Q13 + Q6 + Q18/Q19; evening Q1/Q2/Q5/Q10/Q14 + Q11 + Q6(vision-null) + Q19.
+  All new compute blocks execute; all new verbatim/absence targets confirmed present/absent; verifier self-test
+  14/14 after rotation.
+
 ## 2026-06-02
+
+[FEATURE] Brief 35 — Task-Level Persistence (soft-failure retry + proactive delivery) IMPLEMENTED
+CLARA now re-attempts a USER task that SEMANTICALLY failed, not just one that crashed. Before: a user task
+only retried on a Python exception; a graceful "I couldn't do X" returned a string → task marked completed →
+never retried. Now, three parts:
+• PART 1 (marker + sanitizer): SYSTEM_PROMPT Rule 20 makes every DELIBERATE Final Answer end with
+  [[TASK: COMPLETE]] or [[TASK: INCOMPLETE — reason]] — with the rule-19 dual baked in (a confident negative,
+  "it doesn't exist", is COMPLETE, NOT a retry trigger; only a FAILURE a retry could overcome is INCOMPLETE).
+  agent._parse_completion() extracts+STRIPS the marker (never leaks to the user; conservative phrase-backstop
+  flips to INCOMPLETE only on process-failure language, never on a negative). run_task's turn-exhausted exit
+  auto-tags INCOMPLETE. process_request ALWAYS strips the marker (fixes a FAST→DELIBERATE-escalation leak,
+  detected via fast_usage being a list) but honors status for retry only when a ReAct loop ran (pure FAST/CHAT
+  never retry); sets completion_status on the task context; and SKIPS memorize_episode on the first INCOMPLETE
+  (so a failure isn't canonized into recall — the Q15/Shobha class — while recent_exchanges still keeps it
+  short-term). Offline-tested: 7 sanitizer cases incl. the Trap-1 negatives.
+• PART 2 (detached retry): orchestrator._run_worker (user branch) routes on completion_status. First INCOMPLETE →
+  resolve the live future NOW with Clara's honest answer + a retry notice, and _spawn_detached_retry() adds a
+  fresh task (is_retry=True, carries original goal + partial progress + failure reason + message_id, NO future).
+  Capped at 1 (the is_retry gate prevents chains). process_request injects the retry context so Clara CONTINUES
+  from progress (idempotency) and adapts where she was blocked. Non-blocking: the user gets an immediate honest
+  response; the retry runs in the background. This is also the first PROACTIVE-DELIVERY task — a foundation rail
+  for the autonomous roadmap.
+• PART 3 (proactive delivery): the retry's terminal outcome memorizes NORMALLY (success or honest 2x-fail = the
+  ground truth); _deliver_retry_result() pushes it re-anchored to the original request via WS (fresh message_id →
+  new Clara bubble; frontend renders any final_answer) + Telegram notifier. orchestrator._send_message_fn injected
+  in api.py (= general _broadcast). "Never lost" guaranteed by the memorize step even if both pushes fail.
+  Observability: [TASK SOFT-RETRY] episodic markers (filtered from recall) + session log.
+Scope: DELIBERATE user tasks only (FAST escalates there; CHAT/system unchanged). Compiles clean across agent.py,
+orchestrator.py, system_prompt.py, api.py. NEEDS a live end-to-end run with a genuinely-failing task to confirm
+the detached dispatch + delivery (single-turn harness questions don't trigger INCOMPLETE). Brief 35 marked done.
+
+[FIX] L4 cross-source verbatim verifier now checks ALL named files (verification.py) — the Q20 fix
+v_verbatim_quote used _find_file (FIRST named file), so L4 questions ("CLAUDE.md says X … open api.py and quote")
+were verified against the DOC, never the code target — making the verdict a coincidence of whether the quoted code
+line also happened to appear in CLAUDE.md (Q06 passed by luck; Q20 false-UNVERIFIABLE). FIX: new _find_files_all()
+returns every named file that exists; v_verbatim_quote now PASSes if a quote candidate matches ANY of them, and
+reports which file matched. Verified on the real repo: Q20 → PASS (matched in api.py, not CLAUDE.md), Q06 → PASS
+(matched in core_logic/tools.py, the real target — coincidence eliminated). Guarded by a new self-test case (doc
+named first, quoted line only in the code file named second — would FAIL under old first-file logic). Self-test now
+14/14. Rationale (Alkama): the verifier must be correct because the long-term goal is CLARA self-assessing — a
+coincidence-based grader can't be the foundation she grades herself on.
+
+[FIX] Coordinate-drift root cause (tool_executor.py) + memory cleanup (post-evening-drill)
+COORDINATE DRIFT root cause pinned: DC's read_file uses a 0-indexed offset but prints the raw offset in its header
+("[Reading … from line 15]" while the first content line is actually line 16) AND returns NO per-line numbers — so
+Clara derives line numbers on a wrong base and drifts (369->368, 377->378, 21 vs 24). start_search returns correct
+absolute numbers, so DC isn't globally at fault — it's read_file's header + the model's manual counting compounding.
+FIX: new _number_read_file_lines() stamps correct absolute numbers (offset+i, 1-indexed → first shown line = offset+1,
+verified offset 15 → line 16) onto read_file output, in BOTH execute_fast + execute_deliberate, applied AFTER
+resource_ledger.record_read (record_read hashes the content and check_write hashes the on-disk file — numbering before
+record_read would mismatch the hashes and falsely block writes). Verified: offset 15 → 16, offset 0 → 1, non-DC text
+untouched. Compiles.
+MEMORY CLEANUP (Q15 root cause): the evening Q15 "Shobha" confabulation traced to the always-injected vault (only
+Shobha source in context that run) + a topic association, NOT a loop — but the derailment got consolidated (idx 3117,
+"asked concurrency, pivoted to Shobha") which WOULD seed a self-reinforcing loop on the next identical question.
+Actions: (a) deleted episode idx 3117; (b) archived 5 non-long-term vault facts to core_logic/archived_vault_facts.json
+(preserved, not destroyed) — the image-detail, two time-sensitive/episodic intimate facts, a Clara-architecture fact
+(belongs in self_knowledge), and a transient conversational-state fact, all criteria violations injected into every
+context. Vault 23->18, episodic 3124->3123; memory.json backed up first. Kept genuine long-term relationship facts +
+the standing "treat her as priority" instruction. Q15 KEPT in the set — re-tests on the next evening run on a clean
+base; correct answer there confirms the vault-substrate + one-off-LLM read.
+
+[UPDATE] Evening harness drill 2026-06-02 — 18/20 correct; one serious confabulation + a verifier false-UNVERIFIABLE
+First run of the climbed L2-L5 evening set + the new verifiers. Self-test 13/13 (Phase 1.4 live). Scorecard 15 PASS
+/ 0 FAIL / 5 UNVERIFIABLE — but anchoring to it would have MISSED the run's biggest event, which sat inside an
+UNVERIFIABLE verdict. Three findings, ranked:
+1. Q15 — REAL FAIL the verifier structurally can't catch. "Explain optimistic vs pessimistic concurrency control"
+   → Clara answered "Talk about your project with Shobha." Routing was correct (CHAT, tool=null, conf 1.0); the
+   CHAT GENERATION derailed. Root cause = VAULT POLLUTION: 5 "Shobha" facts are injected into EVERY context, and
+   several VIOLATE the documented vault criteria (time-sensitive "intimate for ~20 days"; episodic "testing
+   restraint during an intimate moment") — plus a known mis-attribution (a résumé→"Shobha project", recorded in
+   self_knowledge line ~12650 as a mistake) that created a phantom "project with Shobha". discourse_state going
+   into Q15 was technical (os.replace/parse_actions), so this did NOT come from Phase 2 — it came from the
+   always-injected vault. The verifier correctly marked it UNVERIFIABLE (knowledge→no oracle); MANUAL judgment +
+   Clara's own self-assessment caught it. Lesson reinforced: a knowledge-question failure is invisible to Layer 1
+   by design — the manual drill layer is load-bearing, exactly as the ladder note says.
+2. Q20 — verifier FALSE-UNVERIFIABLE on a CORRECT answer. verbatim_quote's _find_file returns the FIRST file named
+   in the question; L4 cross-source questions say "CLAUDE.md says X, open api.py and quote" → it resolved CLAUDE.md,
+   checked Clara's line there (absent), → UNVERIFIABLE. Q06 (same class) passed only by coincidence (its quoted
+   string also lives in CLAUDE.md because I documented it there). So coincidence decides L4 verdicts. FIX PENDING:
+   for verbatim_quote, prefer the file after "open/Read/in", or try ALL named files and PASS on any match.
+3. Coordinate drift (ongoing): Q06 cited line 368 (actual 369), Q13 line 378 (actual 377), Q03 attributed
+   run_python_code to tool_executor.py (DEFINED in tools.py:116, only called there). Quotes/terminal-facts are
+   right; the line numbers / module-location claims drift. verbatim & key_facts confirm content, not coordinates —
+   Layer-1 extension candidate (verify claimed line/location).
+ROTATION: HELD the set — it was climbed THIS session (1 run old), 18/20 validates the climb + new verifiers, and
+churning fresh L3-L5 questions would lose regression signal and outrun the verifier. Q15 kept (fail_count→1,
+verbatim — question is fine, failure is Clara's). The drill's real output this time is system fixes, not rotation.
+PENDING FIXES (await greenlight): (a) prune the criteria-violating Shobha vault facts + tighten consolidation
+vault-extraction so transient/intimate episodes aren't stored as permanent facts; (b) L4 verbatim file-resolution
+fix; (c) consider a persona reinforcement — answer an explicit question, never redirect a direct question to a
+memory topic.
+
+[FIX] Two routing/format bugs surfaced by the live Phase 2 conversation test (interpreter.py + agent.py)
+The live coherence test (session_2026-06-02_12-52-09) PROVED Phase 2 works — Clara resolved a bare implicit
+follow-up ("which one is cheaper though?") to the two Omega watches discussed two turns earlier, with no antecedent
+in the message — but the path to the answer exposed two real defects:
+• BUG A — quoted "null" mis-routes to FAST. The interpreter emitted "tool": "null" (a quoted STRING, not JSON
+  null). route()'s `tool is not None` check passed the non-None string → routed FAST → "Tool 'null' not found" →
+  wasteful DELIBERATE escalation. FIX (interpreter.py): after parsing, coerce a tool of "null"/"none"/"" (any case)
+  to real None, so it routes CHAT as intended. Verified: quoted-null now → CHAT; real tools still → FAST.
+• BUG B — action-format drift. Once escalated, Clara emitted the LangChain ReAct format
+  {"action": "web_search", "action_input": {...}} instead of CLARA's {"tool","query"}; parse_actions rejected it
+  ("Unknown tool: ''"), wasting 2-3 turns. FIX (agent.py _validate_actions): gracefully REMAP action→tool /
+  action_input→query|named-params so the turn isn't wasted, flag the action `_reformatted`, and run_task appends a
+  non-fatal note telling Clara to use the canonical format next (parse-and-intimate, not silent). Verified on both
+  the array and bare-object forms; canonical format is not flagged (no false-positive). Both compile.
+  Net: that exchange should now be a clean 1-turn CHAT answer instead of a 6-turn escalation through two failures.
+
+[FIX] discourse_state is now user-gated (agent.py) — Phase 2 follow-up from live data
+The 2026-06-02 morning log confirmed Phase 2 extraction works live (21 clean discourse tag-sets from real
+DeepSeek consolidation — Phase 2's extraction is PROVEN, not just mechanically tested). But it also showed a leak:
+the FIRST discourse update (08:01:51, before Q1) was a system/autonomous task ('cancelled orchestrator task',
+'missing filesystem tools') — because memorize_episode (which holds the discourse update) is called for ALL
+sources, unlike append_recent_exchange which is gated to source=="user". discourse_state anchors "what WE are
+discussing", so a system task must not pollute it. FIX: memorize_episode now takes source (default "user"); only
+the update_discourse_state call is wrapped in `if source == "user"`. episodic/facts/self_learning stay universal
+(Clara still learns from autonomous work) — only discourse is conversation-scoped now, matching recent_exchanges.
+Low-impact (cap-8 rolling flushed the leak after 8 user turns) but correct. Compiles; no other call sites.
 
 [UPDATE] Morning harness drill 2026-06-02 — clean 20/20 + verifier self-test live + Q06 watchdog RESOLVED
 First run with the Phase 1.4 verifier self-test wired in: it ran automatically and the report shows "Verifier
