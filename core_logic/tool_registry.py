@@ -44,7 +44,8 @@ NATIVE_TOOL_SCHEMAS = [
             "Execute Python code. Use for calculations, data transformation, "
             "structured processing, or any task requiring computation. "
             "Always print output. "
-            "Do NOT use for file I/O — use read_file/write_file for reading or writing files."
+            "Prefer read_file/write_file for file I/O; a single-line parse of a "
+            "known file path (always with encoding='utf-8') is acceptable."
         ),
         "inputSchema": {
             "type": "object",
@@ -61,8 +62,12 @@ NATIVE_TOOL_SCHEMAS = [
     {
         "name": "vision_tool",
         "_server": "native",
+        # Honest capability surface (Brief 36 C-8): while GEMINI_API_KEY is unset the
+        # tool is non-functional, and advertising it as working routed image queries
+        # to a guaranteed error. register_native_tools() prepends an UNAVAILABLE
+        # notice at startup when the key is missing.
         "description": (
-            "Analyze images or screenshots using Grok Vision. "
+            "Analyze images or screenshots (Gemini vision). "
             "Provide absolute file path and a specific question. "
             "Supports single image or multi-image comparison via paths list."
         ),
@@ -133,8 +138,15 @@ class ToolRegistry:
 
     def register_native_tools(self) -> None:
         """Register all built-in Python tools. Called once at startup."""
+        import os
         with self._lock:
             for schema in NATIVE_TOOL_SCHEMAS:
+                schema = dict(schema)
+                if schema["name"] == "vision_tool" and not os.getenv("GEMINI_API_KEY", ""):
+                    schema["description"] = (
+                        "[CURRENTLY UNAVAILABLE — no vision API key configured.] "
+                        + schema.get("description", "")
+                    )
                 self._tools[schema["name"]] = schema
         slog.info(f"   [Registry] Registered {len(NATIVE_TOOL_SCHEMAS)} native tools.")
 
@@ -166,7 +178,8 @@ class ToolRegistry:
         """
         if not desc:
             return ""
-        desc = desc.strip()
+        raw = desc.strip()  # pre-cleaning original — the fallback target (C-9)
+        desc = raw
         cutoffs = [
             "\nIMPORTANT:",
             "\nOnly works within",
@@ -184,7 +197,10 @@ class ToolRegistry:
                 desc = desc[:idx]
         desc = desc.strip()
         if not desc:
-            return desc[:100] if desc else ""
+            # Cleaning consumed everything — fall back to the RAW original's head.
+            # (The old code returned the emptied string, so this branch always
+            # produced "" and the documented fallback never happened — C-9.)
+            return raw[:100]
         if len(desc) > 200:
             last_period = desc[:200].rfind(".")
             desc = desc[:last_period + 1] if last_period > 50 else desc[:200]

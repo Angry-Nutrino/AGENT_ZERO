@@ -65,6 +65,10 @@ class MCPClient:
             "process": process,
             "lock": asyncio.Lock(),
             "id_counter": 0,
+            # Kept for _ensure_alive: a dead subprocess (DC crash mid-session) used to
+            # brick every tool call until full backend restart (Brief 36 C-14).
+            "command": command,
+            "args": list(args),
         }
 
         try:
@@ -83,6 +87,17 @@ class MCPClient:
             await self._kill_server(server_name)
             raise MCPError(f"Handshake failed for '{server_name}': {e}")
 
+    async def _ensure_alive(self, server_name: str) -> None:
+        """If the server subprocess has exited, attempt ONE reconnect (re-handshake).
+        Tool schemas are identical across restarts so the registry needs no update."""
+        state = self._servers.get(server_name)
+        if state is None or state["process"].returncode is None:
+            return
+        slog.warning(f"   [MCP] '{server_name}' process died (rc={state['process'].returncode}) — restarting...")
+        command, args = state["command"], state["args"]
+        self._servers.pop(server_name, None)
+        await self.connect(server_name, command, args)  # raises MCPError on failure — caller surfaces it
+
     async def call(self, server_name: str, tool_name: str, arguments: dict) -> str:
         """
         Call a tool on the named server. Returns string result.
@@ -90,6 +105,8 @@ class MCPClient:
         """
         if server_name not in self._servers:
             raise MCPError(f"Server '{server_name}' not connected.")
+
+        await self._ensure_alive(server_name)
 
         response = await self._send_request(server_name, "tools/call", {
             "name": tool_name,
@@ -170,13 +187,16 @@ class MCPClient:
                 # Ignore messages with different ids (notifications, etc.)
 
     async def _send_notification(self, server_name: str, method: str, params: dict) -> None:
-        """Send a JSON-RPC notification (no id, no response expected)."""
+        """Send a JSON-RPC notification (no id, no response expected).
+        Takes the per-server lock — an unguarded stdin write could interleave with a
+        concurrent request's frame (Brief 36 C-13)."""
         state = self._servers[server_name]
-        payload = {"jsonrpc": "2.0", "method": method, "params": params}
-        line = json.dumps(payload) + "\n"
-        process = state["process"]
-        process.stdin.write(line.encode())
-        await process.stdin.drain()
+        async with state["lock"]:
+            payload = {"jsonrpc": "2.0", "method": method, "params": params}
+            line = json.dumps(payload) + "\n"
+            process = state["process"]
+            process.stdin.write(line.encode())
+            await process.stdin.drain()
 
     async def _kill_server(self, server_name: str) -> None:
         state = self._servers.pop(server_name, None)

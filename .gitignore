@@ -34,18 +34,33 @@ core_logic/models/
 *.onnx
 *.safetensors
 
-# --- MEMORY & DB ---
+# --- MEMORY & DB (personal data — NEVER track) ---
 core_logic/memory.json
+core_logic/ambient.json
+core_logic/ambient_patterns.json
+core_logic/.ambient.json.*
+core_logic/memory.json.bak-*
+core_logic/memory.json.corrupt-*
+core_logic/.memory.json.*
+core_logic/archived_vault_facts.json
 faiss_index.bin
 faiss_index.pkl
 *.db
+core_logic/tasks.db-shm
+core_logic/tasks.db-wal
+core_logic/tasks.db.bak-*
 *.sqlite3
-../CLARA_PERSONA_CONDENSED.md
-../CLARA_PERSONA.md
+clara_backend.pid
+# (the old ../CLARA_PERSONA entries were broken — gitignore patterns can't use ../;
+#  these are the working forms for the repo-root persona files)
+CLARA_PERSONA.md
+CLARA_PERSONA_CONDENSED.md
 
 core_logic/knowledge_base/
 core_logic/docs/
 core_logic/photos/
+photos/
+ledger_test_file.txt
 
 # --- TRACES ---
 traces/
@@ -55,6 +70,8 @@ traces/
 temp_*.png
 temp_*.jpg
 temp_*.wav
+temp_doc_*
+temp_image_*
 output.wav
 *.log
 

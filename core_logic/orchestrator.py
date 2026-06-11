@@ -101,7 +101,7 @@ class Orchestrator:
             slog.warning(f"[Orchestrator] cancel_task: task {task_id[:8]} not found.")
             return False
 
-        if task.state in ("completed", "failed", "invalidated", "cancelled"):
+        if task.state in ("completed", "failed", "invalidated"):
             slog.debug(f"[Orchestrator] cancel_task: task {task_id[:8]} already terminal ({task.state}).")
             return False
 
@@ -141,11 +141,17 @@ class Orchestrator:
     async def submit_user_event(
         self, text: str, image_data=None, file_data=None,
         on_step_update=None, on_interpreted=None,
-        message_id: str = None,
+        message_id: str = None, memory_mode: str = "full", return_trace: bool = False,
     ) -> str:
         """
         Entry point for the WebSocket handler. Creates a response future,
         emits a user_input event, and awaits the future resolved by the worker.
+
+        memory_mode (test harness only; real callers use the "full" default):
+          "full"      — normal persistence.
+          "ephemeral" — transient recent_exchanges only, NO permanent episodic/vault
+                        (coherence drill — needs within-dialogue recall without polluting).
+          "none"      — skip ALL memory writes (L1-L5 harness — full isolation).
         """
         loop = asyncio.get_event_loop()
         future = loop.create_future()
@@ -160,6 +166,8 @@ class Orchestrator:
                 "on_step_update": on_step_update,
                 "on_interpreted": on_interpreted,
                 "response_future": future,
+                "memory_mode": memory_mode,
+                "return_trace": return_trace,
             },
             priority=1.0,
             source="user",
@@ -171,21 +179,38 @@ class Orchestrator:
 
     async def _loop(self) -> None:
         """Main tick. Runs until self._running is False."""
+        import time as _time
         slog.info("[Orchestrator] Loop started.")
         # Dispatch any tasks that were pending before the loop started
         # (crash recovery tasks, or tasks added before start() was called).
         await self._dispatch_ready_tasks()
+        # Tick-trace gating (Brief 36 A-12): the loop idles at ~10 ticks/sec and an
+        # unconditional trace per tick accumulated 653 MB of identical idle records.
+        # Emit only when the tick DID something (events drained / counts changed),
+        # plus a 60s heartbeat so liveness stays visible in the trace.
+        _last_tick_state = None
+        _last_tick_ts = 0.0
         while self._running:
             try:
                 events = await self._event_queue.drain_blocking(timeout=0.1)
-                self._trace(
-                    "orchestrator_tick",
-                    events_drained=len(events),
-                    ready_tasks=len(self._task_graph.get_ready_tasks()),
-                    active_workers=len(self._active_workers),
-                    pending_tasks=len(self._task_graph.get_tasks_by_state("pending")),
-                    paused_tasks=len(self._task_graph.get_tasks_by_state("paused")),
+                _state = (
+                    len(self._task_graph.get_ready_tasks()),
+                    len(self._active_workers),
+                    len(self._task_graph.get_tasks_by_state("pending")),
+                    len(self._task_graph.get_tasks_by_state("paused")),
                 )
+                _now = _time.monotonic()
+                if events or _state != _last_tick_state or _now - _last_tick_ts >= 60.0:
+                    self._trace(
+                        "orchestrator_tick",
+                        events_drained=len(events),
+                        ready_tasks=_state[0],
+                        active_workers=_state[1],
+                        pending_tasks=_state[2],
+                        paused_tasks=_state[3],
+                    )
+                    _last_tick_state = _state
+                    _last_tick_ts = _now
                 await self._ingest_events(events)
                 await self._dispatch_ready_tasks()
             except asyncio.CancelledError:
@@ -211,7 +236,14 @@ class Orchestrator:
                     future = task.context.get("response_future") if task else None
                     self._task_graph.update_state(task_id, "completed")
                     if future and not future.done():
-                        future.set_result(result)
+                        # Brief 32: if a ReAct trace was captured (return_trace), resolve with a
+                        # {response, react_trace} dict so /query can hand it to Layer-2 diagnosis.
+                        # Normal callers (WS, Telegram) never set return_trace → bare string, unchanged.
+                        _trace = event.payload.get("react_trace")
+                        if _trace is not None:
+                            future.set_result({"response": result, "react_trace": _trace})
+                        else:
+                            future.set_result(result)
                     # Resume any paused background tasks now that the foreground is clear
                     await self._resume_paused_tasks()
 
@@ -273,6 +305,8 @@ class Orchestrator:
         on_step_update = payload.get("on_step_update")
         on_interpreted = payload.get("on_interpreted")
         future = payload.get("response_future")
+        memory_mode = payload.get("memory_mode", "full")
+        return_trace = payload.get("return_trace", False)
 
         # Add task with only serializable context (image_data/file_data are base64 str — safe)
         task = self._task_graph.add_task(
@@ -280,7 +314,9 @@ class Orchestrator:
             priority=1.0,
             reversibility="reversible",
             dependencies=[],
-            context={"text": text, "image_data": image_data, "file_data": file_data, "message_id": message_id},
+            context={"text": text, "image_data": image_data, "file_data": file_data,
+                     "message_id": message_id, "memory_mode": memory_mode,
+                     "return_trace": return_trace},
             origin="user",
         )
 
@@ -463,10 +499,15 @@ class Orchestrator:
             f"Retrying with failure context..."
         )
 
+        # Runtime objects (response_future, callbacks) ride along IN-MEMORY so the
+        # retry can still stream to and answer the waiting client; TaskGraph._persist
+        # sanitizes them out of the SQLite write (Brief 36 A-7 — previously this
+        # add_task crashed on json.dumps(future) and the user's future hung forever).
         retry_context = {**task.context, "failure_summary": failure_summary,
                          "attempt": attempt + 1}
+        retry_context.pop("active_tasks_context", None)  # stale snapshot — _run_worker rebuilds it
 
-        self._task_graph.add_task(
+        retry_task = self._task_graph.add_task(
             goal=task.goal,
             priority=task.priority,
             reversibility=task.reversibility,
@@ -474,6 +515,9 @@ class Orchestrator:
             context=retry_context,
             origin=task.origin,
         )
+        # The inherited task_id belongs to the FAILED task — refresh so the resource
+        # ledger and trace events key on the retry's own id.
+        retry_task.context["task_id"] = retry_task.id
 
         try:
             self._agent.log_system_episode(
@@ -483,68 +527,21 @@ class Orchestrator:
         except Exception:
             pass
 
-    async def _check_and_pause_lower_priority(self, new_task_priority: float) -> None:
-        """
-        Pause all currently running/active tasks with priority lower than
-        new_task_priority. Saves a checkpoint into their context before pausing.
-        Cancels their worker asyncio.Tasks.
-        """
-        for task_id, worker_task in list(self._active_workers.items()):
-            tg_task = self._task_graph.get_task(task_id)
-            if tg_task is None:
-                continue
-            if tg_task.state not in ("running", "active"):
-                continue
-            if tg_task.priority >= new_task_priority:
-                continue  # same or higher priority — do not pause
-
-            slog.info(
-                f"[Orchestrator] Pausing task {task_id[:8]} "
-                f"(priority {tg_task.priority:.2f}) for higher-priority interrupt."
-            )
-
-            checkpoint = {
-                "interrupted_at": datetime.now(timezone.utc).isoformat(),
-                "reason": "higher_priority_interrupt",
-            }
-            try:
-                self._task_graph.pause_task(task_id, checkpoint)
-            except Exception as e:
-                slog.error(f"[Orchestrator] Failed to pause task {task_id[:8]}: {e}")
-                continue
-
-            # Cancel the asyncio worker so it actually stops executing
-            worker_task.cancel()
-            try:
-                await worker_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._active_workers.pop(task_id, None)
-
-            # Log pause to episodic memory for CLARA's passive awareness
-            try:
-                self._agent.log_system_episode(
-                    f"[TASK PAUSED] '{tg_task.goal[:60]}' paused — "
-                    f"higher-priority user request took over."
-                )
-            except Exception:
-                pass
-
-            self._trace(
-                "interrupt",
-                paused_task_id=task_id[:8],
-                paused_task_goal=tg_task.goal[:80],
-                triggered_by="higher_priority_user_input",
-            )
+    # NOTE (Brief 36 A-14): the Phase-4 interrupt pauser (_check_and_pause_lower_priority)
+    # was removed 2026-06-10 — it was never called from anywhere (zero pauses in the entire
+    # log history), and the runtime model that actually shipped is plain concurrency: user
+    # tasks and sub-second background observers run as parallel asyncio workers. The pause
+    # machinery will be REBUILT properly (cooperative cancellation at ReAct-turn boundaries
+    # with a real checkpoint) when Ambient Awareness introduces long-running autonomous tasks
+    # worth preempting. TaskGraph.pause_task + the paused state remain available for that.
 
     async def _resume_paused_tasks(self) -> None:
         """
         Called after a user task completes. Re-evaluates all paused tasks:
-        - Tasks without a response_future → transition back to pending for re-dispatch.
+        - Tasks without a response_future → transition back to PENDING so
+          _dispatch_ready_tasks launches a worker on the next tick. (Resuming to
+          "active" left the task workerless forever — Brief 36 A-14.)
         - Tasks with a response_future (user tasks, edge case) → skip.
-
-        Phase 4 relevance check is simple: all background paused tasks are resumed.
-        Phase 6 (Arbitration) will add smarter relevance evaluation.
         """
         paused = self._task_graph.get_paused_tasks()
         for task in paused:
@@ -556,7 +553,7 @@ class Orchestrator:
                 f"[Orchestrator] Resuming paused task {task.id[:8]}: {task.goal[:50]}"
             )
             try:
-                self._task_graph.update_state(task.id, "active")
+                self._task_graph.update_state(task.id, "pending")
             except Exception as e:
                 slog.error(f"[Orchestrator] Failed to resume task {task.id[:8]}: {e}")
 
@@ -603,8 +600,19 @@ class Orchestrator:
                         task_context=ctx,
                     )
 
-                # Log autonomous action to episodic memory
-                if result:
+                # Log autonomous action to episodic memory — but NOT routine heartbeats.
+                # health_check / memory_maintenance / context_warmup fire every 2-10 min;
+                # logging each result made 468 of 1028 episodes (45%) permanent noise that
+                # retrieval filters out anyway (Brief 36 B-20). A routine trigger only earns
+                # an episode when something actually HAPPENED (repair, prune, failure).
+                ROUTINE_TRIGGERS = {"health_check", "memory_maintenance", "context_warmup"}
+                _notable_markers = ("re-sync", "pruned", "deleted", "removed",
+                                    "repaired", "failed", "error")
+                _is_routine = trigger in ROUTINE_TRIGGERS
+                _notable = (not _is_routine) or any(
+                    k in str(result).lower() for k in _notable_markers
+                )
+                if result and _notable:
                     try:
                         summary = (
                             f"[AUTONOMOUS] "
@@ -668,7 +676,14 @@ class Orchestrator:
                 # outcome (is_retry) is delivered proactively here — there is no live future.
                 _status = ctx.get("completion_status", "COMPLETE")
                 _is_retry = bool(ctx.get("is_retry"))
-                if _status == "INCOMPLETE" and not _is_retry:
+                # Only REAL user traffic gets the detached-retry + proactive-delivery treatment.
+                # Test traffic (memory_mode ephemeral/none — coherence drill, L1-L5 harness) must
+                # NOT spawn a retry: it would run in 'full' and pollute episodic with the test's
+                # fake scenario AND push a follow-up to Alkama's Telegram about a prompt that never
+                # really happened (2026-06-08 leak). For test traffic, INCOMPLETE just resolves
+                # honestly with no retry machinery. (retry_ctx also carries memory_mode now.)
+                _memory_mode = ctx.get("memory_mode", "full")
+                if _status == "INCOMPLETE" and not _is_retry and _memory_mode == "full":
                     await self._spawn_detached_retry(task, ctx, ctx.get("incomplete_reason", ""), result)
                     result = result.rstrip() + (
                         "\n\n*(I couldn't finish this on the first pass — I'm taking another "
@@ -687,7 +702,10 @@ class Orchestrator:
             await self._broadcast_task("completed", task)
             await self._event_queue.emit(make_event(
                 type="task_completed",
-                payload={"task_id": task.id, "result": result},
+                # react_trace is None unless return_trace was set (Brief 32) — process_request
+                # stashed it on the context after capturing the post-routing ReAct turns.
+                payload={"task_id": task.id, "result": result,
+                         "react_trace": ctx.get("react_trace")},
                 priority=0.6,
                 source="worker",
             ))
@@ -725,6 +743,7 @@ class Orchestrator:
             "image_data": orig_ctx.get("image_data"),
             "file_data": orig_ctx.get("file_data"),
             "message_id": orig_ctx.get("message_id", ""),
+            "memory_mode": orig_ctx.get("memory_mode", "full"),  # retry inherits isolation (no full-mode pollution)
             "is_retry": True,
             "retry_of": orig_task.id,
             "failure_reason": reason,

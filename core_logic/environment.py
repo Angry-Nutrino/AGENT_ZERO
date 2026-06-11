@@ -5,6 +5,7 @@ from watchdog.events import FileSystemEventHandler
 from .event_queue import EventQueue, make_event
 from .task_graph import TaskGraph
 from .session_logger import slog
+from .crud import SYSTEM_PREFIXES  # shared system-episode filter (Brief 36 B-4/B-8)
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,9 @@ IGNORED_PATTERNS: list = [
     ".pkl",
     ".tmp.",             # Editor temp files (e.g., agent.py.tmp.xxxxx) — ignore, debounce real file
     ".memory.json.",     # crud._save_memory atomic-write temp (.memory.json.XXXX.tmp, unique per write) — ignore
+    "ambient.json",      # A0 watcher store (+ its .ambient.json.* temps match via substring) — flushes
+    "ambient_patterns.json",  # backend-derived baseline. Without these, every ~30s flush spawns a
+    "ambient_watch.log",      # file_change task. (ambient.py CODE edits still trigger normally.)
     ".swp",              # Vim/Neovim swap files
     ".swo",              # Vim/Neovim swap files (older)
     "node_modules",      # JS deps. An npm install under core_logic/interface/ emitted 12,640
@@ -76,6 +80,22 @@ class _FileEventHandler(FileSystemEventHandler):
             self._watcher._on_file_changed(path, "created"),
             self._watcher._event_loop,
         )
+
+    def on_deleted(self, event):
+        # Deletions only matter for RAG sources: a doc removed from core_logic/docs/
+        # previously NEVER triggered a rebuild, so its chunks haunted the FAISS index
+        # until an unrelated rebuild (Brief 36 B-5). Other deletions stay ignored.
+        if event.is_directory:
+            return
+        path = event.src_path
+        if self._should_ignore(path):
+            return
+        normalised = path.replace("\\", "/")
+        if any(src in normalised for src in ("CLAUDE.md", "ROADMAP.md", "/docs/")):
+            asyncio.run_coroutine_threadsafe(
+                self._watcher._on_file_changed(path, "deleted"),
+                self._watcher._event_loop,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +148,6 @@ class EnvironmentWatcher:
         self._running = True
 
         # Snapshot current user-facing episode count as baseline
-        SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK FAILED]", "[TASK RETRY]",
-                           "[TASK PAUSED]", "[TASK DEFERRED]", "[TASK CONFLICT]")
         episodes = self._agent.db.memory.get("episodic_log", [])
         self._last_episode_count = sum(
             1 for ep in episodes
@@ -178,13 +196,15 @@ class EnvironmentWatcher:
         background entries should not trigger memory_growth noise.
         Emits memory_growth trigger when user-facing growth >= threshold.
         """
-        SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK FAILED]", "[TASK RETRY]",
-                           "[TASK PAUSED]", "[TASK DEFERRED]", "[TASK CONFLICT]")
         episodes = self._agent.db.memory.get("episodic_log", [])
         user_count = sum(
             1 for ep in episodes
             if not ep.get("summary", "").startswith(SYSTEM_PREFIXES)
         )
+        # Clamp after an external prune (count can drop BELOW the baseline, which
+        # would silence the trigger until regrowth crossed the stale high-water mark).
+        if user_count < self._last_episode_count:
+            self._last_episode_count = user_count
         if user_count - self._last_episode_count >= self._memory_growth_threshold:
             self._last_episode_count = user_count
             await self._emit_trigger("memory_growth")
@@ -213,6 +233,11 @@ class EnvironmentWatcher:
         if now - self._last_file_change.get(normalised, 0) < 5.0:
             return  # coalesce rapid saves — still processing the previous one
         self._last_file_change[normalised] = now
+        # Keep the debounce dict bounded (one entry per unique path forever — B-6).
+        if len(self._last_file_change) > 256:
+            self._last_file_change = {
+                k: v for k, v in self._last_file_change.items() if now - v < 3600
+            }
 
         # RAG source files → rag_rebuild trigger instead of generic file_change
         RAG_SOURCES = ("CLAUDE.md", "ROADMAP.md", "/docs/")
@@ -236,6 +261,18 @@ class EnvironmentWatcher:
         """Write-ahead: Task persisted to SQLite before the wake event is emitted."""
         async with self._emit_lock:
             try:
+                # Dedupe (Brief 36 A-17): a same-trigger same-path task still in flight
+                # means this signal is already being handled — don't stack a second
+                # (two rapid RAG-source saves racing two concurrent FAISS rebuilds).
+                new_path = (extra_context or {}).get("path")
+                for t in self._task_graph._tasks.values():
+                    if (t.origin == "system"
+                            and t.context.get("trigger") == trigger_name
+                            and t.state in ("pending", "active", "running")
+                            and t.context.get("path") == new_path):
+                        slog.debug(f"[EnvWatcher] '{trigger_name}' for this path already in flight — skipped.")
+                        return
+
                 context = {
                     "trigger": trigger_name,
                     "observed_at": datetime.now(timezone.utc).isoformat(),

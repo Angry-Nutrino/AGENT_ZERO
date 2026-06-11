@@ -203,6 +203,7 @@ class VoiceCoordinator:
             return None
 
         slog.info(f"[Voice] stop_recording: transcribing {buf_len} chunks...")
+        tmp_path = None
         try:
             audio = np.concatenate(self._audio_buf, axis=0)
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -213,12 +214,18 @@ class VoiceCoordinator:
                 initial_prompt="CLARA, Alkama, orchestrator, Grok"
             )
             text = " ".join(s.text for s in segments).strip()
-            os.unlink(tmp_path)
             slog.info(f"[Voice] STT: '{text}'")
             return text if text else None
         except Exception as e:
             slog.error(f"[Voice] STT error: {e}")
             return None
+        finally:
+            # unlink in finally — a transcription error used to orphan the temp WAV.
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def audio_callback(self, indata, frames, time_info, status):
         """sounddevice InputStream callback — buffers audio while recording."""
@@ -386,12 +393,17 @@ class VoiceCoordinator:
             if self._on_speaking_change:
                 self._on_speaking_change(True)
 
+            first_item = True
             while True:
                 if self._stop_flag.is_set():
                     interrupted = True
                     break
                 try:
-                    item = audio_q.get(timeout=10)
+                    # First synthesis gets extra headroom: on a CPU-fallback Kokoro a
+                    # long first sentence can exceed 10s, and timing out here silently
+                    # dropped the WHOLE answer (Brief 36 D-19).
+                    item = audio_q.get(timeout=30 if first_item else 10)
+                    first_item = False
                 except queue.Empty:
                     break
                 if item is None:

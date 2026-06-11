@@ -114,8 +114,16 @@ class TelegramNotifier:
                 )
             return True
         except Exception as e:
-            slog.warning(f"   [Telegram] Failed to send notification: {e}")
-            return False
+            slog.warning(f"   [Telegram] Notification send failed ({e}) — retrying plain.")
+            # Never lose a message to a formatting error (Brief 36 D-22): retry the
+            # ORIGINAL text with no parse_mode.
+            try:
+                for chunk in _split_message(text):
+                    await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+                return True
+            except Exception as e2:
+                slog.warning(f"   [Telegram] Plain retry also failed: {e2}")
+                return False
 
 
 # Module-level singleton — import this from anywhere in the codebase
@@ -194,7 +202,19 @@ class TelegramBot:
 
         slog.info(f"   [Telegram] Received: {user_text[:80]}")
 
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        # Telegram's "typing" indicator expires after ~5s; refresh it while a long
+        # DELIBERATE run is in flight so the phone doesn't look dead (Brief 36 D-21).
+        async def _keep_typing():
+            try:
+                while True:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        typing_task = asyncio.create_task(_keep_typing())
 
         try:
             # Route through the full orchestrator pipeline — identical to web UI.
@@ -204,15 +224,23 @@ class TelegramBot:
             if not final_answer or not final_answer.strip():
                 final_answer = "..."
 
-            tg_text = _to_telegram_md(final_answer)
-            for chunk in _split_message(tg_text):
-                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+            typing_task.cancel()
+
+            # MarkdownV2 first; on a parse failure fall back to PLAIN text so a valid
+            # answer is never lost to a formatting error (Brief 36 D-22).
+            try:
+                tg_text = _to_telegram_md(final_answer)
+                for chunk in _split_message(tg_text):
+                    await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+            except Exception as fmt_err:
+                slog.warning(f"   [Telegram] MarkdownV2 send failed ({fmt_err}) — sending plain.")
+                for chunk in _split_message(final_answer):
+                    await update.message.reply_text(chunk)
 
             slog.info(f"   [Telegram] Responded ({len(final_answer)} chars)")
 
         except Exception as e:
             slog.error(f"   [Telegram] Error processing message: {e}")
-            await update.message.reply_text(
-                "Something went wrong on my end\\. Try again\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
+            await update.message.reply_text("Something went wrong on my end. Try again.")
+        finally:
+            typing_task.cancel()

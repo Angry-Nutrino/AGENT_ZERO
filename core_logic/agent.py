@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from sentence_transformers import SentenceTransformer
 from .tools import (
     run_python_code, web_search, get_time_date, consult_archive,
-    fs_read_file, fs_list_directory, fs_write_file, fs_run_command,
     query_task_status, get_archive_context,
 )
 from .system_prompt import SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, PERSONA
@@ -21,12 +20,55 @@ import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+_DS_CLIENT: AsyncOpenAI | None = None
+_DS_SYNC_CLIENT = None  # sync OpenAI client for memorize_episode (thread-safe, reused)
+
+
 def _ds_client() -> AsyncOpenAI:
-    """Create a fresh DeepSeek async client. Called per request for isolation."""
-    return AsyncOpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-        base_url="https://api.deepseek.com",
-    )
+    """Shared DeepSeek async client (lazy singleton). A fresh client per call threw
+    away the httpx keep-alive pool, paying TCP+TLS setup on EVERY LLM call —
+    interpreter, CHAT stream, FAST formatter, and each DELIBERATE turn (Brief 36 C-1).
+    Request isolation lives in the per-request `llm` message list, not the transport.
+    """
+    global _DS_CLIENT
+    if _DS_CLIENT is None:
+        _DS_CLIENT = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+        )
+    return _DS_CLIENT
+
+
+def _ds_sync_client():
+    """Shared sync DeepSeek client for the consolidation thread (Brief 36 B-13)."""
+    global _DS_SYNC_CLIENT
+    if _DS_SYNC_CLIENT is None:
+        from openai import OpenAI as _SyncOpenAI
+        _DS_SYNC_CLIENT = _SyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+        )
+    return _DS_SYNC_CLIENT
+
+# DeepSeek thinking mode, DELIBERATE path ONLY (2026-06-07). The ReAct loop reasons
+# before each turn to cut the from-memory-fabrication pattern; interpreter/CHAT/FAST stay
+# non-reasoning (latency-sensitive, low accuracy upside). Smoke-tested: deepseek-chat accepts
+# reasoning_effort + extra_body thinking, returns the CoT in a SEPARATE reasoning_content field
+# (the ReAct stream reads delta.content only, so the parser is untouched). Effort is one knob:
+# dial "max"->"high" if the evening bench shows the per-turn cost is too steep (DELIBERATE makes
+# one LLM call PER ReAct turn, so the cost multiplies across turns).
+# A/B FLIP 2026-06-11 (Alkama's call, closing the 06-08 trial): thinking OFF for the
+# 06-11 evening + 06-12 morning runs. The trial never got a clean A/B (the question
+# suite hardened simultaneously), so this is it — the suite is now stable and
+# streak-tracked, so any previously-passing anchor failing is unambiguous signal.
+# REVERT TRIGGER: one new FAIL on a previously-passing anchor -> set True immediately.
+# Decision review with Alkama after the 06-12 MORNING drill.
+DELIBERATE_THINKING = False
+# Dialed "max"->"high" 2026-06-07 after the evening bench: thinking=max cost DELIBERATE
+# +5.4s/+39% per answer (scaling with ReAct turn count) for an accuracy benefit confounded
+# with question-hardening. "high" roughly halves the per-turn tax; the interpreter router rule
+# is the real fabrication guard. (Effort value is inert while DELIBERATE_THINKING=False.)
+DELIBERATE_REASONING_EFFORT = "high"
 
 def user(content: str) -> dict:
     return {"role": "user", "content": content}
@@ -36,6 +78,44 @@ def system(content: str) -> dict:
 
 def assistant(content: str) -> dict:
     return {"role": "assistant", "content": content}
+
+def _capture_react_trace(llm: list, per_msg_cap: int = 3000) -> list:
+    """Brief 32 (Self-Assessment Layer 2): extract the post-routing ReAct turns from the
+    conversation so the harness can feed a FAILED query's actual loop to Clara for root-cause
+    diagnosis. process_request owns the `llm` list that run_task mutates in place, so by the time
+    execution returns the full trace is already here — no hot-path instrumentation of the loop.
+
+    Keeps the request + every Thought/Action/Glint/Final Answer; SKIPS the system prompt and the
+    [MEMORY_CONTEXT_BLOCK] (huge, not reasoning). Large tool observations are bounded with an
+    EXPLICIT [truncated] marker so the diagnosis knows an obs was clipped, not absent (Rule-19
+    honesty applied to the diagnosis INPUT). Gated on return_trace — production requests never pay it."""
+    turns, started = [], False
+    for m in llm:
+        content = m.get("content", "") or ""
+        if not started:
+            if m.get("role") == "user" and content.startswith("Now, execute this request:"):
+                started = True
+            else:
+                continue
+        if "[MEMORY_CONTEXT_BLOCK]" in content:
+            continue
+        if len(content) > per_msg_cap:
+            content = content[:per_msg_cap] + f"\n…[truncated {len(content) - per_msg_cap} chars]"
+        turns.append({"role": m.get("role"), "content": content})
+    return turns
+
+def _repair_json_for_parse(s: str) -> str:
+    """Best-effort repair of the #1 Action parse failure: unescaped backslashes in Windows paths
+    the model writes naturally inside JSON ('Invalid \\escape', ~4-9x/run — measured 2026-06-09).
+    Applied ONLY after a clean json.loads has already failed, so valid JSON is never touched.
+    (a) Drive-letter paths (X:\\...) → forward slashes — every tool accepts them on Windows, and
+    this leaves legitimate \\n/\\t escapes in python_repl code strings alone (they aren't drive-
+    path-shaped). (b) Any remaining lone backslash that is NOT a valid JSON escape → doubled
+    (handles backslashed relative paths)."""
+    s = re.sub(r'[A-Za-z]:\\[^"]*', lambda m: m.group(0).replace("\\", "/"), s)
+    s = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
+    return s
+
 from .crud import crud
 from .session_logger import slog
 from .tool_executor import execute_deliberate, execute_fast
@@ -294,6 +374,13 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         self.miniLM = SentenceTransformer('all-MiniLM-L6-v2').to(device)
         self._miniLM_lock = asyncio.Lock()
         self._vault_lock = threading.Lock()  # guards vault writes against concurrent memorize_episode calls
+        # Makes the (episodic_log append, episodic_embeddings append) PAIR atomic.
+        # memorize_episode (background thread) and log_system_episode (event loop)
+        # both append to the two parallel lists; interleaving between a writer's two
+        # appends misaligns them at EQUAL lengths — invisible to the length-only
+        # context_warmup check, and semantic retrieval then returns the WRONG episode
+        # (Brief 36 B-10). Writers encode FIRST, then append both under this lock.
+        self._episodic_lock = threading.Lock()
         self._event_loop = None  # set at first async call
         self.episodic_embeddings = self._build_episodic_embeddings()
         self.load_clara(model_name)
@@ -318,11 +405,16 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
     async def _encode(self, texts, convert_to_tensor=True):
         """
         Thread-safe MiniLM encoder. All miniLM.encode() calls must go through here.
-        Acquires asyncio.Lock to prevent concurrent CUDA access from main thread
-        and background memorization thread.
+        The asyncio.Lock serializes all encode access (CUDA is not thread-safe for
+        concurrent kernels on one model instance); the actual encode runs in a worker
+        thread so a large batch (e.g. a 1000-summary re-sync) no longer stalls the
+        event loop for its duration (Brief 36 A-1). Serialization is unchanged — the
+        lock is held across the to_thread call.
         """
         async with self._miniLM_lock:
-            return self.miniLM.encode(texts, convert_to_tensor=convert_to_tensor)
+            return await asyncio.to_thread(
+                self.miniLM.encode, texts, convert_to_tensor=convert_to_tensor
+            )
 
     def _encode_sync(self, texts):
         """
@@ -436,6 +528,16 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # A bare object must NOT fall through to the array path — find("[") there
             # would re-trigger the bracket collision. Report the real cause instead.
             if last_json_error:
+                # Same backslash/path repair for the bare-{...} case before reporting failure.
+                try:
+                    repaired = _repair_json_for_parse(obj_str)
+                    if repaired != obj_str:
+                        parsed, _ = json.JSONDecoder().raw_decode(repaired)
+                        if isinstance(parsed, dict):
+                            slog.info("   [Parser] Recovered bare-object via Windows-path/backslash repair.")
+                            return self._validate_actions([parsed], VALID_TOOLS)
+                except (json.JSONDecodeError, ValueError):
+                    pass
                 slog.warning(f"   [Parser] Object-action JSON parse failed: {last_json_error}")
                 return [{"tool": None, "query": None, "error": (
                     f"Malformed JSON in Action: {last_json_error}. The Action must be a JSON "
@@ -499,6 +601,18 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # silently falling through. Clara needs to know her JSON was malformed so
             # she can fix it, not retry the same broken action indefinitely.
             if last_json_error:
+                # Repair the dominant failure (unescaped Windows-path backslashes) and re-parse
+                # before giving up — recovers the action on the FIRST pass instead of burning a
+                # turn on a retry. raw_decode tolerates any trailing junk after the array.
+                try:
+                    repaired = _repair_json_for_parse(candidate)
+                    if repaired != candidate:
+                        parsed, _ = json.JSONDecoder().raw_decode(repaired)
+                        if isinstance(parsed, list) and any(isinstance(i, dict) for i in parsed):
+                            slog.info("   [Parser] Recovered via Windows-path/backslash repair.")
+                            return self._validate_actions(parsed, VALID_TOOLS)
+                except (json.JSONDecodeError, ValueError):
+                    pass
                 slog.warning(f"   [Parser] JSON parse failed: {last_json_error}")
                 return [{"tool": None, "query": None, "error": (
                     f"Malformed JSON in Action: {last_json_error}. Emit the Action as a single "
@@ -638,9 +752,11 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         System entries are filtered from retrieval ([AUTONOMOUS] prefix) so
         the zero vector will never pollute semantic search results.
         """
-        self.db.add_episodic_log(summary)
         zero_emb = torch.zeros(384, dtype=torch.float32)  # MiniLM output dim
-        self.episodic_embeddings.append(zero_emb)
+        # Pair-atomic with memorize_episode's append (B-10) — see _episodic_lock.
+        with self._episodic_lock:
+            self.db.add_episodic_log(summary)
+            self.episodic_embeddings.append(zero_emb)
 
     def memorize_episode(self, chat_snapshot: str, source: str = "user"):
         """
@@ -698,12 +814,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         )
         
         try:
-            
-            from openai import OpenAI as SyncOpenAI
-            sync_client = SyncOpenAI(
-                api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-                base_url="https://api.deepseek.com",
-            )
+            sync_client = _ds_sync_client()
             messages = [
                 {"role": "system", "content": memory_prompt},
                 {"role": "user", "content": f"Interaction:\n{chat_snapshot}"},
@@ -731,12 +842,14 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 slog.error("   [Memory] parse_json_safely returned None — raw output was not valid JSON. Consolidation aborted.")
                 return
 
-            # 4. Save to The Stream (Episodic)
+            # 4. Save to The Stream (Episodic). Encode FIRST, then append the
+            # (log entry, embedding) pair atomically — a concurrent log_system_episode
+            # between the two appends would misalign the parallel lists (B-10).
             summary = data.get("summary", "Interaction completed.")
-            self.db.add_episodic_log(summary)
-            # Encode and append the new episodic embedding incrementally
             new_emb = self._encode_sync(summary).to('cpu')
-            self.episodic_embeddings.append(new_emb)
+            with self._episodic_lock:
+                self.db.add_episodic_log(summary)
+                self.episodic_embeddings.append(new_emb)
             slog.info(f"   [Memory] Episodic embedding updated ({len(self.episodic_embeddings)} total)")
 
             # 4b. Response style update — if Alkama stated a style preference
@@ -894,9 +1007,14 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # 1. Get memory context (always — feeds Interpreter)
             q_emb = await self._encode(final_prompt, convert_to_tensor=True)
             q_emb_cpu = q_emb.to('cpu')
+            # Interpreter context excludes [SELF KNOWLEDGE] (it only routes — doesn't need
+            # Clara's operational learnings). The block is appended to llm_context below so
+            # the LLM paths still receive it. Saves ~2k tokens on every interpreter call.
             mem_context = self.db.get_smart_context(
-                final_prompt, q_emb_cpu, self.episodic_embeddings
+                final_prompt, q_emb_cpu, self.episodic_embeddings,
+                include_self_knowledge=False,
             )
+            self_knowledge_block = self.db._self_knowledge_block()
 
             # 1b. Conditional archive context — same embedding, no extra MiniLM call
             archive_context = await asyncio.to_thread(
@@ -947,6 +1065,8 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             resource_callback = task_context.get("resource_callback") if task_context else None
             # Layer 3+: task_id for resource ledger (read-hash + write-lock checks)
             task_id = task_context.get("task_id") if task_context else None
+            # Brief 32: harness sets return_trace to get the raw ReAct loop back for Layer-2 diagnosis.
+            return_trace = bool(task_context and task_context.get("return_trace"))
 
             full_context = mem_context
             if archive_context:
@@ -1029,6 +1149,11 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             else:
                 llm_context = full_context + tool_context if tool_context else full_context
 
+            # [SELF KNOWLEDGE] goes to the LLM (all paths) but NOT the interpreter — appended
+            # here rather than inside get_smart_context so only llm_context carries it.
+            if self_knowledge_block:
+                llm_context += self_knowledge_block
+
             llm.append(assistant(
                 f"[MEMORY_CONTEXT_BLOCK]\n{llm_context}\n[/MEMORY_CONTEXT_BLOCK]"
             ))
@@ -1046,6 +1171,12 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             else:
                 final_answer, deliberate_usage_list = await self.run_task(on_step_update=on_step_update, llm=llm, resource_callback=resource_callback, task_id=task_id)
             exec_ms = exec_timer.elapsed_ms()
+
+            # Brief 32 — capture the raw ReAct trace (post-routing turns) for Self-Assessment Layer 2.
+            # `llm` was mutated in place by run_task/_run_fast/_run_chat, so the full loop is here now.
+            # Gated on return_trace (harness only) → stashed on task_context for the worker to return.
+            if return_trace and task_context is not None:
+                task_context["react_trace"] = _capture_react_trace(llm)
 
             # Brief 35 — task completion status (DELIBERATE only). Parse + STRIP the [[TASK: …]]
             # marker so the user never sees it, and record the status on the task context so the
@@ -1109,10 +1240,22 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     token_usage=token_usage,
                 )
 
+            # memory_mode (test traffic via /query — real users default "full"):
+            #   "full"      → persist normally.
+            #   "ephemeral" → transient recent_exchanges only (coherence drill needs
+            #                 within-dialogue recall) but NO permanent episodic/vault.
+            #   "none"      → write nothing (L1-L5 harness — full isolation).
+            # The 2026-06-07 confabulation leaked through PERMANENT episodic, so the drill
+            # keeps its recall apparatus (recent_exchanges, reset between dialogues) while
+            # never writing a persisted memory.
+            memory_mode = (task_context or {}).get("memory_mode", "full")
+            write_recent = memory_mode != "none"
+            write_episodic = memory_mode == "full"
+
             # 6. Verbatim recent-conversation buffer (Topic 4, Phase 1) — user turns only.
             # Stores raw query + final answer (NOT the ReAct loop). Decoupled from
             # consolidation so a parse-failure in memorize_episode never costs a turn.
-            if source == "user" and final_answer:
+            if source == "user" and final_answer and write_recent:
                 asyncio.create_task(
                     asyncio.to_thread(self.db.append_recent_exchange, query, final_answer)
                 )
@@ -1122,13 +1265,22 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # becomes self-narrative ground truth — the exact Q15/Shobha class). The detached retry's
             # TERMINAL outcome consolidates instead. recent_exchanges above still captured this turn
             # (short-term coherence — she remembers she said she'd retry). Brief 35.
-            if not will_retry:
+            if not will_retry and write_episodic:
                 chat_snapshot = "\n".join([
                     f"{'User' if m['role'] == 'user' else 'Clara'}: {m['content']}"
                     for m in llm
                     if m['role'] != 'system'
                     and "[MEMORY_CONTEXT_BLOCK]" not in m['content']
                 ])
+                # Cap the consolidation input (B-18): an 8-turn DELIBERATE loop with 3KB
+                # Glints is mostly bulk the summarizer doesn't need. Keep the head (the
+                # user's request) + the tail (final answer + last Glints).
+                if len(chat_snapshot) > 6000:
+                    chat_snapshot = (
+                        chat_snapshot[:1500]
+                        + "\n…[middle of the exchange truncated for consolidation]…\n"
+                        + chat_snapshot[-4500:]
+                    )
                 mem_task = asyncio.create_task(
                     asyncio.to_thread(self.memorize_episode, chat_snapshot, source)
                 )
@@ -1138,17 +1290,22 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                             f"   [Memory] memorize_episode failed: {t.exception()}"
                         )
                 mem_task.add_done_callback(_on_memorize_done)
+            elif not write_episodic:
+                slog.info(f"   [Memory] Skipping episodic consolidation — memory_mode={memory_mode} (test traffic).")
             else:
                 slog.info("   [Memory] Skipping consolidation — first INCOMPLETE attempt, retry pending (Brief 35).")
 
             return final_answer
 
         except Exception as e:
-            err_str = str(e)
+            err_str = str(e).lower()
             slog.error(f"   [process_request] Unhandled error: {e}")
-            if "DEADLINE_EXCEEDED" in err_str or "DeadlineExceeded" in err_str or "grpc" in err_str.lower():
+            # DeepSeek via the OpenAI SDK raises openai.* exceptions — classify on
+            # message content (the old grpc/DEADLINE_EXCEEDED branches were Grok/Gemini
+            # era vestiges that never matched, Brief 36 B-19).
+            if "timeout" in err_str or "timed out" in err_str:
                 return "The request timed out reaching the AI service. Please try again."
-            if "UNAVAILABLE" in err_str or "connection" in err_str.lower():
+            if "connection" in err_str or "unreachable" in err_str or "unavailable" in err_str:
                 return "The AI service is temporarily unreachable. Please try again in a moment."
             return "Something went wrong on my end. Please try again."
 
@@ -1310,7 +1467,9 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             if on_step_update:
                 await on_step_update(token, type="stream", turn_id=1)
                 sent_len += len(token)
-                await asyncio.sleep(0.01)
+                # Yield only — the old sleep(0.01) PER CHUNK added ~1-2s of pure
+                # artificial latency to long CHAT answers (Brief 36 C-23).
+                await asyncio.sleep(0)
 
         response = raw.strip()
         slog.info(f">> [CHAT] Response:\n{response}")
@@ -1433,12 +1592,18 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             turn_usage = None
 
             # 1. Open the Live Pipe (DeepSeek OpenAI-compatible streaming)
+            #    Thinking mode (DELIBERATE only) reasons before emitting each ReAct turn —
+            #    the CoT arrives as reasoning_content (ignored below; we read delta.content).
             ds = _ds_client()
+            _think_kw = ({"reasoning_effort": DELIBERATE_REASONING_EFFORT,
+                          "extra_body": {"thinking": {"type": "enabled"}}}
+                         if DELIBERATE_THINKING else {})
             async for chunk in await ds.chat.completions.create(
                 model="deepseek-chat",
                 messages=llm,
                 stream=True,
                 stream_options={"include_usage": True},
+                **_think_kw,
             ):
                 if chunk.usage:
                     turn_usage = chunk.usage
@@ -1478,7 +1643,9 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             if has_glint and "Action:" not in raw_content:
                 # Bare fabricated Glint — no Action at all
                 slog.warning("   [System] Hallucinated Glint detected (no Action) — correcting.")
-                llm.append(assistant(pre_glint))
+                # pre_glint is "" when the turn BEGAN with "Glint:" — an empty assistant
+                # message confuses some chat APIs, so substitute a placeholder (C-30).
+                llm.append(assistant(pre_glint or "(fabricated Glint discarded by system)"))
                 llm.append(user(
                     "System: You generated a Glint without calling a tool. "
                     "Glints can ONLY come from actual tool execution. "
@@ -1510,6 +1677,20 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 if on_step_update:
                     await on_step_update(final, type="stream", turn_id=turn_count)
                 slog.info(f">> [DELIBERATE] Final Answer:\n{final}")
+                return final, deliberate_usage_list
+
+            # Fix (2026-06-09): the model very often delivers a COMPLETE, CORRECT answer ending in
+            # the [[TASK: COMPLETE/INCOMPLETE]] marker but WITHOUT the literal "Final Answer:" prefix
+            # — it replaced the ceremony with the completion marker we asked for. The off-format net
+            # below then wasted a whole turn (~9/run, measured) making it re-send. The marker IS the
+            # completion signal: if it's present with no Action, accept the turn as the Final Answer
+            # on ANY turn. (The [[TASK: …]] marker is stripped downstream by _parse_completion.)
+            if _TASK_MARKER_RE.search(response_text) and "Action:" not in response_text:
+                final = (response_text.split("Final Answer:")[-1].strip()
+                         if "Final Answer:" in response_text else response_text.strip())
+                if on_step_update:
+                    await on_step_update(final, type="stream", turn_id=turn_count)
+                slog.info(f">> [DELIBERATE] Final Answer (via [[TASK]] marker, no prefix):\n{final}")
                 return final, deliberate_usage_list
 
             # Safety net: detect off-format turns — no Thought, no Action, no Final Answer.

@@ -3,11 +3,20 @@ import os
 from openai import AsyncOpenAI
 from .session_logger import slog
 
+_DS_CLIENT: "AsyncOpenAI | None" = None
+
+
 def _ds_client() -> AsyncOpenAI:
-    return AsyncOpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-        base_url="https://api.deepseek.com",
-    )
+    """Shared DeepSeek async client (lazy singleton) — a fresh client per interpret()
+    call discarded the httpx keep-alive pool and paid TCP+TLS setup on every request
+    (Brief 36 C-1)."""
+    global _DS_CLIENT
+    if _DS_CLIENT is None:
+        _DS_CLIENT = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+        )
+    return _DS_CLIENT
 
 # Tool argument schemas — tells the Interpreter what args each tool needs.
 # Filesystem tools are NO LONGER listed here. They are discovered via tool_search
@@ -144,6 +153,21 @@ Examples that must route DELIBERATE:
 - "Where is the orchestrator defined?" → requires_planning=true
 Signal words: "in CLARA", "which file", "what module", "how does CLARA", "where is X handled",
 "what does X do in the system", execution mode names, module/class names from the codebase.
+
+CONCRETE CODE REFERENCE (the load-bearing case — do NOT route to CHAT):
+Even when a question LOOKS answerable from general programming knowledge, if it names a SPECIFIC
+file path (e.g. core_logic/crud.py), a codebase identifier (a function/method/class/constant such as
+_save_memory, _vault_lock, MAX_ATTEMPTS, _TASK_MARKER_RE), OR asks for a CONCRETE code detail — an
+exact value, a line number, a verbatim quote, a function signature, an exact prefix/argument string —
+set requires_planning=true (DELIBERATE). Answering these from parametric memory FABRICATES the
+specifics (wrong line, wrong prefix, wrong signature, stale value) even when the general concept is
+right. The file MUST be read, not recalled.
+Examples that MUST route DELIBERATE, never CHAT:
+- "core_logic/crud.py's _save_memory: name the stdlib function it uses and the exact prefix" → requires_planning=true
+- "quote verbatim the line where _vault_lock is created" → requires_planning=true
+- "what is MAX_ATTEMPTS and on exactly which line is it defined?" → requires_planning=true
+- "give the def line of _number_read_file_lines with its parameter names" → requires_planning=true
+Trigger: a *.py path, a codebase identifier, or any request for an exact value / line / quote / signature.
 
 CRITICAL — completeness enumeration:
 Queries that ask to find or list EVERY occurrence, ALL matches, EACH place a string/pattern

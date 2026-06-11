@@ -99,6 +99,11 @@ async def lifespan(app: FastAPI):
     task_graph = TaskGraph()
     set_task_graph(task_graph)
     slog.info("[API] TaskGraph reference injected into tools.")
+    # Inject the agent's LIVE crud instance into the tool executor (Brief 36 C-35 —
+    # it previously imported the crud CLASS, so fsmap auto-population never ran).
+    from core_logic.tool_executor import set_db
+    set_db(clara.db)
+    slog.info("[API] Memory db reference injected into tool executor.")
     event_queue = EventQueue()
     orchestrator = Orchestrator(clara, event_queue, task_graph, tracer=tracer)
     await orchestrator.start()
@@ -270,13 +275,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     content, type=type,
                     turn_id=turn_id, message_id=message_id, extra=extra
                 )
-            response = await orchestrator.submit_user_event(
-                text=user_text,
-                image_data=image_data,
-                file_data=file_data,
-                message_id=message_id,
-                on_step_update=on_step,
-                on_interpreted=_speak_ack if via_voice else None,
+            # 600s ceiling (Brief 36 A-13): without it, ANY bug that drops a response
+            # future means permanent silence for this message. On timeout the awaited
+            # future is cancelled, so a late worker result is dropped harmlessly
+            # (set_result is guarded by future.done()).
+            response = await asyncio.wait_for(
+                orchestrator.submit_user_event(
+                    text=user_text,
+                    image_data=image_data,
+                    file_data=file_data,
+                    message_id=message_id,
+                    on_step_update=on_step,
+                    on_interpreted=_speak_ack if via_voice else None,
+                ),
+                timeout=600,
             )
             env_watcher.notify_interaction()
             if via_voice and _voice_ready():
@@ -286,6 +298,14 @@ async def websocket_endpoint(websocket: WebSocket):
             await _broadcast({
                 "type": "final_answer",
                 "content": response,
+                "message_id": message_id,
+            })
+        except asyncio.TimeoutError:
+            slog.error(f"[WS] handle_message timed out after 600s (message {message_id}).")
+            await _broadcast({
+                "type": "final_answer",
+                "content": ("This is taking far longer than it should — I've let it go for now. "
+                            "The task may still finish in the background; ask me again in a moment."),
                 "message_id": message_id,
             })
         except Exception as e:
@@ -354,8 +374,11 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
     except WebSocketDisconnect:
-        active_connections.discard(websocket)
         slog.info("[API] Client disconnected.")
+    finally:
+        # Always remove — a non-Disconnect exception (e.g. send_json on a socket that
+        # closed mid-reply) previously left the dead socket in active_connections.
+        active_connections.discard(websocket)
 
 
 @app.get("/soul")
@@ -371,12 +394,11 @@ async def get_soul():
     }
 
     try:
-        if os.path.exists("core_logic/memory.json"):
-            # encoding='utf-8' is required — memory.json is written as UTF-8 and on the
-            # cp1252-default Windows backend a bare open() throws 'charmap' on multibyte
-            # bytes (e.g. 0x81), which silently dropped /soul to a default/empty profile.
-            with open("core_logic/memory.json", "r", encoding="utf-8") as f:
-                memory = json.load(f)
+        # Serve from the agent's LIVE in-RAM memory (Brief 36 D-5). The old disk read
+        # was the documented READER causing os.replace PermissionError contention in
+        # crud._save_memory — and the RAM dict is always fresher anyway.
+        if clara is not None:
+            memory = clara.db.memory
 
             user = memory.get("user_profile", {})
             state = memory.get("project_state", {})
@@ -435,6 +457,19 @@ async def get_soul():
 
 class QueryRequest(BaseModel):
     text: str
+    # Test-only endpoint. memory_mode isolates test traffic from Clara's real memory —
+    # without it, scripted drill fixtures (fake job offers, manager "Priya", brother in
+    # "Lisbon") leaked into episodic memory and Clara later surfaced them as real facts in
+    # genuine conversations (2026-06-07 confabulation). Values:
+    #   "none"      — write nothing (L1-L5 harness; single-turn, needs full isolation)
+    #   "ephemeral" — transient recent_exchanges only, NO permanent episodic/vault
+    #                 (coherence drill; needs within-dialogue recall, resets between dialogues)
+    #   "full"      — normal persistence (never used by the harness; real users only)
+    memory_mode: str = "none"
+    # Brief 32: when True, the response includes the raw post-routing ReAct loop
+    # (react_trace) so the harness can feed a FAILED query's actual turns to Clara for
+    # Self-Assessment Layer 2 root-cause diagnosis. Off by default (real callers never need it).
+    return_trace: bool = False
 
 @app.post("/query")
 async def query_endpoint(req: QueryRequest):
@@ -442,11 +477,20 @@ async def query_endpoint(req: QueryRequest):
     Simple HTTP endpoint for the daily test harness.
     Fires a query through the full orchestrator pipeline and returns the final answer.
     Local-only, unauthenticated — do not expose publicly.
+    memory_mode defaults "none" so test traffic never persists to Clara's memory.
     """
     if not orchestrator:
         return {"response": "Error: orchestrator not ready."}
     try:
-        response = await orchestrator.submit_user_event(text=req.text)
+        response = await asyncio.wait_for(
+            orchestrator.submit_user_event(
+                text=req.text, memory_mode=req.memory_mode, return_trace=req.return_trace
+            ),
+            timeout=600,  # Brief 36 A-13 — a dropped future becomes an honest error, not a hang
+        )
+        # With return_trace, the worker resolves with {"response", "react_trace"}; pass it through.
+        if isinstance(response, dict):
+            return response
         return {"response": response}
     except Exception as e:
         slog.error(f"[/query] Error: {e}")

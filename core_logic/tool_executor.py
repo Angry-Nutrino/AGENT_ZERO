@@ -29,13 +29,29 @@ _FS_PATH_TOOLS = frozenset({
     "get_more_search_results",
 })
 
+# The agent's LIVE crud instance, injected by api.py at startup (set_db). The old code
+# did `from .crud import crud as _crud` — importing the CLASS and calling instance
+# methods on it, so every merge raised TypeError into the defensive except and the
+# Phase-B fsmap auto-population NEVER actually ran (Brief 36 C-35, found during the
+# Brief 37 double-check). A fresh crud() here would be equally wrong: it would load its
+# own stale memory snapshot and clobber the agent's in-RAM state on save.
+_db = None
+
+
+def set_db(db) -> None:
+    """Called once by api.py after the agent (and its crud) is created."""
+    global _db
+    _db = db
+
 
 def _update_filesystem_map(tool_name: str, args: dict, result: str) -> None:
     """
     After a successful filesystem tool call, update the filesystem_map tree.
     Called from both execute_fast and execute_deliberate — never raises.
+    All merges are batched (save=False) into ONE _save_memory at the end —
+    a full-file fsync per child path was the hottest write source (B-2).
     """
-    if tool_name not in _FS_PATH_TOOLS:
+    if tool_name not in _FS_PATH_TOOLS or _db is None:
         return
     if not isinstance(result, str):
         return
@@ -43,25 +59,26 @@ def _update_filesystem_map(tool_name: str, args: dict, result: str) -> None:
     if lowered.startswith("error:") or lowered.startswith("tool error:"):
         return
     try:
-        from .crud import crud as _crud
         if tool_name in ("read_file", "write_file"):
             path = args.get("path", "")
             if path:
-                _crud.merge_filesystem_path(path, is_file=True)
+                _db.merge_filesystem_path(path, is_file=True, save=False)
 
         elif tool_name == "create_directory":
             path = args.get("path", "")
             if path:
-                _crud.merge_filesystem_path(path, is_file=False)
+                _db.merge_filesystem_path(path, is_file=False, save=False)
 
         elif tool_name == "list_directory":
             path = args.get("path", "")
             if path:
-                _crud.merge_filesystem_path(path, is_file=False)
-                _parse_list_directory_into_map(path, result, _crud)
+                _db.merge_filesystem_path(path, is_file=False, save=False)
+                _parse_list_directory_into_map(path, result, _db)
 
         elif tool_name == "get_more_search_results":
-            _parse_search_paths_into_map(result, _crud)
+            _parse_search_paths_into_map(result, _db)
+
+        _db._save_memory()
 
     except Exception:
         pass  # never disrupt tool execution
@@ -79,7 +96,7 @@ def _parse_list_directory_into_map(parent_path: str, result: str, crud) -> None:
                     name = item.get("name", "")
                     is_dir = item.get("isDirectory", item.get("type", "") == "directory")
                     if name:
-                        crud.merge_filesystem_path(f"{parent}\\{name}", is_file=not is_dir)
+                        crud.merge_filesystem_path(f"{parent}\\{name}", is_file=not is_dir, save=False)
             return
     except (json.JSONDecodeError, Exception):
         pass
@@ -92,7 +109,7 @@ def _parse_list_directory_into_map(parent_path: str, result: str, crud) -> None:
         name = re.split(r'\s{2,}|\t|\s+\(', line)[0].strip().rstrip("/\\")
         if name and ("." in name or is_dir):
             try:
-                crud.merge_filesystem_path(f"{parent}\\{name}", is_file=not is_dir)
+                crud.merge_filesystem_path(f"{parent}\\{name}", is_file=not is_dir, save=False)
             except Exception:
                 pass
 
@@ -102,7 +119,7 @@ def _parse_search_paths_into_map(result: str, crud) -> None:
     # Match paths like E:\something\file.py or C:\Users\...
     for match in re.finditer(r'[A-Za-z]:\\(?:[^\s:\n\r"\'<>|?*]+\\)*[^\s:\n\r"\'<>|?*]+\.[A-Za-z0-9]{1,10}', result):
         try:
-            crud.merge_filesystem_path(match.group(0), is_file=True)
+            crud.merge_filesystem_path(match.group(0), is_file=True, save=False)
         except Exception:
             pass
 
@@ -217,6 +234,50 @@ NATIVE_TOOLS = frozenset({
 })
 
 
+async def _execute_mcp(server: str, tool_name: str, args: dict, mcp_client, task_id: str = None) -> str:
+    """Single MCP dispatch path shared by execute_fast and execute_deliberate
+    (previously ~60 duplicated lines — Brief 36 C-17). Owns, in order:
+    write-ledger protection, atomic search, read-hash recording, fsmap update,
+    and read_file line-stamping.
+
+    Ledger ordering fix (C-16): check_write now runs INSIDE the held write lock.
+    The old order (check → acquire → write) let two tasks both pass the hash check
+    before either wrote — the second then silently clobbered the first, the exact
+    read-modify-write hazard the ledger exists to stop.
+    """
+    if task_id and tool_name == "write_file":
+        path = args.get("path", "")
+        if path:
+            write_lock = await resource_ledger.acquire_write(path, task_id)
+            try:
+                ok, reason = resource_ledger.check_write(task_id, path)
+                if not ok:
+                    return f"Error: {reason}"
+                result = await mcp_client.call(server, tool_name, args)
+            finally:
+                write_lock.release()
+        else:
+            result = await mcp_client.call(server, tool_name, args)
+    elif tool_name == "start_search":
+        result = await _atomic_search(server, mcp_client, args)
+    else:
+        result = await mcp_client.call(server, tool_name, args)
+
+    result_str = result if isinstance(result, str) else str(result)
+
+    # Resource ledger: record read hash after successful read_file
+    if task_id and tool_name == "read_file":
+        path = args.get("path", "")
+        if path and not result_str.lower().startswith(("error:", "tool error:")):
+            resource_ledger.record_read(task_id, path, result_str)
+
+    _update_filesystem_map(tool_name, args, result_str)
+    # Coordinate-drift fix: stamp absolute line numbers (after ledger/raw use).
+    if tool_name == "read_file" and not result_str.lower().startswith(("error:", "tool error:")):
+        result_str = _number_read_file_lines(result_str, args.get("offset", 0))
+    return result_str
+
+
 def _number_read_file_lines(raw: str, offset) -> str:
     """Stamp correct ABSOLUTE line numbers onto Desktop Commander read_file output.
 
@@ -296,38 +357,7 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
         elif registry is not None:
             server = registry.get_server(tool_name)
             if server and server != "native" and mcp_client is not None:
-                # Resource ledger: write conflict check + exclusive lock
-                if task_id and tool_name == "write_file":
-                    path = args.get("path", "")
-                    if path:
-                        ok, reason = resource_ledger.check_write(task_id, path)
-                        if not ok:
-                            return f"Error: {reason}"
-                        write_lock = await resource_ledger.acquire_write(path, task_id)
-                        try:
-                            result = await mcp_client.call(server, tool_name, args)
-                        finally:
-                            write_lock.release()
-                    else:
-                        result = await mcp_client.call(server, tool_name, args)
-                elif tool_name == "start_search":
-                    result = await _atomic_search(server, mcp_client, args)
-                else:
-                    result = await mcp_client.call(server, tool_name, args)
-
-                result_str = result if isinstance(result, str) else str(result)
-
-                # Resource ledger: record read hash after successful read_file
-                if task_id and tool_name == "read_file":
-                    path = args.get("path", "")
-                    if path and not result_str.lower().startswith(("error:", "tool error:")):
-                        resource_ledger.record_read(task_id, path, result_str)
-
-                _update_filesystem_map(tool_name, args, result_str)
-                # Coordinate-drift fix: stamp absolute line numbers (after ledger/raw use).
-                if tool_name == "read_file" and not result_str.lower().startswith(("error:", "tool error:")):
-                    result_str = _number_read_file_lines(result_str, args.get("offset", 0))
-                return result_str
+                return await _execute_mcp(server, tool_name, args, mcp_client, task_id=task_id)
             elif server is None:
                 return f"Error: Tool '{tool_name}' not found in registry."
             else:
@@ -420,39 +450,13 @@ async def execute_deliberate(
             if server and server != "native" and mcp_client is not None:
                 schema = registry.get_schema(tool_name)
                 mcp_args = _build_args_from_query(tool_name, query, schema)
-
-                # Resource ledger: write conflict check + exclusive lock
-                if task_id and tool_name == "write_file":
-                    path = mcp_args.get("path", "")
-                    if path:
-                        ok, reason = resource_ledger.check_write(task_id, path)
-                        if not ok:
-                            return f"Error: {reason}"
-                        write_lock = await resource_ledger.acquire_write(path, task_id)
-                        try:
-                            result = await mcp_client.call(server, tool_name, mcp_args)
-                        finally:
-                            write_lock.release()
-                    else:
-                        result = await mcp_client.call(server, tool_name, mcp_args)
-                elif tool_name == "start_search":
-                    result = await _atomic_search(server, mcp_client, mcp_args)
-                else:
-                    result = await mcp_client.call(server, tool_name, mcp_args)
-
-                result_str = result if isinstance(result, str) else str(result)
-
-                # Resource ledger: record read hash after successful read_file
-                if task_id and tool_name == "read_file":
-                    path = mcp_args.get("path", "")
-                    if path and not result_str.lower().startswith(("error:", "tool error:")):
-                        resource_ledger.record_read(task_id, path, result_str)
-
-                _update_filesystem_map(tool_name, mcp_args, result_str)
-                # Coordinate-drift fix: stamp absolute line numbers (after ledger/raw use).
-                if tool_name == "read_file" and not result_str.lower().startswith(("error:", "tool error:")):
-                    result_str = _number_read_file_lines(result_str, mcp_args.get("offset", 0))
-                return result_str
+                # Multi-arg rejection (C-20): _build_args returns {"error": guidance}
+                # when a multi-required-arg tool got a flat string. Previously that
+                # dict was sent to the MCP server AS ARGUMENTS — the model saw DC's
+                # terse validation error instead of the crafted guidance. Return it.
+                if isinstance(mcp_args, dict) and set(mcp_args.keys()) == {"error"}:
+                    return f"Error: {mcp_args['error']}"
+                return await _execute_mcp(server, tool_name, mcp_args, mcp_client, task_id=task_id)
             elif server is None:
                 return (
                     f"Tool '{tool_name}' not found. "

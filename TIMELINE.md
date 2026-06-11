@@ -1,6 +1,446 @@
 # CLARA Project Timeline
 
-## 2026-06-06
+## 2026-06-11
+
+[UPDATE] The Drill — 2026-06-10 evening (Brief 37's live regression gate: PASSED everywhere it's measurable)
+15 PASS / 0 FAIL / 5 UNVERIFIABLE → all 5 judged pass manually = effective 20/20, first clean-sweep evening.
+• BRIEF 37 GATE: ReAct turns 81→52→**32** across three runs; evening trace **84.9 KB vs 1,091.9 KB** morning
+  (tick gating, −92%); janitor's first live sweep (traces 653→272 MB, logs 149→42 files; episodic-logged
+  BECAUSE it acted — the notable-gate working); memory_mode=none held (user episodes 550 unchanged); zero
+  off-format/malformed/retries/errors. HONEST: INTERP_MS and CHAT latency show NO visible win (provider
+  variance >> TLS saving; DeepSeek batches tokens/chunk) — B37's proven wins are turns/traces/disk/pollution,
+  not wall-clock.
+• CALIBRATION WIN #2: Q11's oracle expected line '76'; Brief 37's crud.py additions shifted it to 92 three
+  hours before the run. Clara enumerated correct post-edit lines AND her D6 self-assessment attributed the
+  verdict to a stale oracle — exactly right, second consecutive correct reconciliation. Oracle de-brittled
+  (line number dropped; question never asked for one).
+• VAULT CONTAMINATION found via Q15 ("the Go microservices" — a coherence FIXTURE — surfaced in a live
+  answer): 5 fixture facts survived the 06-07 cleanup (episodes purged, vault unchecked). 3 false-personal
+  facts REMOVED (Priya/Lisbon/Go repo; vault 41→38; backup memory.json.bak-20260611-072354); 2 Kleppmann
+  facts kept pending Alkama (true, fixture-sourced). memory_mode prevents the class going forward.
+• "MemoryStore" TELL ×2: Q11 invented class "MemoryStore", Q17 "the Agent class" (real: crud, Clara_Agent) —
+  substance right, names fabricated; the exact failure mode Brief 38's fabrication gate targets. Proposed
+  self_knowledge pin (awaiting Alkama OK).
+• Layer 2 gold seed: real-axis MATCH (3/3 runs); fine-mechanism 0/3 (watch continues). Ladder: first
+  streak-tracked evening — 13 climbables at streak 1, first CLIMB-DUE expected ~06-12e. ROTATION: Q5→LSM
+  write amplification (cadence); Q3 oracle FLIPPED (vision live — currency probe); Q6 scope-rewritten
+  (premise died with the key; new target = 503-retry sleep line); Q11 de-brittled. Thinking-trial verdict
+  presented to Alkama (no clean A/B exists; recommendation in chat).
+
+[FEATURE] Ambient Awareness A0 BUILT (BRIEF_39, amended to the standalone-watcher split) + vram_sentinel removed
+Alkama's 24/7 constraint ("server only runs 30-40 min/day") reshaped A0 for the better: perception is split
+OUT of the backend into `ambient_watch.py` — a featherweight standalone process (no GPU/models/API keys,
+~25MB) that Task Scheduler can run 24/7, the ONLY writer of `core_logic/ambient.json` (ring cap 2000,
+atomic mkstemp→replace flushes every 30s). Backend will be read-only consumer; its future baseline goes to a
+separate `ambient_patterns.json` (one writer per file, contention impossible by construction). Sensors in
+`core_logic/ambient.py`: active_window (title+process, on change), system_state (battery/AC, on change),
+session_rhythm (active↔idle transitions, 5-min threshold). CONSENT-GATED: a sensor runs ONLY if listed in
+AMBIENT_SENSORS in .env — currently UNSET, so nothing runs until Alkama enables. Single-instance socket
+guard (8771); own log with self-rotation; IGNORED_PATTERNS + .gitignore extended (ambient files are personal
+data + would otherwise spawn file_change tasks every flush). LIVE-TESTED 45s: captured the real foreground
+window/battery/presence with on-change dedup; data survived a hard kill (30s flush). A1 (ambient_recall tool,
+backend-side) is the next step once the silent week starts. Also: `vram_sentinel.py` deleted per Alkama
+(unwired dead code — never instantiated by api.py; blocking requests-in-async + emoji-print issues noted in
+chat; git history preserves it).
+
+[UPDATE] Thinking A/B begins + SK class-name pin + BRIEF_37 reference file + git leak audit
+• DELIBERATE_THINKING flipped FALSE (Alkama's call closing the 06-08 trial): A/B = 06-11 evening + 06-12
+  morning on the stable streak-tracked suite. Revert trigger: ONE new FAIL on a previously-passing anchor →
+  True immediately. Re-discussion booked after the 06-12 MORNING drill.
+• self_knowledge pin added (Alkama-approved): real class names are `crud` + `Clara_Agent` — never
+  "MemoryStore"/"Agent" (the 06-10e Q11/Q17 tell). SK now exactly at the 20 cap. Backup taken.
+• Vision benchmarked: 5.6s descriptive (perfect), 4.0s OCR (one space dropped on a 10px bitmap font).
+• BRIEF_37_Audit_Fix_Bundle.md written (the fix bundle had lived only inside BRIEF_36's status block).
+• GIT LEAK AUDIT (Alkama's ask): repo is PUBLIC on GitHub; tracked+pushed sensitive files found — 4 full
+  memory.json backups + 1 corrupt + 1 orphan atomic-write tmp, archived_vault_facts.json, tasks.db
+  -shm/-wal/.bak, 2 uploaded temp_doc PDFs, 3 personal photos, persona files (whose old ../ gitignore
+  entries were BROKEN patterns), pid file. KEYS ARE SAFE: .env never committed; .env.example contains
+  placeholders only (initial prefix+length probe was a false positive — corrected). .gitignore fixed
+  (working persona entries, .memory.json.* temps, tasks.db.bak-*, archived_vault_facts, photos/);
+  untrack + history-purge + force-push steps handed to Alkama (his git ops).
+
+[FEATURE] Vision is LIVE — GEMINI_API_KEY provisioned, wired, validated (first working vision since Grok era)
+Alkama added the key as `Clara_vision_Gemini_Api`; wired by byte-level rename to the canonical
+`GEMINI_API_KEY` in core_logic/.env (every reader — tools.py, tool_executor.py ×2, tool_registry.py —
+already targets that name; zero code changes needed for the wiring itself). Validated live: a generated
+solid-red probe image through `analyze_image_grok` → "Red". First attempt hit Gemini free-tier
+**503 UNAVAILABLE** ("high demand") — real, recurring behavior, so a 3-attempt retry with 8s/16s backoff
+was added inside `analyze_image_grok` (a 503 surfaced to the ReAct loop reads like a broken tool when
+it's a 15-second blip). The registry's "[CURRENTLY UNAVAILABLE]" vision description prefix (Brief 37)
+self-clears at next backend start since it checks the env at registration. CLAUDE.md vision sections
+updated (5 spots: env vars, module table, Vision Tool section, LLM Models in Use, Vision Improvements).
+Unblocked: markitdown-ocr follow-up (scanned PDFs) + the future Ambient A3 screenshot sensor.
+
+[FEATURE] Batch F expanded into buildable briefs: BRIEF_38 (L3 fix proposals), BRIEF_39 (Ambient A0+A1), BRIEF_40 (Ambient A2)
+Per Alkama's request, the audit's future sketches became full specs:
+• BRIEF_38 — Self-Assessment Layer 3: the FABRICATION GATE is the design center — every fix proposal must
+  carry a verbatim `current_code_quote` that the harness verifies deterministically against the named file
+  using Layer 1's existing verbatim machinery; a quote that doesn't exist = auto-reject (`fabricated_quote`),
+  and the rejection rate doubles as a live fabrication-rate metric. Triggers: confirmed FAIL + fail_count≥2 +
+  real-axis Layer-2 diagnosis. Scope guard excludes the assessment stack itself (no grading-the-grader).
+  Trust ladder: ≥5 consecutive gate-passed+accepted+proven proposals before Layer 4 is even discussed.
+  Gold-seed validation incl. a negative seed that TEMPTS quoting a nonexistent function.
+• BRIEF_39 — Ambient A0 (silent perception: consent-gated active_window/system_state/session_rhythm sensors,
+  separate ambient.json ring buffer, 6h baseline-pattern extraction, NO output) + A1 (grounded recall:
+  ambient_recall native tool, Rule-19 parity — an unobserved hour is "I wasn't watching", never a guess;
+  mechanically-verifiable drill question class via planted observations).
+• BRIEF_40 — Ambient A2 (decisions-level): salience = novelty×relevance×actionability gated by timing
+  etiquette, 2/day token-bucket budget, Telegram/UI only (no voice), 👍/👎 Beta-counter threshold tuning,
+  ≥70% useful over trailing 20 before A3; the Brief-36 A-14 interrupt-model rebuild ships HERE (ambient
+  compose = the first real preemptible background work). ROADMAP rows 37-40 added; F.6 marked resolved.
+
+## 2026-06-10
+
+[FIX] Brief 37 — the audit fix bundle implemented (all of it, one pass, 14 files)
+Green-lit by Alkama after a full re-brief. Every Batch A–D fix from BRIEF_36 landed:
+• CRITICALs: _context_warmup re-sync deadlock (now `await agent._encode`); retry-hang (TaskGraph now
+  sanitizes context at EVERY persist — futures/callbacks never hit json.dumps; in-memory keeps them; retry
+  task_id refreshed); 600s `asyncio.wait_for` on both submit_user_event call sites (WS + /query) so a dropped
+  future = honest timeout, never silence.
+• Races: episodic (log, embedding) pair-append now atomic under `_episodic_lock` (encode-first, append-pair);
+  crud-wide RLock around all memory mutations + _save_memory; ledger check_write moved INSIDE the held write
+  lock (TOCTOU); python_repl output captured via scoped print-override (no more global sys.stdout swap).
+• NEW BUG FOUND during the pre-implementation double-check (C-35): tool_executor imported the crud CLASS, so
+  Phase-B filesystem-map auto-population had NEVER worked (every merge TypeError'd into `except: pass`). Fixed
+  via api.py injecting the live `clara.db` (`set_db`), merges batched into one save per tool call.
+• Memory hygiene: routine heartbeat results no longer write episodic entries (gate in _run_worker); shared
+  `crud.SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK")` closes the SOFT-RETRY retrieval leak; memory.json pruned
+  1028→580 episodes (438 heartbeat noise + 10 SOFT-RETRY dropped, newest 30 autonomous kept; backup
+  memory.json.bak-20260610-165046).
+• Retention: orchestrator tick-trace gated (change-or-60s-heartbeat — was ~10/s idle, 653 MB accumulated);
+  memory_maintenance is now a real janitor (6h sweep: traces/logs >14d, benchmarks >30d, upload temps >1d,
+  terminal task rows >7d via TaskGraph.prune_terminal, memory.json backup rotation keep-3).
+• Latency: ONE shared AsyncOpenAI client (TLS-per-call tax gone, interpreter+agent) + shared sync client for
+  consolidation; _run_chat per-chunk sleep(0.01)→sleep(0) (was +1-2s artificial on CHAT).
+• Honest dispositions: dead Phase-4 interrupt pauser DELETED (rebuild deliberately deferred to Ambient
+  Awareness); resume path fixed paused→pending (was a workerless zombie); running→invalidated legalized
+  (cancel of a running task no longer resurrects as a ghost on restart); trigger DEDUPE in scheduler+watcher
+  (no rebuild pile-ups); vision_tool registry description marked "[CURRENTLY UNAVAILABLE]" while keyless;
+  dead fs_* quartet + dead vision helpers deleted from tools.py.
+• Smaller: MCP dead-server one-shot reconnect (_ensure_alive) + notification-write lock; Telegram MarkdownV2
+  parse failure now retries PLAIN (answer never lost to formatting) + typing indicator refreshed every 4s;
+  /soul serves from in-RAM memory (kills the os.replace reader contention); WS finally-discard; voice temp-WAV
+  unlink in finally + 30s first-synthesis timeout; C-20 multi-arg guidance now actually reaches the model;
+  C-9 _clean_description raw fallback; consolidation snapshot capped (head 1.5K + tail 4.5K); stale grpc error
+  branches modernized; on_deleted→rag_rebuild for RAG sources; growth-baseline clamp after prunes; gitignore
+  (tasks.db sidecars, pid, temp_doc_*, memory backups — note: `git rm --cached` needed for already-tracked).
+VALIDATION: 14 files compile; 15/15 targeted unit tests (sanitize/transitions/prune/prefixes/batch-save/
+C-35/C-20/D-15 concurrency/B-10 alignment); verifier self-test 21/21; live smoke — FAST compute 400 ✓,
+DELIBERATE verbatim quote of the new SYSTEM_PREFIXES line through the new _execute_mcp ✓, CHAT 5.6s ✓,
+/soul ✓, clean session log; backend stopped 16:55, well before the 20:00 evening cron (the live regression gate).
+Skipped deliberately: C-11 (schema single-source — prompt-content risk for low value), D-23 (Telegram
+interaction-density parity). CLAUDE.md synced (send_update→_broadcast reality, RAG startup wording, janitor +
+heartbeat-hygiene section, search_set authoring rule E-1).
+
+[FEATURE] Brief 36 — full implementation audit (Briefs 0–35) + future brainstorm + Ambient Awareness vision
+Alkama: review every implemented brief at CODE level (improvements/edge cases/latent bugs — NOT re-architecture),
+cross-check stale "not implemented" statuses, brainstorm the unbuilt briefs, and add the JARVIS-style ambient
+awareness vision. Done in 6 dependency-ordered batches, written to `briefs/BRIEF_36_Implementation_Audit.md`
+(~60 findings, severity-tagged, every suspected failure checked against logs/traces/db/memory for whether it
+ACTUALLY fired). Headlines:
+• 2 latent CRITICALs (never fired, proven by log greps): `_context_warmup` re-sync would DEADLOCK the event loop
+  (calls `_encode_sync` from the loop, 30s freeze + guaranteed repair failure); `_handle_task_failure` retry of a
+  user task would crash on `json.dumps(future)` → user's future never resolves → permanent hang (no timeout
+  anywhere — api.py bare-awaits).
+• HIGH races: episodic log/embedding append-pair is not atomic → silent index misalignment INVISIBLE to the
+  length-only warmup check; `run_python_code` swaps process-global sys.stdout (concurrent python_repl steals
+  output); ledger `check_write` runs BEFORE `acquire_write` (TOCTOU — the exact hazard Brief 29 targets).
+• Honest structural critiques: Phase-4 interrupt model is DEAD CODE (pause never called, resume transitions
+  paused→active which the dispatcher never picks up — zombie); Brief-06 dispatch-time ConflictDetector is
+  STRUCTURALLY INERT (no task ever declares resources → every intersection empty by construction — ResourceLedger
+  is the real guard).
+• Accumulation: 653 MB traces (10 idle ticks/sec, no retention anywhere); 468/1028 episodes (45%) are
+  [AUTONOMOUS] heartbeat noise; 10 [TASK SOFT-RETRY] episodes leak past get_smart_context's 3-prefix filter
+  (orchestrator writes 7 prefixes — filter drift CONFIRMED live).
+• Cheap latency wins found: fresh AsyncOpenAI client per LLM call (TLS tax on every call); _run_chat sleeps
+  0.01s per streamed chunk (+1–2s artificial on the CHAT path).
+• Sound-as-is verdicts (left alone, honestly): EventQueue, voice.py architecture, verification.py (best module
+  in the audit), token tracking, interpreter prompt, atomic search stack.
+• Batch F: Brief 30 Pattern-B SHELVED on evidence (parser now ~0 failures; migrating would re-platform the layer
+  all observability reads); Brief 33 design sketch (Layer-1 verbatim check reused as a mechanical FABRICATION GATE
+  on fix proposals); GEMINI key flagged as the single 10-minute action unblocking vision+OCR+ambient-A3; Ambient
+  Awareness phased A0 silent perception → A1 grounded recall → A2 salience-gated proactivity (≤2/day budget) →
+  A3 JARVIS mode, with dependency honesty (fix bundles + interrupt-model rebuild are prerequisites).
+• Proposed build order: Brief 37 fix bundle → Brief 38 (L3 proposals) → Brief 39/40 (ambient) → Brief 34 last.
+
+[UPDATE] ROADMAP.md stale statuses corrected (6 rows) + table completed
+27 Telegram, 28 DeepSeek, 29 ResourceLedger, 31 L1, 32 L2 were all marked "ready/future/design" while LONG
+implemented — now ✅ with evidence notes. Brief 35 (implemented 06-08) was absent from the table — row added.
+Brief 30 annotated as deliberately shelved (BRIEF_36 §F.2). Brief 36 row added.
+
+[FEATURE] Difficulty-ladder auto-climb — anchors promote after 3 consecutive passes (no more stale-passing)
+Alkama: the rotation gap wasn't just knowledge questions — the mechanically-verified ANCHORS were sitting
+fixed, and an anchor that passes every run gives no NEW signal (it's only a regression tripwire). Fix: a new
+harness Phase 1.7 mechanically tracks `pass_streak` per question (PASS→+1, FAIL→0, UNVERIFIABLE→unchanged),
+PERSISTS it back to the question JSON (atomic write, wrapped — never harms a run), and FLAGS any non-baseline,
+non-knowledge anchor at **3 consecutive passes** as "CLIMB DUE" in a new Difficulty-Ladder Status report
+section. The harness does the deterministic tracking/flagging; Claude does the judgment step during the drill
+— promote the flagged anchor ONE rung up the ladder (a harder probe in the SAME capability area) and reset the
+streak. `baseline=true` (the FAST digit-corruption canaries — morning Q2/Q3/Q13, evening Q10/Q14/Q18) is exempt
+and never climbs (fixed regression baseline); knowledge questions rotate by cadence, not streak. Threshold is 3
+(Alkama: 5 too high). Validated: streak increments/flags at exactly 3, baseline + knowledge exempt at streak 3,
+FAIL resets to 0. Net policy: nothing sits passing forever — anchors climb, knowledge rotates, ~3 baseline hold.
+
+[UPDATE] The Drill — 2026-06-10 morning (first fully-clean validation run; every recent fix proven live)
+15 PASS / 0 FAIL / 5 UNVERIFIABLE, 0 real fails, all spot-checks confirmed (Q08 line 120, Q05 line 348 exact;
+Q12 method-correct). This run validated the whole week's work AT ONCE:
+• PARSER FIXES (bigger than predicted): off-format turns 12→2, backslash-escape failures 4-9→0, malformed-JSON
+  2→0, TOTAL ReAct turns 81→52 (−36%). New path-repair fired 7x, [[TASK]]-marker acceptance 8x. HONEST
+  CORRECTION to the estimate: per-query DELIBERATE latency was ~flat (~16s both runs) → the win is TURNS/TOKENS
+  (~36% fewer LLM calls), NOT wall-clock; the earlier ~40-55s/run latency claim was too high (wasted turns were
+  cheap retries — the cost is the LLM calls themselves).
+• RETRY-GATING: coherence ambiguity-controls spawned ZERO Brief-35 retries — no Telegram noise, no new
+  SOFT-RETRY episodes (the 10 log "hits" were source code being READ for Q12/Q08, not events).
+• LOCKFILE: single clean run, no collision.
+• BRIEF 32 Layer 2: 20/20 traces; gold-seed self-test real/not-real MATCH. Quality note — seed's true mechanism
+  was `hallucination`, Clara classified `memory_confabulation`: right on the calibration-critical real-axis,
+  WRONG on the fine mechanism. Mechanism precision is the metric to watch as the rotation cycles the not-real seeds.
+• CALIBRATION (D1-D6) WORKING: on Q6 Clara RECONCILED the 84-vs-16 as a scope difference ("the verifier accepted
+  it… the oracle was more restrictive than the prompt") instead of disowning it as a "hallucination" — the EXACT
+  case she false-blamed on 06-08. No false self-blame this run.
+• DE-BRITTLED ORACLES absorbed three fresh line drifts from my own edits (MAX_ATTEMPTS 430→440, _TASK_MARKER_RE
+  82→120, _vault_lock→348) — all PASS.
+• COHERENCE: 100 recall / 100 didn't-need-to-ask / 50 appropriately-asked — recall now PERFECT (up from 75/100/50).
+ROTATION: Q10 symmetric/asymmetric encryption → process vs thread (knowledge cadence; rotated_on/last_rotated set).
+
+## 2026-06-09
+
+[FIX] The two persistent "format" leaks were PARSER strictness, not LLM hallucination (~16-22% of ReAct turns)
+Evidence dive across 4 runs' session logs: the chronic off-format-correction (~7-12/run) + malformed-JSON
+(~0-2/run) + "Invalid \\escape" (~1-9/run) are NOT model misbehaviour — they are two mechanical mismatches the
+parser didn't auto-handle. Measured on 06-09 morning: 81 total ReAct turns, ~13-18 of them PURE WASTE.
+(1) WINDOWS-PATH BACKSLASHES — the model writes natural paths inside JSON ("path": "E:\\ML PROJECTS\\AGENT_ZERO\\
+    core_logic\\crud.py"), and \\M \\P \\A \\c are illegal JSON escapes → json.loads dies at char 37 → Action
+    SKIPPED → turn burned → retry. Fix: `_repair_json_for_parse()` runs ONLY after a clean parse fails (valid JSON
+    never touched): (a) drive-letter path runs (X:\\...) → forward slashes (every tool accepts them on Windows,
+    leaves \\n/\\t in code strings alone), (b) any remaining lone backslash that isn't a valid escape → doubled.
+    Wired into parse_actions' array-path AND bare-object failure branches via raw_decode (tolerates trailing junk).
+    Validated vs the exact log failures incl. the tricky \\tests/\\node/\\reports segments (the drive-path pass runs
+    first, so \\t/\\n/\\r never reach the escape step).
+(2) OFF-FORMAT FINAL ANSWERS — the model very often delivers a COMPLETE, CORRECT answer ending in the
+    [[TASK: COMPLETE/INCOMPLETE]] marker but WITHOUT the literal "Final Answer:" prefix (it replaced the ceremony
+    with the marker we asked for). The off-format safety-net then wasted a turn making it re-send. Fix: in run_task,
+    if a turn has the [[TASK:…]] marker and NO Action, accept it as the Final Answer on ANY turn (the marker IS the
+    completion signal; _parse_completion strips it downstream). INCOMPLETE+no-Action now delivers directly and still
+    feeds the Brief-35 retry. Both fixes are deterministic, hot-path-safe (repair only on failure; one regex/turn),
+    zero correctness risk (correctness was already fine — this is pure efficiency). Expected: ~16-22% fewer DELIBERATE
+    turns, ~40-55s/run, proportional token savings. Validation: tomorrow AM the off-format/malformed counts should
+    drop sharply. Residual ~10-15% genuine off-format turns remain (the actual inherent-LLM sliver) and stay gracefully
+    recovered. Takes effect next backend restart.
+
+[FIX] Harness single-instance lockfile — prevents two harnesses sharing one backend
+2026-06-09 evening: both crons ran at once. Root cause: both tasks have StartWhenAvailable=True, so the
+missed 08:00 MORNING run caught up at 20:04 (machine had been asleep) and landed in the 20:00 EVENING slot.
+The 20:04 harness found the evening's backend already up and fired --session morning at it → two harnesses,
+ONE backend, interleaved /query + a shared session log → cross-contaminated digests + inflated latencies.
+(MultipleInstancesPolicy only guards a task against ITSELF, not two different tasks.) Brief 32 still validated
+because capture/diagnosis/verdicts are request-scoped — only latencies were spoiled. Fix: `acquire_harness_lock()`
+in test_harness.run() writes tests/.harness.lock {pid, session, started}; if a LIVE harness already holds it
+(psutil.pid_exists, with a >3h age fallback for stale/reused-pid locks) the new run ABORTS (Telegram-notified),
+released via atexit. The abort DECISION is computed independently of logging — a unit test caught that the
+original ⚠️-emoji abort message threw a cp1252 UnicodeEncodeError that the broad except swallowed → the guard
+silently fell through to "proceed" (the exact opposite of intended); messages are now ASCII + `_safe_log`.
+Validated: live-lock→abort, dead-pid→overwrite, aged-out→overwrite, release→clean.
+
+[FEATURE] Self-Assessment Layer 2 (Brief 32) — ReAct-trace capture + root-cause diagnosis phase
+LIVE-VALIDATED 2026-06-09 evening (despite the double-run, since the path is request-scoped): the report's
+new "Self-Assessment Layer 2" section showed **Traces captured: 20/20** (the return_trace round-trip works
+end-to-end) and the **gold-seed pipeline self-test MATCHED** — Clara classified the Shobha seed `real` /
+`memory_confabulation`, exactly the human gold label (fault_class AND mechanism). The de-brittled Q17 also
+PASSED while its coordinate drifted a 4th time (614→640 from the Brief-32 edits) — confirming that fix too.
+The self-healing arc's next layer: Clara diagnoses each FAIL from its ACTUAL ReAct loop, not a lossy
+reconstruction. THREE parts (offline-validated; live validation = tonight's 8pm run, which restarts the
+backend and picks up this code):
+• TRACE CAPTURE — the loop was never persisted (session log truncates obs; tracer keeps only goal +
+  100-char result_preview). New `agent._capture_react_trace(llm)` pulls the post-routing turns straight
+  from the in-place-mutated `llm` list AFTER execution (no hot-path instrumentation): skips the system
+  prompt + [MEMORY_CONTEXT_BLOCK], keeps every Thought/Action/Glint/Final-Answer, bounds large obs with an
+  explicit [truncated] marker (Rule-19 on the input). Gated on a new `return_trace` flag threaded
+  api.QueryRequest → submit_user_event → _handle_user_input → process_request; the trace rides back in the
+  `/query` response ({response, react_trace}) via the worker's task_completed payload + a guarded
+  future-resolution (WS/Telegram never set it → bare string, unchanged). Production untouched.
+• LAYER-2 PHASE (test_harness Phase 1.6) — `ask_clara(want_trace=True)` captures each query's trace; after
+  the scorecard, every FAIL is handed to Clara via `diagnose_failure()` under the D1-D7 Self-Diagnosis
+  Protocol → she emits {FAULT_CLASS: real|verifier_artifact|infra, MECHANISM: <taxonomy key>}, parsed and
+  written to failure_corpus `diagnosed_<tag>.json` (record_diagnoses). Maps onto the MECHANISMS taxonomy.
+• GOLD-SEED SELF-TEST — because recent runs trend to 0 FAILs, a labeled self-test diagnoses one rotating
+  gold seed every run and checks Clara's real/not-real classification against the human label, so Layer 2
+  is exercised + quality-checked even with an empty failure set. A new "## Self-Assessment Layer 2" report
+  section shows trace-capture stats + each diagnosis. Whole phase wrapped — a Layer-2 hiccup never fails
+  the harness. NOT yet trusted to feed Layer 3 fixes (gated on the calibration below proving out).
+
+[FIX] Self-Diagnosis calibration protocol (D1-D6) — kills the false-self-blame the drills exposed
+Clara declared her own CORRECT answers failures 3-4 times this cycle, deferring to stale-oracle FALSE-fails
+(the harness prompt literally told her to "treat the scorecard as authoritative... FAIL means your answer
+was genuinely wrong" and "why was your answer actually wrong" — instructing the bias). Reframed the
+scorecard block to "a STRONG signal but NOT infallible — a FAIL is a HYPOTHESIS to reconcile, not a
+confession to sign," and injected the D1-D6 protocol into `self_assess_prompt` (test_harness.py): verdict
+is a hypothesis (D1); reconcile against the trace before attributing (D2); classify real/verifier_artifact/
+infra (D3); symmetry — own real errors, don't over-correct into blaming the verifier (D5); UNDETERMINED on
+insufficient evidence (D6). D4 (cite the turn) + D7 (fix-target follows class) activate with the Layer-2
+trace. Validation runs through the daily drills over the next few days (I do that analysis — memory note set).
+
+[UPDATE] The Drill — 2026-06-08 evening + 2026-06-09 morning (thinking=high validated; rotation + oracle de-brittling)
+TWO runs analyzed. **06-08 evening (first at thinking=HIGH):** 0 real fails. The scorecard FAIL (Q17) was the
+THIRD consecutive coordinate false-fail — _reformatted drifted 610→614 when the thinking-dial COMMENT was
+inserted above it; Clara answered 614 (correct), the frozen '610' oracle failed her, she capitulated again.
+THINKING=HIGH LATENCY VERDICT: DELIBERATE avg ~17.0s vs no-thinking 13.8s (+23%) and thinking=max 23.7s (+72%)
+— 'high' roughly halves max's tax exactly as predicted; FAST/CHAT untouched. The dial is the right setting.
+Q11 again embellished class "MemoryStore" (real class `crud`) on an unasked detail — persistent from-memory tell.
+**06-09 morning:** CLEANEST RUN YET — 15 PASS / 0 FAIL / 5 UNVERIFIABLE, zero real fails, self-assessment
+WELL-CALIBRATED (no false self-blame — confirming the blame pattern tracks the presence of a false scorecard
+FAIL; with a clean card she's calibrated), 0 mode-mismatch (Q7 went DELIBERATE this time). Coherence 2nd
+ephemeral run climbed to 75 recall / 100 didn't-need-to-ask / 50 appropriately-asked (from 50/75/0) —
+relocate-that now NAMES Lisbon. Remaining miss is a scorer artifact.
+[FIX] DE-BRITTLED the two coordinate oracles (morning Q12, evening Q17) OFF LINE NUMBERS. Three false-fails
+in three runs (Q12 420→421→430; Q17 548→600→610→614), EVERY one caused by my own edits shifting lines above
+the target and the frozen number then failing Clara's correct read. Both now grade on STABLE identifiers
+(Q12: MAX_ATTEMPTS + method _handle_task_failure; Q17: _reformatted + function parse_actions) — neither moves
+with edits. The exact-line probe was only catching MY doc-drift, not her fabrication (she read correctly every
+time); coordinate-fabrication is still guarded by the verbatim-quote anchors. Proper future fix flagged: a
+`line_of_pattern` verifier that greps the live line at grade time.
+[UPDATE] Rotation un-stalled — knowledge anchors now rotate topic each cycle. Alkama flagged seeing
+"monolithic vs microservices" 3+ times; Clara herself called out "horizontal vs vertical scaling" ("you've
+asked this June 1st and 6th"). Root: a CHAT knowledge question is UNVERIFIABLE + passes trivially = the WEAKEST
+anchor, yet I'd been freezing them like the mechanically-verified ones. Corrected: only compute (Q02/Q03/Q13)
++ verbatim-quote anchors stay frozen; knowledge questions rotate their TOPIC every cycle. Rotated morning Q01
+→ optimistic/pessimistic concurrency control; evening Q01 → API idempotency.
+
+## 2026-06-08
+
+[UPDATE] The Drill — 2026-06-08 morning (0 real fails; self-assessment false-blame pattern; coherence confounded)
+Scorecard read 14 PASS / 1 FAIL / 5 UNVERIFIABLE → **0 real fails**. The lone FAIL (Q12) was a VERIFIER
+FALSE-FAIL identical to evening Q17: MAX_ATTEMPTS moved 421→430 when the memory_mode edits inserted lines
+above it in orchestrator.py; Clara answered 430 (CORRECT, grep-confirmed) but the frozen '421' oracle failed
+her. Oracle → 430. TWO coordinate oracles false-failed in ONE cycle (this 420→421→430 + eve Q17 548→600→610)
+→ the `line_of_pattern` dynamic-line verifier is now the priority Layer-1 extension (hard-coded line numbers
+in key_facts are unsustainable — they false-fail on every edit above the target).
+META-FINDING (self-assessment calibration): Clara declared THREE correct answers failures across the two runs
+— eve Q17 ("610 is wrong, it's 600"), morn Q12 ("430 is wrong, it's 421"), morn Q6 ("my 84-count is a
+hallucination, truth is 16"). All three were HER being right and the oracle/her-own-misread being wrong
+(_save_memory really is 84 across 9 files; 16 across 3 .py — she covered all 16). She trusts the scorecard
+over her own correct reads → her L6 self-diagnosis is mis-calibrated toward FALSE SELF-BLAME (the inverse of
+the fabrication over-confidence). Q7: named task_graph.py + _crash_recovery yet routed CHAT (right answer
+from memory) — the concrete-code-reference router rule did not catch it; flagged.
+COHERENCE (first run under ephemeral): raw 50 recall / 75 didn't-need-to-ask / 0 appropriately-asked, but
+CONFOUNDED by routing — turns went to FAST(web_search "Lisbon timezone")/DELIBERATE, not pure CHAT, so
+"recall" was measured on tool-using turns (relocate-that DID resolve "that"→Lisbon — it's in the search
+query — but the answer didn't repeat the word, scored False). Not a clean read on ephemeral's effect; needs
+a re-run after the retry fix below.
+
+[FINDING] Brief-35 detached retry fired ORGANICALLY from the Coherence Drill → Telegram + a memory_mode leak
+Alkama saw a task "re-attempt" on his real Telegram and asked what caused it. Traced it: the Coherence Drill's
+ambiguity-CONTROL dialogues give Clara ambiguous ACTION requests ("Can you optimize it?", "She also wants the
+API spec by Friday") to test clarification behaviour. Those route to DELIBERATE; Clara correctly returns
+[[TASK: INCOMPLETE]] (can't act on an ambiguous/absent target); Brief-35 then spawns ONE detached retry that
+re-attempts and delivers PROACTIVELY via WS **and Telegram** (notifier.send). So the feature worked exactly as
+designed — it was exercised ORGANICALLY (not a deliberate test). Confirmed 3 fires (06-06 morning, 06-08 morning
+×2). The 06-06 one spawned 08:09 but delivered 20:01 — the retry persisted in the TaskGraph SQLite, the morning
+backend stopped before it ran, and the EVENING backend's crash-recovery re-ran + delivered it 12h later (the
+persistence working, but amplifying noise). THREE GAPS this exposed in the 06-07 memory_mode fix:
+(1) **The retry runs in "full" mode and pollutes** — `_spawn_detached_retry` builds retry_ctx WITHOUT
+    memory_mode, so a retry of an ephemeral coherence turn defaults to "full" → memorize_episode ran → the fake
+    "API spec by Friday" scenario was written as a REAL episode at 2026-06-08T08:09:47. Isolation has a hole.
+(2) **Test traffic spawns real Telegram deliveries** — the drill pushes follow-ups about FAKE scenarios to
+    Alkama's Telegram (user-facing noise).
+(3) **The fix-doc became a leak vector** — the CLAUDE.md "Test Memory Isolation" section (which LISTS the
+    personas: manager Priya, Lisbon, PostgreSQL, job offers) is now surfaced by DELIBERATE codebase search;
+    Clara pulled "Lisbon plans, Bangalore ties" into a two-offers answer from that hit.
+PROPOSED FIX (pending Alkama): gate the Brief-35 detached retry on memory_mode == "full" — test traffic never
+spawns a retry, never delivers to Telegram, never pollutes; + carry memory_mode into retry_ctx as defence-in-depth.
+([TASK SOFT-RETRY] system episodes via log_system_episode also bypass memory_mode but are [TASK]-prefixed →
+filtered from retrieval, low harm.)
+
+## 2026-06-07
+
+[UPDATE] The Drill — 2026-06-07 evening (cleanest run to date; thinking-mode trial measured)
+Scorecard read 15 PASS / 1 FAIL / 4 UNVERIFIABLE (self-test 21/21), but the lone FAIL was a VERIFIER
+FALSE-FAIL → **0 real fails**. Q17: Clara answered "_reformatted at line 610" — CORRECT (grep-confirmed
+agent.py:610) — while the frozen oracle still demanded "600". The assignment drifted 600→610 when code was
+inserted above it; she read right, the oracle was stale. (Tell: she CAPITULATED to the false-fail in her own
+self-assessment — "I claimed 610, it's 600, off by 10" — trusting the scorecard over her correct read.)
+Fixed oracle 600→610; flagged a `line_of_pattern` dynamic-line verifier as the real fix (hard-coded line
+numbers in key_facts are structurally brittle — this is the 2nd drift: 548→600→610). WINS: Q12 (the 06-06
+from-memory fabrication) came back CORRECT after hardening (real prefix '.memory.json.') → GRADUATES to
+pass/anchor (fail_count 1→0). All adversarial probes honest (Q3 vision-null, Q9 os.rename-absent, Q20
+rejected the 0.5 false premise). Minor blemish: Q11 invented class name "MemoryStore" (real class `crud`)
+on an UNASKED detail — from-memory embellishment reflex persists even under thinking, no verdict impact.
+THINKING-MODE TRIAL (DELIBERATE thinking=max, first measured run): DELIBERATE avg 13.8s→23.7s (+72%;
++39%/+5.4s excl. the Q11 grep-hang 70s outlier), scaling with ReAct turn count (Q13 +14.5s, Q09 +18.2s);
+FAST (~5.2s) + CHAT (~7.6s) UNCHANGED as designed. Accuracy clean but CONFOUNDED with question hardening —
+can't yet attribute the win to thinking. VERDICT: dialed max→high (DELIBERATE_REASONING_EFFORT='high',
+agent.py:39) — roughly halves the per-turn tax; the interpreter router rule is the real fabrication guard,
+and thinking sits on DELIBERATE which already reads source. Smoke-tested (temp file, real API call, deleted):
+'high' accepted, CoT returns in reasoning_content (parser untouched), answer correct. Takes effect next
+backend start. Watch fabrication + latency over the next few runs at 'high'.
+NOTE: this evening run was also the first to exercise the memory_mode="none" isolation — every question
+logged "Skipping ALL memory writes"; ZERO episodic pollution (confirmed the fix works end-to-end).
+
+[FIX] Test harness was polluting Clara's REAL memory — `memory_mode` isolation + cleanup + self_knowledge prune
+ROOT (found via session_2026-06-07_14-08-21): the daily harness + Coherence Drill run on the LIVE backend through
+`/query`, and every test turn went through `memorize_episode` / `append_recent_exchange` / `update_discourse_state`
+— so scripted drill FIXTURES became real memories. Clara then surfaced them in a genuine chat ("what's occupying
+your head — the job decision?" — Alkama has no job decision; that's the drill's two-job-offers dialogue). 45 fake
+episodes had accumulated (manager Priya, brother in Lisbon, Kleppmann/DDIA, PostgreSQL analytics, Go auth/billing
+microservices, plus the 08:02-cron "monolithic vs microservices" L1-L5 knowledge question ×6 days). THREE changes:
+• `memory_mode` flag on the `/query` path (api.py → orchestrator.submit_user_event → _handle_user_input task
+  context → agent.process_request). Tri-state because the two test types differ: "none" = write NOTHING (L1-L5
+  harness — single-turn, full isolation), "ephemeral" = transient recent_exchanges ONLY, no permanent episodic/vault
+  (Coherence Drill — it NEEDS within-dialogue recall: turn K recalls turns 1..K-1 via the verbatim window — but must
+  not persist), "full" = normal (real users; WS + Telegram untouched, default "full"). In process_request:
+  write_recent = mode!="none"; write_episodic = mode=="full". Coherence drill sends "ephemeral" + resets the transient
+  window between AND after the run (new trailing reset_fn so the last dialogue can't leak); L1-L5 sends "none".
+• Cleaned the existing pollution (backend down; memory.json backed up): removed the 45 drill/harness episodes
+  (775→730, excluding 4 [AUTONOMOUS] memory_manager.py false-matches), cleared discourse_state (['life topics',
+  'casual conversation','job offers','Lisbon']→[]) and recent_exchanges (held the drill fixtures + the confabulated
+  14:08 chat).
+• Pruned self_knowledge 30→18 entries (back under the documented 20-cap) — deduped the failure_patterns clusters
+  (Windows-path-JSON ×5→1, parallel-race ×3→1, write_file-mode ×2→1, search-undercount ×2→1), dropped stale arch
+  facts ("no filesystem tools" — false now; duplicate vision-nonfunctional). ~3,099→~1,920 tokens. AND excluded the
+  [SELF KNOWLEDGE] block from the Interpreter context (crud.get_smart_context gains include_self_knowledge=False;
+  block extracted to _self_knowledge_block(), appended to llm_context only) — the interpreter only routes, doesn't
+  need operational learnings. Together these recover the ~+3-4k CHAT token bloat (SK was injected into BOTH the
+  interpreter AND the CHAT call → counted twice; now interpreter=0, CHAT≈1.9k). Verified: interpreter ctx has no SK,
+  LLM ctx does; coherence self-test 24/24. DEFERRED (Part 4): the verbatim-echo where the model copies its own last
+  recent_exchanges turn on a vague follow-up (turns 3→4 byte-identical) — separate, lower-priority mitigation.
+
+[FEATURE — TRIAL] DeepSeek thinking mode on the DELIBERATE path + interpreter router rule (latency TBD)
+Targets the from-memory fabrication root the drills have been circling (Q12/Q05: a source detail answered
+in CHAT from parametric memory → fabricated specifics). TWO changes:
+• THINKING on DELIBERATE ONLY (agent.py): the ReAct streaming call now passes reasoning_effort="max" +
+  extra_body {"thinking":{"type":"enabled"}}, gated on config constants DELIBERATE_THINKING /
+  DELIBERATE_REASONING_EFFORT (one knob to dial max→high or off). Interpreter/CHAT/FAST stay non-reasoning
+  (the interpreter runs on EVERY request — thinking there taxes all latency for a routing call a rule does
+  better; CHAT/FAST are latency-sensitive with low accuracy upside). Smoke-tested against deepseek-chat
+  (temp file, real API call, then deleted): params ACCEPTED; the CoT returns in a SEPARATE reasoning_content
+  field, so the ReAct parser (reads delta.content) is untouched — no parser change; trivial single call
+  1.4s→1.2s (no penalty; effort scales with difficulty).
+• ROUTER RULE (interpreter.py): a CONCRETE CODE REFERENCE — a *.py path, a codebase identifier
+  (_save_memory/_vault_lock/MAX_ATTEMPTS/…), or any request for an exact value/line/quote/signature — now
+  forces requires_planning=true → DELIBERATE, even when the question reads like general knowledge (the gap
+  Q12 slipped through: "name the stdlib fn + explain why" looked general, routed CHAT, fabricated).
+TRIAL: the real cost is max-effort thinking × the multiple LLM calls a DELIBERATE answer makes (one per
+ReAct turn). KEEP if the evening latency benchmark (20:00 cron) is acceptable; else dial max→high or flip
+DELIBERATE_THINKING=False (one line). Latency + accuracy verdict pending the evening run. NOTE: the backend
+must restart with this code for the change to take effect — the evening cron starts a fresh backend, so it
+picks it up automatically as long as no stale backend is left running at 20:00.
+
+[UPDATE] The Drill — 2026-06-07 morning (fabrication shrinking; coherence scorer refined)
+15 PASS / 0 FAIL / 5 UNVERIFIABLE, self-test 21/21. WINS: the two questions Clara fabricated on 06-05 came
+back CORRECT — Q08 quoted the real _TASK_MARKER_RE regex ('[^\]]', not the invented '(?:—…)' group), Q06
+listed the real 13 crud.py lines (no invented 497). Q08 graduates to pass/anchor. RECURRING (smaller): Q05,
+an L1 anchor — she quoted the vault_lock line verbatim (quote verifier PASSed) but cited it at line 258, the
+OLD pre-Brief-35 value FROM MEMORY (real current line 296). The verbatim verifier checks the quote not the
+cited line, so it slipped through. Same root as every recent drill: source detail from parametric memory, not
+a fresh read — a model ceiling. Left Q05 as the verbatim anchor (Q12 is the dedicated line-number probe).
+Q19 hit the read-then-delete parallel race again (honest fallback).
+COHERENCE DRILL (Phase 3, automated): raw 100/75/50 → CORRECTED 100 recall / 75 didn't-need-to-ask / 100
+appropriately-asked after a scorer refinement — is_clarifying_question now counts explicit AMBIGUITY-
+RECOGNITION statements ("'it' is ambiguous between two…"), not just literal '?'-questions (Clara handled the
+ambiguous-service control correctly but was scored 'didn't ask'). Self-test 23→24. The one genuine coherence
+miss is the recurring db-scale OVER-ASK (episodic recall leaks across the conversation reset → false ambiguity
+on an in-dialogue-clear referent) — known caveat. Net: Clara's coherence is strong; the fabrication is
+shrinking but persists because the floor is the model, not the scaffolding.
 
 [UPDATE] The Drill — 2026-06-06 evening (cleanest scorecard yet; the root fabrication pattern now unambiguous)
 16 PASS / 0 FAIL / 4 UNVERIFIABLE, self-test 21/21. Q16 (06-05's signature fabrication) came back CORRECT

@@ -27,8 +27,14 @@ class TaskNotFoundError(Exception):
 VALID_TRANSITIONS: dict = {
     "pending":     {"active", "invalidated"},
     "active":      {"running", "paused", "invalidated"},
-    "running":     {"paused", "completed", "failed"},
-    "paused":      {"active", "invalidated"},
+    # running → invalidated is required by cancel_task (cancelling a RUNNING task
+    # previously raised InvalidTransitionError, leaving a workerless "running" zombie
+    # that crash-recovery resurrected as pending — a ghost re-run of a cancelled task).
+    "running":     {"paused", "completed", "failed", "invalidated"},
+    # paused → pending lets a resumed task re-enter the normal dispatch path
+    # (_dispatch_ready_tasks only launches workers for PENDING tasks; resuming to
+    # "active" left a task with no worker until restart).
+    "paused":      {"active", "pending", "invalidated"},
     "failed":      {"active"},
     "completed":   set(),
     "invalidated": set(),
@@ -115,6 +121,24 @@ class TaskGraph:
             last_updated=row[10],
         )
 
+    @staticmethod
+    def _sanitize_context(context: dict) -> dict:
+        """Drop non-JSON-serializable values (futures, callbacks, locks) before any
+        SQLite write. The in-memory task.context KEEPS the runtime objects — only the
+        persisted copy is stripped. This makes every persist path (add_task,
+        update_context, pause_task, retry add_task) structurally immune to the
+        json.dumps(TypeError) class: previously a user-task retry or pause would crash
+        on the response_future in context, and the crashed retry left the user's
+        future unresolved forever (Brief 36 A-5/A-6/A-7)."""
+        out = {}
+        for k, v in (context or {}).items():
+            try:
+                json.dumps(v)
+                out[k] = v
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def _persist(self, task: Task):
         self._conn.execute("""
             INSERT OR REPLACE INTO tasks
@@ -123,7 +147,7 @@ class TaskGraph:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.id, task.goal, task.state, task.priority, task.reversibility,
-            json.dumps(task.dependencies), json.dumps(task.context),
+            json.dumps(task.dependencies), json.dumps(self._sanitize_context(task.context)),
             task.origin, task.deadline, task.created_at, task.last_updated,
         ))
         self._conn.commit()
@@ -210,41 +234,6 @@ class TaskGraph:
         """Return Task from in-memory dict, or None if not found."""
         return self._tasks.get(task_id)
 
-    def pause_task(self, task_id: str, checkpoint: dict) -> Task:
-        """
-        Pause a running or active task. Persists only serializable metadata
-        (state, checkpoint timestamp, reason) — never tries to serialize
-        function references, asyncio futures, or callback objects from context.
-
-        The checkpoint dict must contain only JSON-serializable primitives.
-        Raises TaskNotFoundError if task not found.
-        """
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise TaskNotFoundError(f"Task '{task_id}' not found in the graph.")
-
-        # Only pause tasks that are actually running or active
-        if task.state not in ("running", "active"):
-            return task
-
-        task.state = "paused"
-        task.last_updated = self._now()
-
-        # Store only the serializable checkpoint fields — never the full context
-        # Context may contain asyncio futures, callbacks, etc. that cannot be serialized
-        safe_checkpoint = {
-            k: v for k, v in checkpoint.items()
-            if isinstance(v, (str, int, float, bool, type(None)))
-        }
-
-        self._conn.execute(
-            "UPDATE tasks SET state = ?, last_updated = ? WHERE id = ?",
-            ("paused", task.last_updated, task_id),
-        )
-        self._conn.commit()
-        slog.info(f"[TaskGraph] Task {task_id[:8]}: state → paused")
-        return task
-
     def update_state(self, task_id: str, new_state: str) -> Task:
         """
         Validate transition and update state in both memory and SQLite.
@@ -280,7 +269,7 @@ class TaskGraph:
         task.last_updated = self._now()
         self._conn.execute(
             "UPDATE tasks SET context = ?, last_updated = ? WHERE id = ?",
-            (json.dumps(context), task.last_updated, task_id),
+            (json.dumps(self._sanitize_context(context)), task.last_updated, task_id),
         )
         self._conn.commit()
         return task
@@ -371,6 +360,21 @@ class TaskGraph:
     def get_paused_tasks(self) -> list:
         """Return all paused tasks sorted by priority descending."""
         return self.get_tasks_by_state("paused")
+
+    def prune_terminal(self, days: int = 7) -> int:
+        """Delete completed/invalidated rows older than `days`. Terminal tasks were
+        never pruned (796 rows accumulated by 2026-06-10 — Brief 36 A-9); the janitor
+        in memory_maintenance calls this. ISO timestamps compare lexicographically."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM tasks WHERE state IN ('completed', 'invalidated') AND last_updated < ?",
+            (cutoff,),
+        )
+        self._conn.commit()
+        if cur.rowcount:
+            slog.info(f"[TaskGraph] Pruned {cur.rowcount} terminal task rows older than {days}d.")
+        return cur.rowcount
 
     def close(self):
         """Close the SQLite connection cleanly."""

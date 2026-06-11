@@ -114,9 +114,16 @@ def get_archive_context(q_emb_cpu, query: str, threshold: float = 0.35) -> str:
 
 
 def run_python_code(code: str) -> str:
-    redirected_output = StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = redirected_output
+    # Output capture is SCOPED via a print-override in the exec namespace — the old
+    # implementation swapped the process-global sys.stdout, so two concurrent
+    # python_repl calls (parallel Actions run via asyncio.gather in worker threads)
+    # could steal/interleave each other's output (Brief 36 D-15). Code that writes
+    # via sys.stdout.write directly bypasses capture — a known, accepted trade-off
+    # (model code overwhelmingly uses print()).
+    buf = StringIO()
+
+    def _capture_print(*args, sep=" ", end="\n", **kwargs):
+        buf.write(sep.join(str(a) for a in args) + end)
 
     try:
         # Inject a UTF-8-defaulting open() so model code that omits encoding= does
@@ -138,17 +145,15 @@ def run_python_code(code: str) -> str:
         # comprehensions resolve free variables against globals — so multiline code
         # like `content = open(...).read(); [x for x in content]` fails with
         # "name 'content' is not defined". A shared module-level namespace fixes that.
-        exec_ns: dict = {"open": _utf8_open}
+        exec_ns: dict = {"open": _utf8_open, "print": _capture_print}
         exec(code, exec_ns)
-        output = redirected_output.getvalue()
+        output = buf.getvalue()
 
         if not output.strip():
             output = "Code executed successfully with no output. Check your format and checkcode for return values."
 
     except Exception as e:
         output = f"Error: {str(e)}"
-    finally:
-        sys.stdout = old_stdout
 
     return output
 
@@ -183,7 +188,7 @@ def consult_archive(query: str) -> str:
                 allow_dangerous_deserialization=True 
             )
         else:
-            return "Error: Knowledge base not found. Please run 'rag.py' first."
+            return "Error: Knowledge base not found. Run core_logic/rag_db_builder.py (or restart the backend) to build it."
     
     slog.debug(f"   [Archive] Searching for: '{query}'")
     results = RAG_ENGINE.similarity_search(query, k=4)
@@ -196,157 +201,18 @@ def consult_archive(query: str) -> str:
 # print("Web Search Result:", response_web_search)
 
 
-# ── File System Tools ──────────────────────────────────────────────────────
+# NOTE (Brief 36 D-9/D-12, removed 2026-06-10): the dead fs_* quartet
+# (fs_read_file / fs_list_directory / fs_write_file / fs_run_command — replaced by
+# Desktop Commander tools long ago, nothing imported them) and the dead pre-Gemini
+# vision helpers (_pick_detail / _compress_image — the Gemini path below does its own
+# inline thumbnail+JPEG) were deleted. Git history preserves them.
 
 import pathlib
-import subprocess
-
-def fs_read_file(path: str) -> str:
-    """
-    Read the contents of a file at the given path.
-    Returns file contents as string, or an error message on failure.
-    Enforces a 10,000 character read limit to protect context window.
-    """
-    try:
-        p = pathlib.Path(path).expanduser()
-        if not p.exists():
-            return f"Error: File not found: {path}"
-        if not p.is_file():
-            return f"Error: Path is not a file: {path}"
-        content = p.read_text(encoding="utf-8", errors="replace")
-        if len(content) > 10_000:
-            content = content[:10_000] + f"\n\n[... truncated — file is {len(content)} chars total]"
-        return content
-    except PermissionError:
-        return f"Error: Permission denied reading {path}"
-    except Exception as e:
-        return f"Error reading file: {e}"
 
 
-def fs_list_directory(path: str) -> str:
-    """
-    List files and directories at the given path.
-    Returns a formatted string listing, or an error message on failure.
-    """
-    try:
-        p = pathlib.Path(path).expanduser()
-        if not p.exists():
-            return f"Error: Path not found: {path}"
-        if not p.is_dir():
-            return f"Error: Path is not a directory: {path}"
-        items = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-        if not items:
-            return f"Directory is empty: {path}"
-        lines = []
-        for item in items:
-            prefix = "[FILE]" if item.is_file() else "[DIR] "
-            size   = f" ({item.stat().st_size:,} bytes)" if item.is_file() else ""
-            lines.append(f"{prefix} {item.name}{size}")
-        return f"Contents of {path}:\n" + "\n".join(lines)
-    except PermissionError:
-        return f"Error: Permission denied listing {path}"
-    except Exception as e:
-        return f"Error listing directory: {e}"
-
-
-def fs_write_file(path: str, content: str) -> str:
-    """
-    Write content to a file at the given path.
-    Creates parent directories if they do not exist.
-    Returns confirmation or error message.
-    """
-    try:
-        p = pathlib.Path(path).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return f"File written successfully: {path} ({len(content):,} chars)"
-    except PermissionError:
-        return f"Error: Permission denied writing to {path}"
-    except Exception as e:
-        return f"Error writing file: {e}"
-
-
-def fs_run_command(command: str) -> str:
-    """
-    Execute a shell command and return its output.
-    Timeout: 30 seconds. Returns stdout + stderr combined.
-    Uses PowerShell on Windows.
-    """
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            encoding="utf-8",
-            errors="replace",
-        )
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[stderr]: {result.stderr}"
-        if not output.strip():
-            output = f"Command completed with exit code {result.returncode} (no output)"
-        if len(output) > 5_000:
-            output = output[:5_000] + "\n[... output truncated]"
-        return output
-    except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 30 seconds"
-    except Exception as e:
-        return f"Error running command: {e}"
-
-
-# ── Vision Tool (Grok Vision API) ─────────────────────────────────────────
+# ── Vision Tool (Gemini 2.5 Flash; function name is legacy from the Grok era) ──
 
 import base64
-
-# Vision uses Gemini 2.5 Flash — no client injection needed (key read from env directly)
-
-
-_VISION_TEXT_KEYWORDS = (
-    "read", "text", "code", "number", "exact", "ocr",
-    "written", "says", "write", "characters", "digits",
-)
-
-def _pick_detail(question: str) -> str:
-    """
-    Auto-select vision detail level based on question intent.
-    Text/code reading → high (needs tile-level resolution).
-    Layout/visual description → low (3-4× faster, saves 2-5s).
-    """
-    q = question.lower()
-    if any(kw in q for kw in _VISION_TEXT_KEYWORDS):
-        return "high"
-    return "low"
-
-
-def _compress_image(path: pathlib.Path) -> tuple[str, str]:
-    """
-    Compress image to JPEG at 85% quality, resize to ≤1280px wide.
-    Returns (base64_string, media_type).
-    Falls back to raw PNG encoding if Pillow is not available.
-    """
-    try:
-        from PIL import Image as PILImage
-        import io
-        img = PILImage.open(path).convert("RGB")
-        # Resize if wider than 1280px
-        if img.width > 1280:
-            ratio = 1280 / img.width
-            img = img.resize(
-                (1280, int(img.height * ratio)),
-                PILImage.LANCZOS,
-            )
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode("utf-8"), "image/jpeg"
-    except ImportError:
-        # Pillow not installed — fall back to raw bytes
-        return base64.b64encode(path.read_bytes()).decode("utf-8"), "image/jpeg"
-    except Exception:
-        return base64.b64encode(path.read_bytes()).decode("utf-8"), "image/jpeg"
 
 
 def analyze_image_grok(
@@ -397,15 +263,27 @@ def analyze_image_grok(
 
     parts.append(question)
 
-    try:
-        gc = genai.Client(api_key=gemini_key)
-        response = gc.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=parts,
-        )
-        return response.text
-    except Exception as e:
-        return f"Vision error: {e}"
+    # Free-tier gemini-2.5-flash throws transient 503 UNAVAILABLE ("high demand")
+    # fairly often — observed on the very first wired-up call (2026-06-11). Retry
+    # a couple of times with backoff before reporting failure; a 503 surfaced to
+    # the ReAct loop reads like a broken tool when it's a 15-second blip.
+    import time as _time
+    gc = genai.Client(api_key=gemini_key)
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = gc.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=parts,
+            )
+            return response.text
+        except Exception as e:
+            last_err = e
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                _time.sleep(8 * (attempt + 1))
+                continue
+            return f"Vision error: {e}"
+    return f"Vision error after retries: {last_err}"
 
 
 def analyze_images_grok(

@@ -2,12 +2,27 @@ import json
 import os
 import time
 import tempfile
+import threading
 from datetime import datetime
+from .session_logger import slog
+
+# Episodic entries with these prefixes are SYSTEM-origin (autonomous work, task-state
+# transitions) and are excluded from user-facing retrieval + growth counting. ONE shared
+# constant, prefix-matched — the old per-module literal tuples drifted: get_smart_context
+# knew 3 prefixes while the orchestrator wrote 7 variants, so [TASK SOFT-RETRY] /
+# [TASK CANCELLED] / [TASK DEFERRED] episodes leaked into retrieval as "user-facing"
+# context (Brief 36 B-4, confirmed live). "[TASK" catches every current+future variant.
+SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK")
 
 
 class crud:
     def __init__(self, filepath="core_logic/memory.json"):
         self.filepath = filepath
+        # Guards self.memory against concurrent mutation across threads (event loop,
+        # consolidation thread, tool-executor fsmap merges). Without it, json.dump in
+        # _save_memory could iterate a dict/list mid-mutation → dropped save or a torn
+        # snapshot on disk (Brief 36 B-1). RLock: mutators call _save_memory (nested).
+        self._lock = threading.RLock()
         self.memory = self._load_memory()
 
     def _load_memory(self):
@@ -25,7 +40,7 @@ class crud:
             backup = f"{self.filepath}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
             try:
                 shutil.copy2(self.filepath, backup)
-                print(f"⚠️ memory.json corrupt ({e}). Backed up to {backup}; loading default memory.")
+                slog.warning(f"[Memory] memory.json corrupt ({e}). Backed up to {backup}; loading default memory.")
             except Exception:
                 pass
             return self._create_default_memory()
@@ -56,38 +71,39 @@ class crud:
         # be in _save_memory at once. A shared temp name would let them interleave the
         # same file and corrupt it despite os.replace — mkstemp gives each its own.
         # The ".memory.json." prefix keeps EnvironmentWatcher's ignore rule matching.
-        d = os.path.dirname(self.filepath) or "."
-        tmp = None
-        try:
-            fd, tmp = tempfile.mkstemp(prefix=".memory.json.", suffix=".tmp", dir=d)
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(self.memory, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            # os.replace is atomic, but on WINDOWS it raises PermissionError
-            # (ERROR_ACCESS_DENIED / SHARING_VIOLATION) when another handle has the
-            # target open — e.g. the /soul endpoint or a harness python_repl reading
-            # memory.json as we swap. The contention is transient (readers hold the
-            # handle for milliseconds), so retry with a short backoff rather than
-            # silently dropping the write. (Caught in a 12-thread stress test:
-            # bare os.replace lost ~all writes under concurrent reads on Windows.)
-            for attempt in range(10):
-                try:
-                    os.replace(tmp, self.filepath)
-                    tmp = None
-                    break
-                except PermissionError:
-                    time.sleep(0.02 * (attempt + 1))
-            else:
-                print("❌ Failed to save memory: target locked after retries.")
-        except Exception as e:
-            print(f"❌ Failed to save memory: {e}")
-        finally:
-            if tmp and os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+        with self._lock:
+            d = os.path.dirname(self.filepath) or "."
+            tmp = None
+            try:
+                fd, tmp = tempfile.mkstemp(prefix=".memory.json.", suffix=".tmp", dir=d)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(self.memory, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # os.replace is atomic, but on WINDOWS it raises PermissionError
+                # (ERROR_ACCESS_DENIED / SHARING_VIOLATION) when another handle has the
+                # target open — e.g. a harness python_repl reading memory.json as we
+                # swap. The contention is transient (readers hold the handle for
+                # milliseconds), so retry with a short backoff rather than silently
+                # dropping the write. (Caught in a 12-thread stress test: bare
+                # os.replace lost ~all writes under concurrent reads on Windows.)
+                for attempt in range(10):
+                    try:
+                        os.replace(tmp, self.filepath)
+                        tmp = None
+                        break
+                    except PermissionError:
+                        time.sleep(0.02 * (attempt + 1))
+                else:
+                    slog.error("[Memory] Failed to save memory: target locked after retries.")
+            except Exception as e:
+                slog.error(f"[Memory] Failed to save memory: {e}")
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     # --- PUBLIC TOOLS ---
 
@@ -128,13 +144,17 @@ class crud:
         context += "--------------------------------"
         return context
 
-    def get_smart_context(self, query: str, q_emb, episodic_embeddings: list) -> str:
+    def get_smart_context(self, query: str, q_emb, episodic_embeddings: list,
+                          include_self_knowledge: bool = True) -> str:
         """
         Smart retrieval: last 3 USER episodic entries + top 2 semantic hits.
         Vault always included. Deduplicates overlaps.
         Autonomous system logs ([AUTONOMOUS] prefix) are excluded from retrieval —
         they pollute user query context with irrelevant system activity.
         q_emb: pre-computed CPU tensor from agent._encode(); avoids calling miniLM here.
+        include_self_knowledge=False omits the [SELF KNOWLEDGE] block — the Interpreter
+        doesn't need Clara's operational learnings (it only routes), so it is fed a
+        context without them to save ~2k tokens/request (the LLM paths still get it).
         """
         import torch
 
@@ -143,9 +163,9 @@ class crud:
         long_term = self.memory.get("long_term", [])
         episodes  = self.memory.get("episodic_log", [])
 
-        # Build a filtered index map: only user-facing interactions
-        # autonomous entries start with "[AUTONOMOUS]" or "[TASK FAILED]" or "[TASK RETRY]"
-        SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK FAILED]", "[TASK RETRY]")
+        # Build a filtered index map: only user-facing interactions.
+        # SYSTEM_PREFIXES is the module-level shared constant — "[TASK" prefix-matches
+        # every task-state variant the orchestrator writes (B-4 fix).
         user_indices = [
             i for i, ep in enumerate(episodes)
             if not ep.get("summary", "").startswith(SYSTEM_PREFIXES)
@@ -223,21 +243,11 @@ class crud:
             for label, path in known_locations.items():
                 context += f"- {label}: {path}\n"
 
-        # Self knowledge — CLARA's operational learnings about her own architecture
-        sk = self.memory.get('self_knowledge', {})
-        sk_lines = []
-        for fact in sk.get('architecture_facts', []):
-            if fact.get('status') == 'active':
-                sk_lines.append(f"  [ARCH] {fact['summary']} — {fact['detail']} [conf:{fact['confidence']}]")
-        for pat in sk.get('failure_patterns', []):
-            if pat.get('status') == 'active':
-                sk_lines.append(f"  [FAIL] Trigger: {pat['trigger']} | Fix: {pat['correct_approach']}")
-        for rec in sk.get('recovery_methods', []):
-            if rec.get('status') == 'active':
-                sk_lines.append(f"  [RECV] {rec['problem']} → {rec['method']}")
-        if sk_lines:
-            context += "\n[SELF KNOWLEDGE — CLARA's operational learnings. CLAUDE.md takes precedence on all architectural matters]:\n"
-            context += "\n".join(sk_lines) + "\n"
+        # Self knowledge — CLARA's operational learnings about her own architecture.
+        # Interpreter is fed a context with include_self_knowledge=False (routing doesn't
+        # need it); the LLM paths get it via the same block, appended on llm_context.
+        if include_self_knowledge:
+            context += self._self_knowledge_block()
 
         # Filesystem map — progressively discovered directory/file tree
         fsmap = self.memory.get('filesystem_map', {})
@@ -282,6 +292,25 @@ class crud:
 
         return context
 
+    def _self_knowledge_block(self) -> str:
+        """Serialize active self_knowledge as the [SELF KNOWLEDGE] context block (or '' if empty).
+        Split out of get_smart_context so the LLM paths can receive it while the Interpreter does not."""
+        sk = self.memory.get('self_knowledge', {})
+        sk_lines = []
+        for fact in sk.get('architecture_facts', []):
+            if fact.get('status') == 'active':
+                sk_lines.append(f"  [ARCH] {fact['summary']} — {fact['detail']} [conf:{fact['confidence']}]")
+        for pat in sk.get('failure_patterns', []):
+            if pat.get('status') == 'active':
+                sk_lines.append(f"  [FAIL] Trigger: {pat['trigger']} | Fix: {pat['correct_approach']}")
+        for rec in sk.get('recovery_methods', []):
+            if rec.get('status') == 'active':
+                sk_lines.append(f"  [RECV] {rec['problem']} → {rec['method']}")
+        if not sk_lines:
+            return ""
+        return ("\n[SELF KNOWLEDGE — CLARA's operational learnings. CLAUDE.md takes precedence on all "
+                "architectural matters]:\n" + "\n".join(sk_lines) + "\n")
+
     def update_response_style(self, style: str, note: str = "") -> None:
         """
         Update Alkama's response style preference.
@@ -289,11 +318,12 @@ class crud:
         style: e.g. "concise", "detailed", "default"
         note: brief reason e.g. "Alkama said responses were too verbose"
         """
-        if "preferences" not in self.memory["user_profile"]:
-            self.memory["user_profile"]["preferences"] = {}
-        self.memory["user_profile"]["preferences"]["response_style"] = style
-        self.memory["user_profile"]["preferences"]["style_note"] = note
-        self._save_memory()
+        with self._lock:
+            if "preferences" not in self.memory["user_profile"]:
+                self.memory["user_profile"]["preferences"] = {}
+            self.memory["user_profile"]["preferences"]["response_style"] = style
+            self.memory["user_profile"]["preferences"]["style_note"] = note
+            self._save_memory()
 
     def add_episodic_log(self, summary):
         """
@@ -303,9 +333,10 @@ class crud:
             "timestamp": datetime.now().isoformat(),
             "summary": summary
         }
-        self.memory["episodic_log"].append(entry)
-        self._save_memory()
-        print(f"   [Memory] Logged to Stream: {summary[:50]}...")
+        with self._lock:
+            self.memory["episodic_log"].append(entry)
+            self._save_memory()
+        slog.info(f"   [Memory] Logged to Stream: {summary[:50]}...")
 
     def add_episodic_entry(self, summary: str, encode_callback=None):
         """
@@ -318,14 +349,15 @@ class crud:
             "timestamp": datetime.now().isoformat(),
             "summary": summary,
         }
-        self.memory["episodic_log"].append(entry)
-        self._save_memory()
+        with self._lock:
+            self.memory["episodic_log"].append(entry)
+            self._save_memory()
 
         if encode_callback is not None:
             try:
                 return encode_callback(summary)
             except Exception as e:
-                print(f"   [Memory] Embedding encode failed: {e}")
+                slog.error(f"   [Memory] Embedding encode failed: {e}")
         return None
 
     def append_recent_exchange(self, user_text: str, clara_text: str, cap: int = 10):
@@ -343,15 +375,16 @@ class crud:
         """
         if not user_text or not clara_text:
             return
-        buf = self.memory.setdefault("recent_exchanges", [])
-        buf.append({
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "user": user_text.strip()[:600],
-            "clara": clara_text.strip()[:900],
-        })
-        if len(buf) > cap:
-            del buf[:-cap]
-        self._save_memory()
+        with self._lock:
+            buf = self.memory.setdefault("recent_exchanges", [])
+            buf.append({
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "user": user_text.strip()[:600],
+                "clara": clara_text.strip()[:900],
+            })
+            if len(buf) > cap:
+                del buf[:-cap]
+            self._save_memory()
 
     def update_discourse_state(self, entities, cap: int = 8):
         """Active-discourse state (Topic 4, Phase 2) — the salient concrete subjects/topics
@@ -365,16 +398,17 @@ class crud:
         new = [e.strip() for e in (entities or []) if isinstance(e, str) and e.strip()]
         if not new:
             return
-        existing = self.memory.get("discourse_state", [])
-        seen = set()
-        merged = []
-        for e in new + existing:           # new first (most recent), then prior
-            k = e.lower()
-            if k not in seen:
-                seen.add(k)
-                merged.append(e)
-        self.memory["discourse_state"] = merged[:cap]
-        self._save_memory()
+        with self._lock:
+            existing = self.memory.get("discourse_state", [])
+            seen = set()
+            merged = []
+            for e in new + existing:           # new first (most recent), then prior
+                k = e.lower()
+                if k not in seen:
+                    seen.add(k)
+                    merged.append(e)
+            self.memory["discourse_state"] = merged[:cap]
+            self._save_memory()
 
     def reset_conversation_state(self):
         """Clear ONLY the short-term conversational substrate — recent_exchanges (Phase 1
@@ -382,20 +416,22 @@ class crud:
         the vault, self_knowledge and the filesystem map are untouched. Used by the Coherence
         Drill to isolate scripted dialogues so a prior dialogue's tail cannot forge a referent
         for the next. One atomic save."""
-        self.memory["recent_exchanges"] = []
-        self.memory["discourse_state"] = []
-        self._save_memory()
+        with self._lock:
+            self.memory["recent_exchanges"] = []
+            self.memory["discourse_state"] = []
+            self._save_memory()
         return {"recent_exchanges": 0, "discourse_state": 0}
 
     def add_long_term_fact(self, fact):
         """
         Saves a permanent fact to the Vault. Exact string dedup guard.
         """
-        if fact in self.memory["long_term"]:
-            return
-        self.memory["long_term"].append(fact)
-        self._save_memory()
-        print(f"   [Memory] 🔒 Locked to Vault: {fact}")
+        with self._lock:
+            if fact in self.memory["long_term"]:
+                return
+            self.memory["long_term"].append(fact)
+            self._save_memory()
+        slog.info(f"   [Memory] Locked to Vault: {fact}")
 
     def add_self_knowledge(self, category: str, entry: dict) -> bool:
         """
@@ -403,79 +439,85 @@ class crud:
         category: 'architecture_facts' | 'failure_patterns' | 'recovery_methods'
         Returns True if added, False if duplicate.
         """
-        if 'self_knowledge' not in self.memory:
-            self.memory['self_knowledge'] = {
-                'architecture_facts': [], 'failure_patterns': [], 'recovery_methods': []
-            }
-        cat_list = self.memory['self_knowledge'].setdefault(category, [])
-        dedup_key = {
-            'architecture_facts': 'summary',
-            'failure_patterns': 'trigger',
-            'recovery_methods': 'problem'
-        }.get(category, 'summary')
-        new_val = entry.get(dedup_key, '').lower().strip()
-        for existing in cat_list:
-            if existing.get(dedup_key, '').lower().strip() == new_val:
-                return False
-        cat_list.append(entry)
-        self._save_memory()
-        from .session_logger import slog
+        with self._lock:
+            if 'self_knowledge' not in self.memory:
+                self.memory['self_knowledge'] = {
+                    'architecture_facts': [], 'failure_patterns': [], 'recovery_methods': []
+                }
+            cat_list = self.memory['self_knowledge'].setdefault(category, [])
+            dedup_key = {
+                'architecture_facts': 'summary',
+                'failure_patterns': 'trigger',
+                'recovery_methods': 'problem'
+            }.get(category, 'summary')
+            new_val = entry.get(dedup_key, '').lower().strip()
+            for existing in cat_list:
+                if existing.get(dedup_key, '').lower().strip() == new_val:
+                    return False
+            cat_list.append(entry)
+            self._save_memory()
         slog.info(f">> [Self-Knowledge] Added to {category}: {entry.get(dedup_key, '')[:80]}")
         return True
 
-    def merge_filesystem_path(self, path_str: str, is_file: bool = False) -> None:
+    def merge_filesystem_path(self, path_str: str, is_file: bool = False, save: bool = True) -> None:
         """
         Add a confirmed file or directory path into the filesystem_map tree.
         path_str: absolute Windows path e.g. 'E:\\ML PROJECTS\\AGENT_ZERO\\api.py'
         is_file: True for a file node (value=None), False for a directory node (value={}).
         Existing nodes are never overwritten — only new nodes are added.
+        save=False lets a caller batch many merges (e.g. a parsed list_directory)
+        into ONE _save_memory at the end — a full-file fsync per child path was the
+        hottest write-amplification source (Brief 36 B-2).
         """
-        if 'filesystem_map' not in self.memory:
-            self.memory['filesystem_map'] = {}
-        path_str = path_str.replace('/', '\\').rstrip('\\')
-        parts = [p for p in path_str.split('\\') if p]
-        if not parts:
-            return
-        drive = parts[0].rstrip(':')
-        rest = parts[1:]
-        if not drive or not rest:
-            return
-        node = self.memory['filesystem_map']
-        if drive not in node:
-            node[drive] = {}
-        node = node[drive]
-        for i, part in enumerate(rest):
-            is_last = (i == len(rest) - 1)
-            if is_last:
-                if part not in node:
-                    node[part] = None if is_file else {}
-            else:
-                if part not in node or node[part] is None:
-                    node[part] = {}
-                node = node[part]
-        self._save_memory()
+        with self._lock:
+            if 'filesystem_map' not in self.memory:
+                self.memory['filesystem_map'] = {}
+            path_str = path_str.replace('/', '\\').rstrip('\\')
+            parts = [p for p in path_str.split('\\') if p]
+            if not parts:
+                return
+            drive = parts[0].rstrip(':')
+            rest = parts[1:]
+            if not drive or not rest:
+                return
+            node = self.memory['filesystem_map']
+            if drive not in node:
+                node[drive] = {}
+            node = node[drive]
+            for i, part in enumerate(rest):
+                is_last = (i == len(rest) - 1)
+                if is_last:
+                    if part not in node:
+                        node[part] = None if is_file else {}
+                else:
+                    if part not in node or node[part] is None:
+                        node[part] = {}
+                    node = node[part]
+            if save:
+                self._save_memory()
 
     def remove_filesystem_path(self, path_str: str) -> None:
         """
         Remove a stale entry from the filesystem_map when confirmed not found.
         """
-        path_str = path_str.replace('/', '\\').rstrip('\\')
-        parts = [p for p in path_str.split('\\') if p]
-        if not parts:
-            return
-        drive = parts[0].rstrip(':')
-        rest = parts[1:]
-        fsmap = self.memory.get('filesystem_map', {})
-        node = fsmap.get(drive)
-        if node is None:
-            return
-        for part in rest[:-1]:
-            if not isinstance(node, dict) or part not in node:
+        with self._lock:
+            path_str = path_str.replace('/', '\\').rstrip('\\')
+            parts = [p for p in path_str.split('\\') if p]
+            if not parts:
                 return
-            node = node[part]
-        if isinstance(node, dict) and rest and rest[-1] in node:
-            del node[rest[-1]]
-            self._save_memory()
+            drive = parts[0].rstrip(':')
+            rest = parts[1:]
+            fsmap = self.memory.get('filesystem_map', {})
+            node = fsmap.get(drive)
+            if node is None:
+                return
+            for part in rest[:-1]:
+                if not isinstance(node, dict) or part not in node:
+                    return
+                node = node[part]
+            if isinstance(node, dict) and rest and rest[-1] in node:
+                del node[rest[-1]]
+                self._save_memory()
 
     def _serialize_filesystem_map(self, fsmap: dict, indent: int = 0) -> str:
         """

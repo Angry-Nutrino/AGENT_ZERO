@@ -115,6 +115,8 @@ Evening runs the L1-L5 scorecard alone. Wrapped so a coherence hiccup never fail
 - `{"type":"count","target_file":"core_logic/memory.json","json_path":"long_term"}` — counts.
 - `{"type":"search_set","pattern":"<regex>","scope":"core_logic"}` — searches. ALWAYS scope to `core_logic/`,
   never "the project" (doc mentions in reports/briefs/TIMELINE grow over time → unwinnable enumeration).
+  The question text MUST demand an explicit file+line list — the verifier's recall currency is LINE
+  NUMBERS, so a counts-only answer scores recall≈0 and can FAIL despite being correct (Brief 36 E-1).
 - `{"type":"verbatim_quote","target_file":"core_logic/x.py"}` — "quote the line verbatim". Confirm the target
   string actually exists in the file so the question is answerable AND verifiable.
 - `{"type":"key_facts","must_include":["term",["syn1","syn2"],…]}` — L3/L4 chains: the answer must CONTAIN the
@@ -168,7 +170,7 @@ persona guardrails, error recovery — avoid the remaining set's areas.
 
 ### Environment Variables (core_logic/.env)
 - `DEEPSEEK_API_KEY` — DeepSeek API key (all LLM calls via OpenAI-compatible API)
-- `GEMINI_API_KEY` — Google Gemini API key for the vision tool (`gemini-2.5-flash`). **NOT SET — vision is non-functional by design; the tool returns an error string on every call.**
+- `GEMINI_API_KEY` — Google Gemini API key for the vision tool (`gemini-2.5-flash`). **SET as of 2026-06-11 — vision is LIVE** (validated: test image correctly described). Free tier throws transient 503s; the tool retries 3× with backoff.
 - `tavily_api` — Tavily API key (web search tool)
 
 ---
@@ -220,7 +222,7 @@ CHAT streams directly via `_run_chat()` — no ReAct loop, no tool calls.
 | EventQueue | `core_logic/event_queue.py` | Async priority queue; `drain_blocking` default timeout 1.0s, orchestrator drives it at 0.1s |
 | Memory CRUD | `core_logic/crud.py` | get_smart_context, episodic log, vault |
 | System prompt | `core_logic/system_prompt.py` | PERSONA + CHAT_SYSTEM_PROMPT + SYSTEM_PROMPT |
-| Tools | `core_logic/tools.py` | All tool implementations + vision tool (keyless/non-functional) |
+| Tools | `core_logic/tools.py` | All tool implementations + vision tool (Gemini 2.5 Flash, live 2026-06-11) |
 | Background tasks | `core_logic/background_tasks.py` | health_check, memory_maintenance, context_warmup |
 | Environment watcher | `core_logic/environment.py` | File watch, memory growth, interaction density triggers |
 | Conflict | `core_logic/conflict.py` | ConflictDetector + ArbitrationEngine |
@@ -307,6 +309,29 @@ actually said, not a lossy summary:
   pushback, doesn't train it away). Phases 3 (stronger semantic retrieval) + 4 (multi-turn Coherence Drill) are
   on the roadmap.
 
+### Test Memory Isolation (`memory_mode`, 2026-06-07)
+The daily harness and the Coherence Drill run against the **live backend** through `POST /query`, so without
+isolation every test turn wrote to memory via `memorize_episode` / `append_recent_exchange` /
+`update_discourse_state`. That actually happened: scripted drill **fixtures** (a fake "two job offers" dialogue,
+"manager Priya", "brother in Lisbon", Kleppmann/DDIA, a PostgreSQL analytics service, Go auth/billing
+microservices) became **real episodic memories**, and Clara surfaced them in a genuine conversation ("what's
+occupying your head — the job decision?"). The 08:02-cron "monolithic vs microservices" L1-L5 knowledge question
+likewise logged a false "Alkama asked about…" episode every morning. Fix: a **`memory_mode`** field on
+`QueryRequest` threaded `api.py → orchestrator.submit_user_event → _handle_user_input` (task context) →
+`process_request`. Tri-state, because the two test types have **different** needs:
+- **`"full"`** (default; real users via WS + Telegram) — normal persistence.
+- **`"ephemeral"`** (Coherence Drill) — `recent_exchanges` DOES write (the drill's recall test needs turn K to see
+  turns 1..K-1 in the verbatim window), but `memorize_episode` (permanent episodic + vault + discourse) is SKIPPED.
+  The drill resets the transient window between dialogues **and once after the run** (trailing `reset_fn`) so the
+  last dialogue can't leak into the next real chat.
+- **`"none"`** (L1-L5 harness) — single-turn questions write NOTHING (full isolation).
+
+In `process_request`: `write_recent = memory_mode != "none"`, `write_episodic = memory_mode == "full"`. The
+permanent-pollution source is `memorize_episode` only — `recent_exchanges`/`discourse_state` are transient,
+reset-clearable working memory, not "real memories." **Anything routed through `/query` for testing MUST set
+`memory_mode`** (`none` for the L1-L5 harness, `ephemeral` for multi-turn coherence) — never let test traffic
+default into persistence.
+
 ### Memory Consolidation
 Runs in `asyncio.to_thread` after every response (never blocks main path):
 - Disposable non-reasoning DeepSeek instance extracts `summary` + `facts`
@@ -360,7 +385,13 @@ Three categories stored under `self_knowledge`:
 
 Seeded with 8 entries from stress test analysis (bench_logger lock, two-phase start_search,
 api.py root location, CHAT no-tool limitation, RAG stale-doc pattern, list_directory empty
-recovery, chunk-limit recovery). Always injected as `[SELF KNOWLEDGE]` block in every context.
+recovery, chunk-limit recovery). Injected as `[SELF KNOWLEDGE]` block into the **LLM paths only**
+(CHAT/FAST/DELIBERATE) — **NOT the Interpreter** (2026-06-07): the interpreter only routes and
+doesn't need operational learnings, so `get_smart_context(..., include_self_knowledge=False)` feeds it
+a context without the block (the block lives in `crud._self_knowledge_block()` and is appended to
+`llm_context` in `process_request`). SK was previously injected into BOTH calls → counted twice → a
+material slice of the CHAT token bloat. Keep the entry count under the 20-cap (deduped 30→18 on
+2026-06-07) so the block stays small.
 
 **Auto-population (Phase B):** `memorize_episode()` consolidation prompt includes a
 `self_learning` extraction field. Only fires when CLARA made a mistake and corrected it,
@@ -429,7 +460,7 @@ Each incoming message gets a `message_id`. The handler fires `asyncio.create_tas
 
 `active_connections: set` tracks live WebSocket connections for broadcasting.
 
-**send_update guard:** `send_update()` checks `websocket.client_state != WebSocketState.CONNECTED` before attempting any send. If the client has disconnected mid-stream, the function returns immediately. Without this guard, a disconnect during a long DELIBERATE response causes repeated "Cannot call send once a close message has been sent" errors on every subsequent streaming token. `WebSocketState` is imported at module top-level (`from starlette.websockets import WebSocketState`) — not inside the hot-path function. Disconnect events are logged at `DEBUG` level, not `ERROR`.
+**Disconnect safety (current mechanism):** all sends go through `_broadcast()`, which try/excepts per socket and prunes dead connections from `active_connections` on failure — a client disconnect mid-stream can never error-spam. (The older `send_update` `client_state` guard this section used to describe was replaced by broadcast-with-prune; the WS handler also discards its socket in a `finally`.) Additionally (Brief 37): both `submit_user_event` call sites (WS `handle_message` + `/query`) are wrapped in `asyncio.wait_for(…, 600s)` — any bug that drops a response future now produces an honest timeout message instead of permanent silence (the cancelled future makes a late worker result drop harmlessly via the `future.done()` guard).
 
 ---
 
@@ -439,6 +470,20 @@ Each incoming message gets a `message_id`. The handler fires `asyncio.create_tas
 - `health_check` — every 2 minutes
 - `memory_maintenance` — every 5 minutes  
 - `context_warmup` — every 10 minutes
+
+**Heartbeat hygiene (Brief 37, 2026-06-10):** routine results from these three triggers are NO
+LONGER written to episodic memory (they had accumulated 468/1028 episodes of pure noise) — an
+`[AUTONOMOUS]` episode is logged only when something notable happened (repair/prune/failure, gated
+in `_run_worker`). `memory_maintenance` now runs a real **janitor sweep** every ~6h: deletes
+traces/logs >14d and benchmarks >30d, removes upload temp files >1d (age-gated so a Brief-35
+detached retry can still use a fresh one), prunes terminal task rows >7d
+(`TaskGraph.prune_terminal`), and rotates memory.json backups (keep 3). The orchestrator
+tick-trace is also gated (emit on change or 60s heartbeat) — the unconditional ~10/sec idle tick
+had accumulated 653 MB of traces. Episodic retrieval + growth counting use ONE shared filter:
+`crud.SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK")` — prefix-matched so every `[TASK …]` variant is
+excluded (the old 3-prefix literal let `[TASK SOFT-RETRY]` episodes leak into user-facing context).
+Scheduler + EnvironmentWatcher also DEDUPE triggers: a same-trigger (same-path) task still
+pending/running suppresses a new one (no rebuild pile-ups, no backlog stacking).
 
 ### Environment Watcher
 Triggers: `file_change`, `memory_growth`, `interaction_density`, `rag_rebuild`
@@ -542,10 +587,14 @@ Usage captured from OpenAI SDK `response.usage` / final streaming chunk `chunk.u
 
 ## Vision Tool
 
-**STATUS: NON-FUNCTIONAL (null) — ground truth as of 2026-06-01.** The vision tool `analyze_image_grok`
-in `tools.py` calls `model="gemini-2.5-flash"` via the `google-genai` SDK, reading `GEMINI_API_KEY` from
-`.env`. **`GEMINI_API_KEY` is not set**, so every call returns `"Error: GEMINI_API_KEY not set in .env"`.
-Vision is therefore inert by design right now — do not describe it as a working capability.
+**STATUS: LIVE — ground truth as of 2026-06-11.** Alkama provisioned `GEMINI_API_KEY` and it was wired
+up + validated (probe image correctly described on the first non-503 attempt). The vision tool
+`analyze_image_grok` in `tools.py` calls `model="gemini-2.5-flash"` via the `google-genai` SDK, reading
+`GEMINI_API_KEY` from `core_logic/.env`. The free tier throws transient **503 UNAVAILABLE** under load —
+the tool retries 3× with backoff (8s/16s) before reporting failure. The registry's "[CURRENTLY
+UNAVAILABLE]" description prefix is applied only when the key is missing, so it self-clears at startup.
+This also unblocks the `markitdown-ocr` follow-up (scanned PDFs) and the future Ambient Awareness
+screenshot sensor (BRIEF_36 F.6/F.7).
 
 History: vision originally used **Grok Vision** (`grok-4-1-fast-non-reasoning` via `xai_sdk`, injected with
 `set_xai_client`). It was rewritten to Gemini 2.5 Flash in commit `edf81a8` (2026-05-30) but the Gemini key
@@ -652,7 +701,7 @@ Requires: `pip install "python-telegram-bot>=21.0"`
 (`base_url: https://api.deepseek.com`) for all LLM calls — Interpreter, FAST format_llm,
 CHAT stream, DELIBERATE ReAct loop, memory consolidation.
 
-**Vision:** code targets Gemini 2.5 Flash via `google-genai` SDK (`google.genai.Client`), but **no `GEMINI_API_KEY` is set → vision is non-functional (null) by design.** No active vision provider.
+**Vision:** Gemini 2.5 Flash via `google-genai` SDK (`google.genai.Client`) — **LIVE as of 2026-06-11** (`GEMINI_API_KEY` set; 503-retry built in).
 
 **Embeddings:** MiniLM (`all-MiniLM-L6-v2`) locally on CUDA — episodic embeddings and tool registry only.
 
@@ -796,7 +845,7 @@ leaving the user with no actual content.
 
 ### Vision Tool Improvements
 
-`analyze_image_grok` in [tools.py](http://tools.py) **(currently non-functional — no `GEMINI_API_KEY`; see Vision Tool section)**:
+`analyze_image_grok` in [tools.py](http://tools.py) **(LIVE as of 2026-06-11 — see Vision Tool section; name is legacy)**:
 
 - Auto-selects detail level: questions containing "read", "text", "code", "exact" etc → "high"; all others → "low". 3-4× faster for layout/visual queries.
 - Compresses images to JPEG 85% quality, resizes to ≤1280px wide before encoding. \~5-10× smaller payload, saves 2-5s on network round-trip. Requires Pillow (falls back to raw bytes if unavailable).
@@ -937,7 +986,7 @@ explicit tool call handles deeper digs in DELIBERATE.
 
 **Build behavior:**
 - Full rebuild every time — incremental FAISS updates are fragile at this scale
-- Runs at startup via `lifespan` in `api.py` (non-blocking, `asyncio.to_thread`)
+- Runs at startup via `lifespan` in `api.py` — the build runs in a thread but IS awaited, so startup blocks for the few seconds the rebuild takes
 - Auto-rebuild triggered by `rag_rebuild` event when any source file changes
 - Hot-reload via `reload_rag_engine()` in `tools.py` — updates the global `RAG_ENGINE` in place
   without restarting the server

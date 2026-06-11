@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime, timezone
 from .event_queue import EventQueue, make_event
 from .task_graph import TaskGraph
@@ -73,6 +74,16 @@ class BackgroundScheduler:
 
     async def _emit_trigger(self, trigger_name: str) -> None:
         try:
+            # Dedupe (Brief 36 A-17): if an identical trigger task is still pending or
+            # in flight (e.g. the loop stalled and a backlog formed), don't stack
+            # another — the existing one will run.
+            for t in self._task_graph._tasks.values():
+                if (t.origin == "system"
+                        and t.context.get("trigger") == trigger_name
+                        and t.state in ("pending", "active", "running")):
+                    slog.debug(f"[Scheduler] '{trigger_name}' already in flight — skipped.")
+                    return
+
             # 1. Write Task to TaskGraph FIRST (write-ahead durability)
             task = self._task_graph.add_task(
                 goal=f"[BACKGROUND] {trigger_name}",
@@ -115,7 +126,7 @@ async def run_background_task(trigger_name: str, agent, task_graph: TaskGraph, c
     if ctx is None:
         ctx = {}
     if trigger_name == "memory_maintenance":
-        return await _memory_maintenance(agent)
+        return await _memory_maintenance(agent, task_graph)
     elif trigger_name == "context_warmup":
         return await _context_warmup(agent)
     elif trigger_name == "health_check":
@@ -133,16 +144,102 @@ async def run_background_task(trigger_name: str, agent, task_graph: TaskGraph, c
         return f"Unknown trigger: {trigger_name}"
 
 
-async def _memory_maintenance(agent) -> str:
+# Full janitor sweep at most every 6h (the trigger fires every 5 min — sweeping each
+# time would be pointless disk churn). Between sweeps it's the old counts heartbeat.
+_JANITOR_INTERVAL_S = 6 * 3600
+_last_janitor_ts: float = 0.0
+
+
+def _janitor_sweep(task_graph) -> list:
+    """Real maintenance (Brief 36 A-16): retention for traces/logs (A-12 found 653 MB
+    of tick spam with no retention anywhere), terminal task rows (A-9: 796 rows, never
+    pruned), orphaned upload temp files (B-17 — age-gated >1 day because a Brief-35
+    detached retry may still need a recent temp_doc/temp_image), and memory.json
+    backup rotation. Returns a list of action strings (empty = nothing to do)."""
+    import glob
+    import time as _time
+    actions = []
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    now = _time.time()
+
+    def _prune_dir(dirname: str, pattern: str, max_age_days: float):
+        deleted = 0
+        for path in glob.glob(os.path.join(root, dirname, pattern)):
+            try:
+                if now - os.path.getmtime(path) > max_age_days * 86400:
+                    os.remove(path)
+                    deleted += 1
+            except OSError:
+                pass  # current session's open log/trace — skip
+        if deleted:
+            actions.append(f"deleted {deleted} {dirname} file(s) older than {max_age_days:g}d")
+
+    _prune_dir("traces", "trace_*.jsonl", 14)
+    _prune_dir("logs", "session_*.log", 14)
+    _prune_dir("benchmarks", "bench_*.log", 30)
+
+    # Orphaned upload temps in the project root (>1 day — never sweep fresh ones).
+    deleted = 0
+    for pattern in ("temp_image_*", "temp_doc_*"):
+        for path in glob.glob(os.path.join(root, pattern)):
+            try:
+                if now - os.path.getmtime(path) > 86400:
+                    os.remove(path)
+                    deleted += 1
+            except OSError:
+                pass
+    if deleted:
+        actions.append(f"deleted {deleted} orphaned upload temp file(s)")
+
+    # Terminal task rows older than 7 days.
+    try:
+        pruned = task_graph.prune_terminal(days=7)
+        if pruned:
+            actions.append(f"pruned {pruned} terminal task row(s)")
+    except Exception as e:
+        slog.warning(f"[BG:janitor] task prune failed: {e}")
+
+    # memory.json backup rotation — keep the 3 newest of each backup class.
+    for pattern in ("memory.json.bak-*", "memory.json.corrupt-*"):
+        backups = sorted(
+            glob.glob(os.path.join(root, "core_logic", pattern)),
+            key=os.path.getmtime, reverse=True,
+        )
+        for path in backups[3:]:
+            try:
+                os.remove(path)
+                actions.append(f"removed old backup {os.path.basename(path)}")
+            except OSError:
+                pass
+
+    return actions
+
+
+async def _memory_maintenance(agent, task_graph) -> str:
     """
-    Check episodic log and vault size. Observation only in Phase 5.
+    Memory status heartbeat + (every ~6h) a real janitor sweep. The sweep result
+    contains action keywords (pruned/deleted/removed) ONLY when something was done —
+    the orchestrator's episodic gate logs an [AUTONOMOUS] episode only then, so
+    routine heartbeats stay out of permanent memory (Brief 36 B-20).
     """
+    global _last_janitor_ts
+    import time as _time
+
     episode_count = len(agent.db.memory.get("episodic_log", []))
     vault_count   = len(agent.db.memory.get("long_term", []))
+    status = f"Memory status: {episode_count} episodes, {vault_count} vault facts."
+
+    if _time.time() - _last_janitor_ts >= _JANITOR_INTERVAL_S:
+        _last_janitor_ts = _time.time()
+        actions = await asyncio.to_thread(_janitor_sweep, task_graph)
+        if actions:
+            status += " Janitor: " + "; ".join(actions) + "."
+            slog.info(f"[BG:memory_maintenance] Janitor: {'; '.join(actions)}")
+
     slog.info(
         f"[BG:memory_maintenance] Episodes: {episode_count} | Vault facts: {vault_count}"
     )
-    return f"Memory status: {episode_count} episodes, {vault_count} vault facts."
+    return status
 
 
 async def _context_warmup(agent) -> str:
@@ -165,7 +262,12 @@ async def _context_warmup(agent) -> str:
                 for ep in agent.db.memory.get("episodic_log", [])
             ]
             if summaries:
-                embs = agent._encode_sync(summaries)
+                # MUST be await agent._encode(...) — this coroutine runs ON the event
+                # loop, and _encode_sync blocks its calling thread on a future scheduled
+                # on that same loop: a guaranteed 30s freeze + TimeoutError, so the
+                # self-repair could never succeed (Brief 36 A-2). _encode_sync is for
+                # background THREADS (memorize_episode) only.
+                embs = await agent._encode(summaries)
                 if embs.dim() == 2:
                     agent.episodic_embeddings = [embs[i].to('cpu') for i in range(len(summaries))]
                 else:
