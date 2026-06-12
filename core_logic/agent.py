@@ -57,13 +57,15 @@ def _ds_sync_client():
 # (the ReAct stream reads delta.content only, so the parser is untouched). Effort is one knob:
 # dial "max"->"high" if the evening bench shows the per-turn cost is too steep (DELIBERATE makes
 # one LLM call PER ReAct turn, so the cost multiplies across turns).
-# A/B FLIP 2026-06-11 (Alkama's call, closing the 06-08 trial): thinking OFF for the
-# 06-11 evening + 06-12 morning runs. The trial never got a clean A/B (the question
-# suite hardened simultaneously), so this is it — the suite is now stable and
-# streak-tracked, so any previously-passing anchor failing is unambiguous signal.
-# REVERT TRIGGER: one new FAIL on a previously-passing anchor -> set True immediately.
-# Decision review with Alkama after the 06-12 MORNING drill.
-DELIBERATE_THINKING = False
+# A/B VERDICT (2026-06-12, after the 06-11e + 06-12m none-runs): REVERTED TO TRUE.
+# The A/B showed thinking's value is PROCESS INTEGRITY, not answer accuracy:
+# at none, the L2 gold-seed went 0/2 (was 3/3 at high — one miss in the false-blame
+# direction), memory-shortcuts appeared on mandated reads (Q19/Q2 06-11e, Q7 06-12m
+# — rationalized skipping with stale episodic recall), and a malformed-json event
+# returned after a zero-event run. Suite accuracy held both runs, but the latency
+# win was ~2.5s/DELIBERATE query — irrelevant at 2 runs/day, and L2 calibration
+# gates Brief 38 (fix proposals). Process discipline is what thinking buys here.
+DELIBERATE_THINKING = True
 # Dialed "max"->"high" 2026-06-07 after the evening bench: thinking=max cost DELIBERATE
 # +5.4s/+39% per answer (scaling with ReAct turn count) for an accuracy benefit confounded
 # with question-hardening. "high" roughly halves the per-turn tax; the interpreter router rule

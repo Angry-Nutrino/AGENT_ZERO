@@ -115,6 +115,75 @@ def load_observations(path: str = AMBIENT_PATH) -> list:
         return []
 
 
+def recall(window_hours: float = 24, query: str = "") -> str:
+    """A1 grounded recall (BRIEF_39): formatted slice of the observation store.
+
+    Returns timestamped observations from the last `window_hours`, optionally
+    keyword-filtered, plus a per-app activity rollup. Rule-19 parity is built into
+    the output: an empty window says so explicitly — recall NEVER reconstructs
+    unobserved time. Read-only; the watcher process owns all writes."""
+    from datetime import datetime, timedelta
+
+    obs = load_observations()
+    if not obs:
+        return ("No ambient observations exist. Either the ambient watcher is not "
+                "running or no sensors are enabled — I have not been watching.")
+    try:
+        wh = float(window_hours)
+    except (TypeError, ValueError):
+        wh = 24.0
+    cutoff = (datetime.now() - timedelta(hours=wh)).isoformat(timespec="seconds")
+    window = [o for o in obs if o.get("ts", "") >= cutoff]
+    filter_note = ""
+    if query:
+        q = str(query).lower()
+        filtered = [o for o in window if q in json.dumps(o.get("payload", {})).lower()]
+        # Graceful fallback: the interpreter sometimes passes descriptive phrases
+        # ("foreground app") as keywords that match no payload text. If filtering
+        # emptied a NON-empty window, show the window unfiltered with a note —
+        # honest-empty is only correct when the window itself is empty.
+        if filtered or not window:
+            window = filtered
+        else:
+            filter_note = (f" (keyword '{query}' matched nothing — showing ALL "
+                           f"observations in the window instead)")
+            query = ""
+
+    if not window:
+        first, last = obs[0]["ts"], obs[-1]["ts"]
+        return (f"No observations in the last {wh:g}h"
+                + (f" matching '{query}'" if query else "")
+                + f" — I wasn't watching during that window (store spans {first} to {last}). "
+                  "I will not reconstruct unobserved time.")
+
+    lines = [f"Ambient observations — last {wh:g}h"
+             + (f", filtered by '{query}'" if query else "")
+             + f" ({len(window)} records, timestamps exact){filter_note}:"]
+    # Per-app rollup from window-change events
+    apps = {}
+    for o in window:
+        if o["sensor"] == "active_window":
+            p = o["payload"].get("process", "?")
+            apps[p] = apps.get(p, 0) + 1
+    if apps:
+        top = sorted(apps.items(), key=lambda kv: -kv[1])[:6]
+        lines.append("App activity (foreground changes): "
+                     + ", ".join(f"{p} x{n}" for p, n in top))
+    shown = window if len(window) <= 40 else window[-40:]
+    if len(window) > 40:
+        lines.append(f"[showing the most recent 40 of {len(window)}]")
+    for o in shown:
+        pl = o.get("payload", {})
+        if o["sensor"] == "active_window":
+            desc = f"{pl.get('process', '?')} — {pl.get('title', '')[:90]}"
+        elif o["sensor"] == "system_state":
+            desc = f"battery {pl.get('battery_pct', '?')}%, {'plugged in' if pl.get('plugged') else 'on battery'}"
+        else:
+            desc = f"{pl.get('event', pl.get('state', '?'))}" + (f" (idle {pl.get('idle_s')}s)" if pl.get("idle_s") else "")
+        lines.append(f"  {o['ts']}  [{o['sensor']}]  {desc}")
+    return "\n".join(lines)
+
+
 # ── Sensors (Windows; each returns an observation payload ON CHANGE, else None) ──
 
 class ActiveWindowSensor:

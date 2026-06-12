@@ -172,7 +172,24 @@ def web_search(query: str) -> dict:
         return {"answer": f"Error doing web_search: {e}", "results": []}
     
 def get_time_date() -> str:
-    return str(datetime.now())
+    """Rich temporal grounding (upgraded 2026-06-12 — the old version returned a bare
+    datetime repr). Gives Clara everything needed to resolve relative time: weekday,
+    both clock formats, timezone, part of day, and yesterday/tomorrow anchors."""
+    now = datetime.now().astimezone()
+    from datetime import timedelta
+    yest, tom = now - timedelta(days=1), now + timedelta(days=1)
+    hour = now.hour
+    part = ("early morning" if hour < 6 else "morning" if hour < 12
+            else "afternoon" if hour < 17 else "evening" if hour < 21 else "night")
+    tz = now.strftime("%z")
+    tz_fmt = f"UTC{tz[:3]}:{tz[3:]}" if tz else "local"
+    return (
+        f"Date: {now.strftime('%A, %d %B %Y')} ({now.strftime('%Y-%m-%d')})\n"
+        f"Time: {now.strftime('%H:%M:%S')} (24h) / {now.strftime('%I:%M:%S %p').lstrip('0')} (12h) — {part}\n"
+        f"Timezone: {tz_fmt} (IST)\n"
+        f"Week {now.isocalendar()[1]} of {now.year}, day {now.timetuple().tm_yday} of the year\n"
+        f"Yesterday was {yest.strftime('%A, %Y-%m-%d')}; tomorrow is {tom.strftime('%A, %Y-%m-%d')}"
+    )
 
 def consult_archive(query: str) -> str:
     global RAG_ENGINE
@@ -294,6 +311,27 @@ def analyze_images_grok(
 ) -> str:
     """Wrapper — delegates to analyze_image_grok with multiple paths."""
     return analyze_image_grok(client, path=paths[0] if paths else "", question=question, paths=paths[1:] if len(paths) > 1 else None)
+
+
+# ── Ambient Recall (BRIEF_39 A1) ────────────────────────────────────────────
+
+def ambient_recall(window: str = "24", query: str = "") -> str:
+    """Grounded recall over the A0 watcher's observation store (read-only).
+    window: hours to look back ("24", "2", "48"...) — tolerant of "24h"/"today".
+    query: optional keyword filter (app name, title fragment)."""
+    from .ambient import recall as _recall
+    w = str(window or "24").lower().strip()
+    if w in ("today", "day"):
+        hours = 24.0
+    elif w in ("yesterday",):
+        hours = 48.0
+    else:
+        import re as _re
+        mnum = _re.search(r"[\d.]+", w)
+        hours = float(mnum.group(0)) if mnum else 24.0
+        if "day" in w:
+            hours *= 24
+    return _recall(window_hours=hours, query=query or "")
 
 
 # ── Task Status Tool ───────────────────────────────────────────────────────

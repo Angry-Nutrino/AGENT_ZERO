@@ -97,6 +97,25 @@ NATIVE_TOOL_SCHEMAS = [
         }
     },
     {
+        "name": "ambient_recall",
+        "_server": "native",
+        "description": (
+            "Recall what Alkama was actually doing on this machine — which apps were in "
+            "the foreground, when he was active or idle, battery/power events — from the "
+            "ambient watcher's timestamped observation log. Use for questions like 'what "
+            "was I doing an hour ago', 'which apps did I use last night', 'when did I "
+            "start working today'. NOT for conversation memory (that lives in memory context)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "window": {"type": "string", "description": "Hours to look back, e.g. '2', '24', '48'"},
+                "query": {"type": "string", "description": "Optional keyword filter (app name, title fragment)"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "query_task_status",
         "_server": "native",
         "description": (

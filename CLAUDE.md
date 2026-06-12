@@ -284,6 +284,15 @@ save writes the FULL in-RAM dict, a rare dropped replace self-heals on the next 
 back to default memory — it never silently overwrites recoverable data. `EnvironmentWatcher` ignores
 `.memory.json.` temp files so saves don't spam `file_change` events.
 
+### Temporal Grounding (`[NOW]` line, 2026-06-12)
+`crud._now_line()` opens EVERY memory context with one compact line: weekday, date, 24h+12h time,
+part-of-day, yesterday/tomorrow anchors. Placed inside the (per-request-varying) context block —
+NEVER the system prompt — so the per-second timestamp costs nothing against the DeepSeek prefix
+cache. Reaches both the Interpreter (relative-time math: ambient_recall windows, "yesterday"
+resolution) and all answer paths. The `date_time` tool was also upgraded from a bare datetime repr
+to a rich block (formats, timezone, week/day-of-year, adjacent days). Watch-item: probes that
+MANDATE the date_time tool now test instruction-following, not necessity.
+
 ### Smart Context Retrieval (`get_smart_context`)
 - Filters out `[AUTONOMOUS]`, `[TASK FAILED]`, `[TASK RETRY]` prefixed entries entirely
 - Returns: last 3 **user-facing** episodic entries (recency) + top 2 semantic hits (MiniLM)

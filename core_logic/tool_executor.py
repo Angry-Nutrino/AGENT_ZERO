@@ -230,7 +230,7 @@ from .tools import analyze_image_grok
 # ── NATIVE_TOOLS — handled by Python functions, not MCP ──────────────────────
 NATIVE_TOOLS = frozenset({
     "web_search", "python_repl", "date_time", "vision_tool",
-    "consult_archive", "query_task_status", "tool_search",
+    "consult_archive", "query_task_status", "tool_search", "ambient_recall",
 })
 
 
@@ -349,6 +349,12 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
             from .tools import query_task_status as _qts
             return await asyncio.to_thread(_qts, args.get("keyword", ""))
 
+        elif tool_name == "ambient_recall":
+            from .tools import ambient_recall as _ar
+            return await asyncio.to_thread(
+                _ar, args.get("window", "24"), args.get("query", "")
+            )
+
         elif tool_name == "tool_search":
             # tool_search in FAST is an edge case — route to DELIBERATE
             return "Error: tool_search requires DELIBERATE mode. Escalating."
@@ -443,6 +449,12 @@ async def execute_deliberate(
             from .tools import query_task_status as _qts
             (keyword,) = _extract_param(query, "keyword")
             return await asyncio.to_thread(_qts, keyword or query)
+
+        elif tool_name == "ambient_recall":
+            from .tools import ambient_recall as _ar
+            w, q = _extract_param(query, "window", "query")
+            # flat non-JSON string = treat as the window ("2h", "today") or keyword
+            return await asyncio.to_thread(_ar, w or "24", q or "")
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:

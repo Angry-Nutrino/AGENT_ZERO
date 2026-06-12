@@ -31,6 +31,8 @@ TOOL_ARG_SCHEMAS = {
                           "paths": "list[string] — optional: multiple image paths"},
     "consult_archive":   {"query": "string — question for the archive"},
     "query_task_status": {"keyword": "string — keyword from task goal"},
+    "ambient_recall":    {"window": "string — hours to look back, e.g. '2', '24'",
+                          "query": "string — optional keyword filter (app name)"},
 
     # Dynamic tool discovery
     "tool_search":       {"query": "string — semantic description of capability needed"},
@@ -103,6 +105,20 @@ Filesystem path rules:
 - If a filesystem/process/search task is needed and NO [DISCOVERED_TOOLS] block
   is present, assign tool="tool_search" with a semantic query describing what
   capability is needed (e.g. "read file from disk", "list directory", "run shell command")
+
+Ambient activity rules:
+- Questions about Alkama's MACHINE ACTIVITY — "what was I doing an hour ago", "which
+  apps did I use last night", "when did I start working today", "how long was I idle" —
+  → tool=ambient_recall, requires_planning=false (single lookup; window in hours).
+  args: window = hours that COVER the asked time — compute it from the [NOW] line in
+  context (current date/time/weekday are always there; e.g. [NOW] says 14:00 and the user
+  asks about "9 PM last night" → ~17h back → window "18" or "24").
+  query = ONLY a specific app/site name the user explicitly mentions ("chrome", "VS Code");
+  for general "what was I doing / which apps" questions OMIT query entirely — descriptive
+  phrases like "foreground app" are not payload keywords and will match nothing.
+- This is DISTINCT from conversation memory: "what did WE discuss" / "do you remember
+  X" stays with the memory context (tool=null). ambient_recall is for observed
+  activity, not dialogue.
 
 Personal memory rules:
 - For questions about people Alkama has mentioned, past conversations, things

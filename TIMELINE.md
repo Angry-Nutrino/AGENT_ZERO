@@ -1,5 +1,60 @@
 # CLARA Project Timeline
 
+## 2026-06-12
+
+[UPDATE] The Drill — 06-12 evening (manual rerun): THE CONVERGENCE RUN — best scorecard ever + first ladder promotion
+**16 PASS / 0 FAIL / 4 UNVER (effective 20/20)** — four validations in one run: (1) thinking restored →
+gold-seed EXACT fine-mechanism match (infra_non_answer), first perfect fine-label ever, first run back at
+high — A/B verdict triple-confirmed; (2) **ambient Q1 PASSED ON DEBUT** (Brave + VS Code with true timestamps
+vs the watcher's real store — BRIEF_39 A1 drill-validated the day it shipped); (3) first run on pruned memory:
+ZERO memory-shortcuts (vs 3 across the two polluted none-runs); (4) [NOW] grounding live, ambient window
+computed correctly. **FIRST AUTO-CLIMB PROMOTION: 9 anchors hit streak 3** (Q2,4,7,9,12,13,16,17,20) →
+each promoted one rung in-area (constants→derived-compute, name-the-flag→quote-the-consumer-line verbatim,
+single→double false-premise, os.rename→shutil.rmtree absence [grep-verified absent], regex-definition
+verbatim — the hardest quote class). Streaks reset; oracles source-verified at authoring; backup kept.
+Tomorrow evening grades half the suite one rung harder.
+
+[FEATURE] Temporal grounding — [NOW] line on every call + rich date_time tool (Alkama's ask: time as universal context)
+`crud._now_line()` opens every memory context: "[NOW] Friday, 2026-06-12 · 21:10 IST (9:10 PM) · night ·
+yesterday=Thu… · tomorrow=Sat…". Placed in the per-request context block, NOT the system prompt (would have
+poisoned the DeepSeek prefix cache); ~50 tokens; reaches interpreter + all paths. Fixes a real gap found
+during A1: the interpreter computed ambient_recall windows with NO clock (guessed '24' and got lucky) — its
+ambient rule now says compute the window from [NOW]. `get_time_date()` upgraded from bare datetime repr to
+rich block (weekday, 24h/12h, UTC+05:30, week/day-of-year, adjacent days). Watch-item noted in CLAUDE.md:
+tool-mandating probes (morning Q18) now test instruction-following, not necessity.
+
+[FIX] 06-12 evening cron casualty: NO INTERNET (not the cron) — task fired 20:00:01, backend startup dragged
+8 min on network timeouts (Telegram init etc.), blew the harness wait budget → abort, no questions asked.
+Rerun manually 21:1x once connectivity returned (the run that validates: thinking restored + clean memory +
+first ambient question + [NOW] grounding + first CLIMB-DUE flags).
+
+[UPDATE] The Drill — 06-12 morning (A/B run #2) → THINKING TRIAL CLOSED: REVERTED TO HIGH + 187-episode pollution prune
+Morning: 15 PASS / 0 FAIL / 5 UNVER → effective 20/20 (Q6 search 22/22 at 100%). But A/B signals repeated:
+gold-seed L2 MISMATCH #2 (real/mode_misroute vs gold infra_non_answer — the FALSE-BLAME direction D1-D6 had
+fixed; 3/3 at high → 0/2 at none; no memory confound — this signal alone carries the verdict), memory-shortcut
+#3 (Q7 cited pre-isolation episodes BY TIMESTAMP to skip the mandated read), fixture leak again (Q1 addressed
+Alkama as "building a system ingesting billions of rows" — the PostgreSQL coherence fixture). Latency at none:
+~11.5s vs ~14s DELIBERATE — ~2.5s/query, irrelevant at 2 runs/day. VERDICT (same-day): DELIBERATE_THINKING=True
+restored — thinking buys PROCESS INTEGRITY (calibration/mandated-reads/format discipline), not answer accuracy;
+L2 calibration gates Brief 38. Memory note closed. PRUNE (Alkama-approved): 187 pre-isolation drill episodes
+removed (669→482; triple filter: date ≤06-08 + harness time-window + drill-signature regex; backup kept) — the
+Q19/Q7/Q2 shortcut enablers and all fixture-conversation sources. Tonight = first run on clean episodic memory.
+ROTATION: morning Q15 asyncio→tail latency (cadence). All anchors at streak 2 — first CLIMB-DUE flags expected
+tonight/tomorrow.
+
+[FEATURE] BRIEF_39 A1 SHIPPED — ambient_recall live end-to-end (built early per Alkama: A1 needs observations, not the baseline week)
+New native tool: `ambient.recall()` (windowed, keyword-filterable, per-app rollup, Rule-19 built into output —
+"I wasn't watching" for empty windows, never reconstruction) + `tools.ambient_recall` (tolerant window parsing)
++ registry schema + interpreter routing rule (machine-activity questions → ambient_recall; DISTINCT from
+conversation memory) + executor dispatch (FAST + DELIBERATE) + PERSONA guardrail (unobserved time does not get
+narrated). SMOKE (full pipeline): "what was I doing at 9 last night?" → FAST/conf 0.98 → "toggling between
+VS Code on the MiniLM lock implementation and LinkedIn in Brave; three idle stretches from 9:16" — grounded,
+timestamped, TRUE. Found+fixed live: interpreter passed descriptive phrase 'foreground app' as keyword filter →
+honest-empty on a non-empty window; recall() now falls back to unfiltered-with-note, interpreter rule tightened
+(query = explicit app names only). Evening Q1 swapped to the FIRST mechanically-verified ambient question
+(key_facts: brave + code, ground truth = real 06-11 21:0x observations). The L5 unobserved-window honesty twin
+joins later.
+
 ## 2026-06-11
 
 [UPDATE] The Drill — 2026-06-10 evening (Brief 37's live regression gate: PASSED everywhere it's measurable)
@@ -26,6 +81,25 @@
   write amplification (cadence); Q3 oracle FLIPPED (vision live — currency probe); Q6 scope-rewritten
   (premise died with the key; new target = 503-retry sleep line); Q11 de-brittled. Thinking-trial verdict
   presented to Alkama (no clean A/B exists; recommendation in chat).
+
+[FIX] Evening cron crash (cp1252 #3) + [UPDATE] The Drill — 2026-06-11 evening (THINKING A/B RUN #1)
+The 20:00 cron died at startup: test_harness.py read questions_evening.json with a BARE read_text() (cp1252
+default) while Phase 1.7's own streak write-back had re-encoded the file as true UTF-8 (ensure_ascii=False) —
+byte 0x9d (curly punctuation from the morning rotation edits) = instant UnicodeDecodeError. Third cp1252-default
+incident. Fixed 4 encoding sites in test_harness.py (questions read — the crash; .env read; api.log write+read);
+harness rerun manually at 20:05 as the official evening session.
+RUN RESULTS (13 PASS / 1 FAIL / 6 UNVER → 0 REAL FAILS): the lone FAIL (Q17) was a CONFIRMED verifier artifact —
+Clara answered `_validate_actions` with exact line numbers (714/1810, grep-confirmed); the oracle demanded
+'parse_actions' which merely delegates — she was false-failed for being MORE PRECISE than the oracle. Her L2
+called it verifier_artifact (THIRD consecutive correct artifact call); oracle now accepts both; streak restored.
+The SK class-name pin worked day one ("Class: Clara_Agent"). Q3 vision-currency probe passed day one.
+A/B RUN-1 SIGNALS (thinking=none): accuracy held BUT process degraded 4 ways — memory-shortcuts on mandated
+reads TWICE (Q19 skipped the asyncio.Lock search citing a REAL-but-stale pre-isolation episode → stale line
+numbers → UNVERIFIABLE; Q2 same shortcut, passed by luck), Q17 8-turn churn + malformed-json (zero last night),
+gold-seed L2 first-ever MISMATCH (real-axis now 3/4), latency FLAT (14.3s vs 14.1s — no win). Revert trigger
+(real anchor FAIL) not met → A/B continues into 06-12 morning; leaning revert-to-high if it repeats.
+NEW FINDING: 9 pre-isolation episodic entries (≤06-07 harness runs recorded as real "Alkama asked…" memories)
+enabled the Q19 shortcut — prune recommended, awaiting Alkama's OK (memory edit).
 
 [FEATURE] Ambient Awareness A0 BUILT (BRIEF_39, amended to the standalone-watcher split) + vram_sentinel removed
 Alkama's 24/7 constraint ("server only runs 30-40 min/day") reshaped A0 for the better: perception is split

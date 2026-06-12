@@ -188,8 +188,14 @@ class crud:
             for local_idx in top_local:
                 selected_indices.add(user_indices[local_idx])
 
-        # 3. Build context string
+        # 3. Build context string — opening with temporal grounding (2026-06-12):
+        # Clara gets the clock on EVERY call. Placed here (not the system prompt) on
+        # purpose: this block already varies per request, so the per-second timestamp
+        # costs nothing extra against the DeepSeek prefix cache, and it reaches BOTH
+        # the interpreter (relative-time window math: "9 last night" → hours) and the
+        # answer paths. ~50 tokens for permanent time-awareness.
         context = "--- MEMORY CONTEXT ---\n"
+        context += self._now_line() + "\n"
 
         # Identity
         context += f"USER: {profile.get('name', 'Unknown')} | ROLE: {profile.get('role', 'User')}\n"
@@ -291,6 +297,20 @@ class crud:
         #     pass
 
         return context
+
+    @staticmethod
+    def _now_line() -> str:
+        """Compact one-line temporal grounding for context injection. Deliberately
+        local (datetime only) — crud must not import the heavyweight tools module."""
+        from datetime import timedelta
+        now = datetime.now()
+        hour = now.hour
+        part = ("early morning" if hour < 6 else "morning" if hour < 12
+                else "afternoon" if hour < 17 else "evening" if hour < 21 else "night")
+        return (f"[NOW] {now.strftime('%A, %Y-%m-%d')} · {now.strftime('%H:%M')} IST "
+                f"({now.strftime('%I:%M %p').lstrip('0')}) · {part} · "
+                f"yesterday={(now - timedelta(days=1)).strftime('%a %Y-%m-%d')} · "
+                f"tomorrow={(now + timedelta(days=1)).strftime('%a %Y-%m-%d')}")
 
     def _self_knowledge_block(self) -> str:
         """Serialize active self_knowledge as the [SELF KNOWLEDGE] context block (or '' if empty).
