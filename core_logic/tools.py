@@ -315,22 +315,26 @@ def analyze_images_grok(
 
 # ── Ambient Recall (BRIEF_39 A1) ────────────────────────────────────────────
 
-def ambient_recall(window: str = "24", query: str = "") -> str:
+def ambient_recall(window: str = "24", query: str = "", date: str = "") -> str:
     """Grounded recall over the A0 watcher's observation store (read-only).
-    window: hours to look back ("24", "2", "48"...) — tolerant of "24h"/"today".
-    query: optional keyword filter (app name, title fragment)."""
-    from .ambient import recall as _recall
+    date:   a specific day to recall — '2026-06-11', 'June 11', 'yesterday'. PREFERRED
+            for "what was I doing on <day>" (no error-prone hours-back math). Overrides window.
+    window: hours to look back ('24', '2', '48') when no date is given.
+    query:  optional keyword filter (an explicit app/site name only)."""
+    from .ambient import recall as _recall, _parse_date_anchor
+    d = str(date or "").strip()
     w = str(window or "24").lower().strip()
-    if w in ("today", "day"):
-        hours = 24.0
-    elif w in ("yesterday",):
-        hours = 48.0
-    else:
-        import re as _re
-        mnum = _re.search(r"[\d.]+", w)
-        hours = float(mnum.group(0)) if mnum else 24.0
-        if "day" in w:
-            hours *= 24
+    # If no explicit date but `window` is actually a date phrase ('june 11', 'yesterday',
+    # an ISO date), route it to the date anchor instead of misparsing it as hours.
+    if not d and _parse_date_anchor(w):
+        d = w
+    if d:
+        return _recall(query=query or "", date=d)
+    import re as _re
+    mnum = _re.search(r"[\d.]+", w)
+    hours = float(mnum.group(0)) if mnum else 24.0
+    if "day" in w:
+        hours *= 24
     return _recall(window_hours=hours, query=query or "")
 
 

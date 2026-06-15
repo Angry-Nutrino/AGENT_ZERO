@@ -109,8 +109,9 @@ NATIVE_TOOL_SCHEMAS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "window": {"type": "string", "description": "Hours to look back, e.g. '2', '24', '48'"},
-                "query": {"type": "string", "description": "Optional keyword filter (app name, title fragment)"}
+                "date": {"type": "string", "description": "A specific day to recall — '2026-06-11', 'June 11', 'yesterday'. Use this for 'what was I doing on <day>' (preferred over window)."},
+                "window": {"type": "string", "description": "Hours to look back, e.g. '2', '24', '48' (used only when no date is given)"},
+                "query": {"type": "string", "description": "Optional keyword filter — an explicit app/site name only"}
             },
             "required": []
         }

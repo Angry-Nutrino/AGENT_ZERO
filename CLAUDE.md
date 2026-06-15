@@ -65,6 +65,19 @@ Each question carries `fail_count` (consecutive fails, resets to 0 on pass), `la
 ("pass" | "fail" | "pending"), and an optional `verification` block (see below).
 **Trigger:** Alkama says "same drill" / "analyze the report" after a run — manual only, never automatic.
 
+**Delivery hardening (Brief 41, 2026-06-13) — after three cron casualties in three days, two from
+no-internet.** The drill is meaningless without DeepSeek (every question needs it), so the harness now: (A)
+**connectivity pre-flight** — `wait_for_internet()` checks the DeepSeek host BEFORE the lock or any spawn;
+offline → capped retry (2× / 15 min) then a CLEAN `sys.exit(0)` (Telegram heads-up, nothing spawned, no
+orphan, no lock held). (B) **HTTP-poll readiness + reuse** — `backend_is_up()` (`/soul`) is the SOLE
+readiness gate (dropped the old `"Voice system loaded"` log-scrape); a live/leftover-healthy backend is
+REUSED and left running (`_HARNESS_OWNS_BACKEND` ownership flag); a half-started zombie holding :8001 is
+killed before respawn (`_kill_stale_backend`). (C) **guaranteed teardown** — `stop_backend()` is
+ownership-gated + idempotent, and `atexit.register(stop_backend)` reaps a harness-spawned backend on any
+exception/sys.exit so a mid-run crash no longer orphans it. The lock was already robust (steals a dead-pid or
+>3h-old lock). If a cron is missed, the manual rerun is `python tests/test_harness.py --session {morning|evening}`
+— it reuses a live backend or starts one, and is safe to run after killing any orphan.
+
 **Coherence Drill (Phase 4) — wired into the MORNING run only (2026-06-05).** After the morning
 scorecard/report is written and BEFORE the backend is stopped, `test_harness.py` Phase 3 runs
 `coherence_drill.run_drill()` and APPENDS a "## Coherence Drill (multi-turn — Phase 4)" section to the
@@ -142,6 +155,19 @@ episodic mentions as code occurrences and FALSE-failed two correct answers — t
 It locks in the fixes (search_set is code-only via `CODE_EXT`; verbatim candidates strip surrounding `"`/`*`
 decoration) so they cannot silently regress. **Anchor every confirmed FAIL to independent ground truth before
 accepting it** (step 2 above) — the self-test guards the engine, your grep guards the run.
+
+**Self-Assessment Layer 3 — Fix Proposals (Brief 38, harness Phase 1.8, 2026-06-14):** for a CONFIRMED,
+persistent (`fail_count >= 2`), real-axis (Layer-2 classified `real`) FAIL, Clara reads the responsible
+code and proposes a specific fix — a review-only ARTIFACT in `reports/proposals/`, NEVER applied (apply is
+the far-future Brief 34). The design center is the **fabrication gate** (`tests/fix_proposals.py`,
+deterministic, reuses Layer-1's `_read`/`_norm_ws`): every proposal's `current_code_quote` must verify
+VERBATIM against the named in-scope file — a quote of code that doesn't exist is auto-rejected
+`fabricated_quote`, no LLM judge. Scope guard: `core_logic/`+`tests/` only, EXCEPT the assessment stack
+itself (verifier/harness/this module — no grading-the-grader). Trigger is rare by design → ~0 proposals on
+a clean run; the gate-rejection rate is the live fabrication-rate metric. Trust ledger
+(`reports/proposals/ledger.json`) tracks gate-passed / Claude-endorsed / Alkama-accepted / proven — Layer 4
+(auto-apply) stays undiscussed until ≥5 consecutive gate-passed+accepted+proven. Gate gold-seed self-test:
+`tests/test_fix_proposals.py` (19 cases, both directions, no backend). Wrapped — never fails a run.
 
 **Difficulty ladder (rotation climbs this — Topic 2, 2026-06-01):** the suite must grow *deeper* as
 CLARA's capacity grows, not circle at one altitude. ~85% of the suite was single-hop retrieval (which she
@@ -292,6 +318,23 @@ cache. Reaches both the Interpreter (relative-time math: ambient_recall windows,
 resolution) and all answer paths. The `date_time` tool was also upgraded from a bare datetime repr
 to a rich block (formats, timezone, week/day-of-year, adjacent days). Watch-item: probes that
 MANDATE the date_time tool now test instruction-following, not necessity.
+
+### Ambient Awareness A0 + A1 (BRIEF_39, live 2026-06-12)
+**A0 (silent perception):** `ambient_watch.py` (repo root) is a STANDALONE 24/7 process — no GPU, no models,
+NO API keys — that samples consent-gated sensors (`active_window`, `system_state`, `session_rhythm`; gated by
+`AMBIENT_SENSORS` in `.env`, empty = all off) and is the SOLE writer of `core_logic/ambient.json` (ring cap
+2000, atomic flushes). Runs via Task Scheduler at logon (`setup_ambient_task.ps1`); kill switch =
+`schtasks /end /tn CLARA_AmbientWatch` or empty the env var. The backend only READS the store. Separate file
+on purpose (telemetry, not memories — avoids the B-20 bloat class); `ambient.json`/`ambient_patterns.json` are
+in `IGNORED_PATTERNS` + `.gitignore`. Sensors + store + `recall()` live in `core_logic/ambient.py`.
+**A1 (grounded recall):** native tool `ambient_recall(date|window, query)` — "what was I doing yesterday /
+on June 11 / in the last 2h". Prefer the **`date` anchor** ('yesterday'/'June 11'/ISO) over hours-back. PERSONA
++ recall enforce Rule-19 parity: an unobserved window says "I wasn't watching" — never a reconstruction.
+**Q1-fix hardening (2026-06-13, BRIEF_39 addendum):** the date anchor + an hour-by-hour rollup for busy
+windows (the old 40-record tail-cap HID in-window records, which caused the first real ambient drill FAIL).
+Ambient drill questions use a DYNAMIC verifier (`verification.v_ambient_recall`) that reads ambient.json at
+grade time — both question anchor and oracle resolve at grade time, so they never rot (live-truth pattern).
+A2 (salience-gated proactivity, BRIEF_40) waits on ~a week of A0 baseline.
 
 ### Smart Context Retrieval (`get_smart_context`)
 - Filters out `[AUTONOMOUS]`, `[TASK FAILED]`, `[TASK RETRY]` prefixed entries entirely

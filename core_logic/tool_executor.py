@@ -352,7 +352,7 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
         elif tool_name == "ambient_recall":
             from .tools import ambient_recall as _ar
             return await asyncio.to_thread(
-                _ar, args.get("window", "24"), args.get("query", "")
+                _ar, args.get("window", "24"), args.get("query", ""), args.get("date", "")
             )
 
         elif tool_name == "tool_search":
@@ -452,9 +452,9 @@ async def execute_deliberate(
 
         elif tool_name == "ambient_recall":
             from .tools import ambient_recall as _ar
-            w, q = _extract_param(query, "window", "query")
-            # flat non-JSON string = treat as the window ("2h", "today") or keyword
-            return await asyncio.to_thread(_ar, w or "24", q or "")
+            w, q, dt = _extract_param(query, "window", "query", "date")
+            # flat non-JSON string = treat as the window/date ("2h", "June 11") or keyword
+            return await asyncio.to_thread(_ar, w or "24", q or "", dt or "")
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:

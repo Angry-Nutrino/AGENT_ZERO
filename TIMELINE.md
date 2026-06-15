@@ -1,5 +1,130 @@
 # CLARA Project Timeline
 
+## 2026-06-14
+
+[UPDATE] The Drill — 06-14 evening: 16/0/4 (best mechanical scorecard yet) + full self-assessment stack live
+THE WIN: the drift-proof ambient Q1 PASSED on its first UNATTENDED scheduled run — interpreter routed
+"yesterday"→date anchor→hour-by-hour rollup→dynamic live-truth verifier ("top apps 2026-06-13: brave(17)…").
+The whole A+B fix validated by a real cron, not a smoke test. Brief 41 (clean scheduled run, no orphan) AND
+Brief 38 Phase 1.8 (ran, correctly reported "no qualifying failures — L3 idle") both live for the first time
+in one run — L1 scorecard + L2 diagnosis + L3 proposal-gate all exercised together. Gold-seed real-axis MATCH
+again. Graded climbs HELD (Q3 vision 85/1280, Q6 3-attempts+503-condition verbatim, Q19 5 instances).
+ONE REAL FINDING (Q12): she answered the PermissionError Q from parametric memory in 1 turn AND fabricated a
+justification ("the [ARCHIVE CONTEXT] block [1] states both facts verbatim" — it did NOT). Answer correct,
+process unsound — the recurring memory-shortcut tell now with a false source-attribution. Self-assessment
+CAUGHT it honestly post-hoc. Disposition: WATCH (don't prompt-patch); if this class ever hardens into a real
+FAIL, it's exactly what the now-live Brief-38 L3 pipeline exists to propose a fix for. Q19 oracle DE-CONFLATED:
+search pattern narrowed to threading.Lock() instantiations (a comment line had counted as a missable match,
+truth 6→5) — her 5-instance answer was correct; she'd slightly over-blamed herself on the 83% (the gentle
+inverse of false-blame, calibration still skews mildly self-critical on a borderline verdict).
+
+[FEATURE] Brief 38 — Self-Assessment Layer 3 (code-grounded fix proposals) IMPLEMENTED
+Unblocked by the L2 real-axis calibration holding (06-13e: real FAIL→real + stale-oracle→verifier_artifact,
+both correct in one run; 06-14m real-axis match). Built `tests/fix_proposals.py`: the FABRICATION GATE is the
+design center — every proposal's `current_code_quote` is verified VERBATIM against the named live file using
+Layer-1's own `_read`/`_norm_ws` + decoration-stripping (read_file's 'N: ' stamps tolerated); a quote of code
+that doesn't exist → auto-reject `fabricated_quote`, no LLM judge (fabrication mechanically fatal, not
+persuasive). Plus: scope guard (core_logic/+tests/ ONLY, assessment stack OFF-LIMITS — no grading-the-grader),
+trigger gate (confirmed FAIL + fail_count>=2 + Layer-2 real-axis), propose_fix (one DELIBERATE /query call,
+parses a fenced-JSON proposal), persist (reports/proposals/<date>-qNN.json+.md), and the trust ledger
+(gate-passed/endorsed/accepted/proven — Layer 4 undiscussed until >=5 consecutive passed+accepted+proven).
+Wired as harness Phase 1.8 (after Layer-2, before the ladder) — DORMANT on a clean suite (~0 proposals/run by
+design; fires only on a persistent real-axis FAIL). VALIDATED: gate gold-seed self-test
+tests/test_fix_proposals.py 19/19 (positive real-quote PASS; fabrication/invented-code REJECT; scope guard;
+wrong-file; anchor check; decoration tolerance; trigger gating; stubbed-LLM propose_fix both directions);
+verifier self-test still 21/21 (reuse non-destructive); harness compiles. BRIEF_38 status block + CLAUDE.md L3
+section + roadmap row 33 updated. The self-healing ladder now stands at L0-L3 live, L4 gated behind earned trust.
+
+[UPDATE] The Drill — 06-14 morning: 15/0/5 effective 20/20; the 12 climbed morning anchors HELD (verified)
+First run grading the 12 morning climbs (5 probing Brief-37 fixes) — all held at the harder rung, grep-confirmed:
+Q5 (3 locks, asyncio/threading split, exact lines), Q7 (running→{paused,completed,failed,INVALIDATED} — the
+Brief-37-added target, drill now regression-guards our own fix), Q6 (22 to_thread matches), Q12 ([TASK FAILED]
++ exact failure string), Q8/Q11/Q14/Q16/Q17/Q20 all substantively correct. So the climbs were calibrated right,
+not too gentle. Gold seed real-axis MATCH (5/6 lifetime at high; fine-mechanism premature_acceptance vs
+negative_fabrication — right family, soft metric, Brief 38 only needs real-axis). Brief 41 first SCHEDULED cron
+run: clean, no orphan/lock/crash.
+[FIX] VAULT fixture pollution found via 06-14m Q1 + cleaned. Q1 (a knowledge Q) leaked "your system at a few
+billion rows/month" — root cause: 2 FALSE vault facts survived the 06-11/06-12 sweeps ("Alkama is building a
+new analytics service", "...ingests a few billion rows per month"). The VAULT injects into EVERY answer, so this
+polluted all output, not just Q1. Removed (38→36) + 7 fixture episodes pruned (636→629, incl. the 06-09 "API
+spec by Friday"/"Go auth+billing" Brief-35-retry-leak residue). Backup memory.json.bak-20260614-081443. Same
+class Alkama approved twice; vault now clean of the db-scale fixture. Coherence stable 75/75/0 (the 0 = known
+control scorer artifact, not regression).
+
+## 2026-06-13
+
+[FIX] Q1 ambient FAIL — root-caused + closed both ways (A+B), drift-proof (BRIEF_39 addendum)
+The 06-13e Q1 real FAIL decomposed into 3 causes at 3 layers, 2 of them MY authorship fault: (1) question rot
+— a relative anchor 'yesterday' + a FROZEN June-11 oracle drift apart as days pass (same class as the retired
+line-number oracles); (2) tool — hours-back math is error-prone for a past date AND the 40-record display cap
+showed only window[-40:] (the TAIL), hiding in-window records so a 24h window returned only recent hours
+(this is why she couldn't see 21:00); (3) reasoning (secondary) — she let 'yesterday' override the explicit
+'(June 11)' and didn't re-query the gap. FIXES SHIPPED: **B (tool)** — ambient_recall gains a `date` anchor
+('2026-06-11'/'June 11'/'yesterday', via ambient._parse_date_anchor) overriding hours-back; the 40-cap is
+fixed (≤50 recs → full list; >50 → HOUR-BY-HOUR rollup over the whole scope, so any asked hour is always a
+row); threaded through tools.py + registry + executor (both paths) + interpreter rule (explicit date wins
+over relative; date arg preferred). **A (drift-proof drill)** — new DYNAMIC verifier
+verification.v_ambient_recall reads ambient.json at GRADE TIME and requires the real top app; evening Q1
+redesigned to 'what apps yesterday?' with {"type":"ambient_recall","date":"yesterday"} so question anchor AND
+oracle both resolve at grade time → never rot (live-truth pattern of search_set). VALIDATED: date anchor
+returns June-11's full day incl. the 21:00 row that was hidden; verifier PASS('brave')/FAIL(photoshop) on live
+data; verifier self-test 21/21; end-to-end smoke routed 'yesterday' → date anchor → full-day hour-by-hour
+recall. META-LESSON recorded: ambient questions about real activity are inherently brittle (relative drift +
+ring aging) — always grade via a live oracle, never a frozen fact about a relative time.
+
+[UPDATE] The Drill — 06-13 evening: THE run the week built toward. 14 PASS / 1 FAIL / 5 UNVER — and the
+system did EXACTLY its job, because for the first time it produced a GENUINE failure and every layer handled
+it right. Q1 (ambient) = a REAL FAIL, ground-truth-confirmed: 20 real 06-11 21:0x records EXISTED (she had
+the data) but she resolved "yesterday"->June12, ignored the explicit "(June 11)" parenthetical, and accepted
+the empty default window — two compounding errors, both required facts missed. Her L2 classified it real/
+wrong_value and her self-assessment OWNED it plainly, ZERO false-blame — the single most important data point
+of the week (she can tell a real failure from an artifact). Q11 = a verifier ARTIFACT she correctly contested:
+oracle expected "only one" os.replace call but Brief 37's atomic ambient.py write ADDED a second real call
+(crud.py:92 + ambient.py:88) — my own code stale-d my own oracle; she reported 2, named both, L2 called it
+verifier_artifact = correct. Oracle de-staled (count=2 + both functions). THE CLIMBED ANCHORS HELD: of the 9
+evening climbs, every graded one passed at the harder rung (regex-definition verbatim, double-false-premise
+rejection, etc.) — my prior "good chance she fails" was unfounded (Alkama called it out; lesson is the inverse,
+climb harder still). BRIEF 41's first production run: clean, no orphan/lock/crash. 3 more climb-due (Q3/Q6/Q19)
+promoted, oracles source-verified. THROUGHLINE: ladder found a real ceiling, verifier threw a stale-oracle
+artifact, and Clara's L2 SORTED THEM CORRECTLY (real vs verifier_artifact) under live conditions — the exact
+trust signal Brief 38 (L3 fix proposals) was gated on. Calibration watch closes GREEN; Brief 38 unblocked.
+
+[FEATURE] Brief 41 — harness delivery hardening (3 cron casualties in 3 days; 2 from no-internet)
+The drill CONTENT was solid; the DELIVERY harness was fragile (06-11 cp1252 crash, 06-12 eve internet outage,
+06-13 morn outage + orphaned backend 3.5h + stale lock). Key insight: the drill is MEANINGLESS offline (every
+question needs DeepSeek), so offline the right outcome is a clean skip, not a half-start + orphan. Three fixes,
+all in tests/test_harness.py: (A) CONNECTIVITY PRE-FLIGHT — wait_for_internet() checks the DeepSeek host BEFORE
+the lock/spawn; offline → capped retry (2×/15min) then clean sys.exit(0), nothing spawned (this is what
+prevents the orphan class). (B) HTTP-POLL READINESS + REUSE — backend_is_up()/soul is now the SOLE readiness
+gate (dropped the 'Voice system loaded' log-scrape that never appears when voice/MCP/Telegram hang);
+_HARNESS_OWNS_BACKEND ownership flag (reused/leftover-healthy backend left running); _kill_stale_backend reaps
+a half-started zombie on :8001 before respawn. (C) GUARANTEED TEARDOWN — stop_backend ownership-gated +
+idempotent + atexit backstop, so a mid-run crash reaps the spawned backend instead of orphaning it (even the
+'backend failed to start' abort now self-cleans). Lock side was already robust (steals dead-pid/>3h locks).
+VALIDATED: compile + 7/7 unit (offline-sim via unreachable host → clean-skip; ownership no-op on reuse;
+idempotent stop; stale-pid no-op). BRIEF_41_Harness_Delivery_Hardening.md written; CLAUDE.md harness section
+updated. NOT folded in: the Q19 read-then-delete tool race (question-level, tracked separately).
+
+[UPDATE] The Drill — 06-13 morning (manual rerun): 15/0/5 effective 20/20 + SECOND ladder promotion (12 anchors)
+Clean run at thinking=high on pruned memory; gold-seed MATCH (verifier_artifact, real-axis 5/6 lifetime — the
+lone miss was at none, reinforcing the thinking verdict). SECOND auto-climb: 12 morning anchors at streak 3
+promoted (Q4,5,6,7,8,9,11,12,14,16,17,20). Five promotions now PROBE BRIEF-37 ADDITIONS — running->invalidated
+transition, the janitor retention categories, on_deleted->rag_rebuild, the new _episodic_lock, drain_blocking
+return-on-timeout — so the drill now regression-guards this week's own fixes. 21 questions climbed in 2 days =
+the one-time catch-up (suite had grown uniformly easy); from here it trickles, and the harder rungs will produce
+the first real FAILs (the ladder finding her ceiling, not regression). Backup kept; oracles source-verified.
+
+[FIX/PROPOSAL] THIRD cron casualty in 3 days — harness delivery is fragile (content is not). Brief 41 proposed.
+06-13 morning: 08:00 cron fired on time but NO INTERNET -> backend startup stalled in its network phase (RAG
+08:01, never reached 'Voice system loaded' = the harness ready-signal) -> harness aborted (0x8007042B) ->
+orphaned a half-started backend on port 8001 (ran 3.5h until Alkama killed it; my sandboxed shell got
+Access-denied — Task-Scheduler-integrity) + left a stale .harness.lock (I cleared it). Pattern: cp1252 crash
+(06-11), internet outage (06-12 eve), internet outage + orphan (06-13 morn) — TWO are the same network-startup
+class. PROPOSED Brief 41 hardening: (1) reuse a live backend on 8001 instead of always spawning (kills the
+orphan class + trivial reruns); (2) guaranteed spawned-backend cleanup on abort (try/finally kill child);
+(3) offline-tolerant startup — timebox/soften the network steps (Telegram, MCP) so lifespan completes even
+with no internet (the drill never needed them). Awaiting Alkama's go.
+
 ## 2026-06-12
 
 [UPDATE] The Drill — 06-12 evening (manual rerun): THE CONVERGENCE RUN — best scorecard ever + first ladder promotion

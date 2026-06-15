@@ -19,6 +19,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime
@@ -115,51 +116,94 @@ def load_observations(path: str = AMBIENT_PATH) -> list:
         return []
 
 
-def recall(window_hours: float = 24, query: str = "") -> str:
-    """A1 grounded recall (BRIEF_39): formatted slice of the observation store.
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["", "January", "February", "March", "April", "May", "June",
+     "July", "August", "September", "October", "November", "December"]) if i}
+_MONTHS.update({m[:3]: i for m, i in list(_MONTHS.items())})
 
-    Returns timestamped observations from the last `window_hours`, optionally
-    keyword-filtered, plus a per-app activity rollup. Rule-19 parity is built into
-    the output: an empty window says so explicitly — recall NEVER reconstructs
-    unobserved time. Read-only; the watcher process owns all writes."""
+
+def _parse_date_anchor(s: str):
+    """Resolve a date phrase to 'YYYY-MM-DD', or None if it isn't a date.
+    Handles: ISO (2026-06-11), 'June 11' / '11 June' / 'Jun 11', and the
+    relative 'today'/'yesterday'/'day before yesterday'. (Brief 39 / Q1 fix B)"""
+    from datetime import datetime, timedelta
+    if not s:
+        return None
+    t = str(s).strip().lower()
+    now = datetime.now()
+    if t in ("today",):
+        return now.strftime("%Y-%m-%d")
+    if t in ("yesterday",):
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    if t in ("day before yesterday", "two days ago"):
+        return (now - timedelta(days=2)).strftime("%Y-%m-%d")
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", t)            # ISO anywhere
+    if m:
+        return m.group(0)
+    m = re.search(r"\b([a-z]{3,9})\s+(\d{1,2})\b", t)        # "june 11"
+    if m and m.group(1) in _MONTHS:
+        return f"{now.year:04d}-{_MONTHS[m.group(1)]:02d}-{int(m.group(2)):02d}"
+    m = re.search(r"\b(\d{1,2})\s+([a-z]{3,9})\b", t)        # "11 june"
+    if m and m.group(2) in _MONTHS:
+        return f"{now.year:04d}-{_MONTHS[m.group(2)]:02d}-{int(m.group(1)):02d}"
+    return None
+
+
+def recall(window_hours: float = 24, query: str = "", date: str = "") -> str:
+    """A1 grounded recall (BRIEF_39): formatted view of the observation store.
+
+    Scope is EITHER a specific calendar day (`date`, e.g. '2026-06-11' / 'June 11' /
+    'yesterday' — overrides window_hours) OR the last `window_hours` (default). This
+    removes the interpreter's error-prone hours-back math for "what was I doing on
+    June 11" (Q1 fix B). Rule-19 parity: an empty scope says so explicitly — recall
+    NEVER reconstructs unobserved time. Read-only; the watcher owns all writes."""
     from datetime import datetime, timedelta
 
     obs = load_observations()
     if not obs:
         return ("No ambient observations exist. Either the ambient watcher is not "
                 "running or no sensors are enabled — I have not been watching.")
-    try:
-        wh = float(window_hours)
-    except (TypeError, ValueError):
-        wh = 24.0
-    cutoff = (datetime.now() - timedelta(hours=wh)).isoformat(timespec="seconds")
-    window = [o for o in obs if o.get("ts", "") >= cutoff]
+
+    # ── Scope: date anchor (preferred when given) or hours-back window ──────────
+    day = _parse_date_anchor(date) if date else None
+    if day:
+        window = [o for o in obs if o.get("ts", "").startswith(day)]
+        scope = f"on {day}"
+    else:
+        try:
+            wh = float(window_hours)
+        except (TypeError, ValueError):
+            wh = 24.0
+        cutoff = (datetime.now() - timedelta(hours=wh)).isoformat(timespec="seconds")
+        window = [o for o in obs if o.get("ts", "") >= cutoff]
+        scope = f"in the last {wh:g}h"
+
     filter_note = ""
     if query:
         q = str(query).lower()
         filtered = [o for o in window if q in json.dumps(o.get("payload", {})).lower()]
         # Graceful fallback: the interpreter sometimes passes descriptive phrases
-        # ("foreground app") as keywords that match no payload text. If filtering
-        # emptied a NON-empty window, show the window unfiltered with a note —
-        # honest-empty is only correct when the window itself is empty.
+        # ("foreground app") as keywords that match nothing. Showing the unfiltered
+        # window is honest; an empty result is only correct when the window is empty.
         if filtered or not window:
             window = filtered
         else:
             filter_note = (f" (keyword '{query}' matched nothing — showing ALL "
-                           f"observations in the window instead)")
+                           f"observations in scope instead)")
             query = ""
 
     if not window:
         first, last = obs[0]["ts"], obs[-1]["ts"]
-        return (f"No observations in the last {wh:g}h"
+        return (f"No observations {scope}"
                 + (f" matching '{query}'" if query else "")
-                + f" — I wasn't watching during that window (store spans {first} to {last}). "
+                + f" — I wasn't watching then (store spans {first} to {last}). "
                   "I will not reconstruct unobserved time.")
 
-    lines = [f"Ambient observations — last {wh:g}h"
+    lines = [f"Ambient observations — {scope}"
              + (f", filtered by '{query}'" if query else "")
              + f" ({len(window)} records, timestamps exact){filter_note}:"]
-    # Per-app rollup from window-change events
+
+    # Per-app rollup over the FULL window (never truncated — answers "which apps").
     apps = {}
     for o in window:
         if o["sensor"] == "active_window":
@@ -169,18 +213,31 @@ def recall(window_hours: float = 24, query: str = "") -> str:
         top = sorted(apps.items(), key=lambda kv: -kv[1])[:6]
         lines.append("App activity (foreground changes): "
                      + ", ".join(f"{p} x{n}" for p, n in top))
-    shown = window if len(window) <= 40 else window[-40:]
-    if len(window) > 40:
-        lines.append(f"[showing the most recent 40 of {len(window)}]")
-    for o in shown:
-        pl = o.get("payload", {})
-        if o["sensor"] == "active_window":
-            desc = f"{pl.get('process', '?')} — {pl.get('title', '')[:90]}"
-        elif o["sensor"] == "system_state":
-            desc = f"battery {pl.get('battery_pct', '?')}%, {'plugged in' if pl.get('plugged') else 'on battery'}"
-        else:
-            desc = f"{pl.get('event', pl.get('state', '?'))}" + (f" (idle {pl.get('idle_s')}s)" if pl.get("idle_s") else "")
-        lines.append(f"  {o['ts']}  [{o['sensor']}]  {desc}")
+
+    # Detail. The OLD tail-cap (window[-40:]) hid in-window records when the window
+    # was busy — so "what was I doing at 21:00" returned only recent hours (Q1 fix B).
+    # Small windows → full raw list; large windows → an HOUR-BY-HOUR rollup over the
+    # WHOLE scope (so 21:00 is always present as its own row), never a tail slice.
+    if len(window) <= 50:
+        for o in window:
+            pl = o.get("payload", {})
+            if o["sensor"] == "active_window":
+                desc = f"{pl.get('process', '?')} — {pl.get('title', '')[:90]}"
+            elif o["sensor"] == "system_state":
+                desc = f"battery {pl.get('battery_pct', '?')}%, {'plugged in' if pl.get('plugged') else 'on battery'}"
+            else:
+                desc = f"{pl.get('event', pl.get('state', '?'))}" + (f" (idle {pl.get('idle_s')}s)" if pl.get("idle_s") else "")
+            lines.append(f"  {o['ts']}  [{o['sensor']}]  {desc}")
+    else:
+        from collections import defaultdict
+        by_hour = defaultdict(lambda: defaultdict(int))
+        for o in window:
+            if o["sensor"] == "active_window":
+                by_hour[o["ts"][:13]][o["payload"].get("process", "?")] += 1
+        lines.append(f"Hour-by-hour foreground apps ({len(window)} records — full scope, not a tail):")
+        for hr in sorted(by_hour):
+            tops = sorted(by_hour[hr].items(), key=lambda kv: -kv[1])[:3]
+            lines.append(f"  {hr}:00  " + ", ".join(f"{p}({n})" for p, n in tops))
     return "\n".join(lines)
 
 
