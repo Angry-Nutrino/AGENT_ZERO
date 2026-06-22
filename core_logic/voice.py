@@ -118,16 +118,26 @@ class VoiceCoordinator:
         except Exception as e:
             slog.warning(f"[Voice] Kokoro warmup failed: {e}")
 
-        device_index = self._find_mic(self._mic_name)
-        self._in_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            device=device_index,
-            callback=self.audio_callback,
-        )
-        self._in_stream.start()
-        slog.info(f"[Voice] Microphone stream open (device: {device_index}).")
+        # Persistent backend mic is OPT-IN now (default OFF). The in-interface F4/WebSocket
+        # push-to-talk that consumed this stream was removed — the F10 hotkey records its OWN
+        # mic on-press (transcribe_file on a WAV), and TTS uses the output stream — so opening
+        # the mic at startup just held the OS microphone open 24/7 (lighting the "mic in use"
+        # indicator even during the text-only harness) for a consumer that no longer exists.
+        # Set VOICE_MIC=1 in core_logic/.env to restore an always-open backend mic.
+        if os.getenv("VOICE_MIC", "").strip().lower() in ("1", "true", "yes"):
+            device_index = self._find_mic(self._mic_name)
+            self._in_stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                device=device_index,
+                callback=self.audio_callback,
+            )
+            self._in_stream.start()
+            slog.info(f"[Voice] Microphone stream open (device: {device_index}).")
+        else:
+            self._in_stream = None
+            slog.info("[Voice] Persistent mic DISABLED (VOICE_MIC unset) — F10 hotkey uses its own on-press mic.")
 
         # Persistent output stream — never closed between speak() calls,
         # so Windows WASAPI never resets the audio device unexpectedly.
@@ -238,6 +248,25 @@ class VoiceCoordinator:
     async def stop_recording_async(self) -> str | None:
         """Async version — runs Whisper in thread to avoid blocking event loop."""
         return await asyncio.to_thread(self.stop_recording)
+
+    def transcribe_file(self, wav_path: str) -> str | None:
+        """Transcribe an arbitrary WAV with the already-loaded Whisper model (Brief 44.1 — the global
+        F10 hotkey records its OWN audio on-press and POSTs the WAV here, so the backend's persistent
+        mic is never used for the hotkey path — honoring 'mic only on press'). Reuses the model; never
+        raises into the caller."""
+        if self._whisper is None:
+            return None
+        try:
+            segments, _ = self._whisper.transcribe(
+                wav_path, beam_size=5,
+                initial_prompt="CLARA, Alkama, orchestrator"
+            )
+            text = " ".join(s.text for s in segments).strip()
+            slog.info(f"[Voice] STT(file): '{text}'")
+            return text or None
+        except Exception as e:
+            slog.error(f"[Voice] STT(file) error: {e}")
+            return None
 
     # ── TTS Playback ──────────────────────────────────────────────────────
 

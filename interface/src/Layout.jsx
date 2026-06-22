@@ -6,7 +6,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
   Terminal, Cpu, Send, Paperclip, X, Zap, Activity,
   Shield, User, Copy, Check, ChevronRight, Radio,
-  Layers, Clock, AlertCircle
+  Layers, Clock, AlertCircle, Smartphone
 } from "lucide-react";
 import useClara from "./hooks/useClara";
 
@@ -251,6 +251,10 @@ function MessageBubble({ msg, index, messages, onQuote }) {
   const [hovered, setHovered] = useState(false);
   const [copied, copy] = useCopy();
   const isClara = msg.sender === "Clara";
+  // Incoming external message (read-only WhatsApp from a third party) — NOT Alkama, NOT Clara.
+  // Render distinct + on the left so it can never masquerade as Alkama's own bubble.
+  const isIncoming = msg.source === "whatsapp";
+  const onLeft = isClara || isIncoming;
 
   const replyTarget = isClara && msg.messageId
     ? messages.find(m => m.sender === "User" && m.messageId === msg.messageId)
@@ -258,18 +262,25 @@ function MessageBubble({ msg, index, messages, onQuote }) {
 
   return (
     <div
-      className={`flex msg-enter ${isClara ? "justify-start" : "justify-end"}`}
+      className={`flex msg-enter ${onLeft ? "justify-start" : "justify-end"}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       <div className={`relative max-w-[80%] group`}>
         {/* hover actions */}
         <div className={`
-          absolute -top-7 ${isClara ? "left-0" : "right-0"}
+          absolute -top-7 ${onLeft ? "left-0" : "right-0"}
           flex items-center gap-1 transition-all duration-150
           ${hovered ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1 pointer-events-none"}
         `}>
           <span className="text-[9px] font-mono text-white/30 px-2">{msg.time}</span>
+          {/* Brief 43.3 — source stamp for the unified master console (interface = home, no badge). */}
+          {msg.source && msg.source !== "interface" && (
+            <span className="text-[8px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded
+              bg-emerald-500/10 border border-emerald-500/25 text-emerald-300/70">
+              {msg.source}
+            </span>
+          )}
           {isClara && (
             <button
               onClick={() => copy(msg.text)}
@@ -285,9 +296,18 @@ function MessageBubble({ msg, index, messages, onQuote }) {
           p-4 rounded-2xl flex flex-col gap-2 transition-all duration-150
           ${isClara
             ? "bg-linear-to-br from-emerald-950/60 to-black/60 border border-emerald-500/20 text-emerald-50 shadow-[0_0_20px_rgba(16,185,129,0.08)] hover:shadow-[0_0_25px_rgba(16,185,129,0.12)]"
+            : isIncoming
+            ? "bg-linear-to-br from-amber-950/40 to-black/60 border border-amber-500/30 text-amber-50/90 shadow-[0_0_18px_rgba(245,158,11,0.08)]"
             : "bg-linear-to-br from-[#1c1c1c] to-[#141414] border border-white/8 text-gray-200 hover:border-white/12"
           }
         `}>
+          {/* incoming-channel header — makes a third-party WhatsApp message unmistakable */}
+          {isIncoming && (
+            <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wide text-amber-400/80 -mb-1">
+              <Smartphone size={11} /> Incoming · WhatsApp
+            </div>
+          )}
+
           {/* image */}
           {msg.image && (
             <img
@@ -372,7 +392,7 @@ export default function Layout() {
     sendMessage, cancelTask, toggleCard, status, selectedImage, setSelectedImage,
     selectedFile, setSelectedFile,
     handleImageUpload, streamingContent, clearHistory, lastTokenUsage,
-    voiceActive, claraIsSpeaking,
+    claraIsSpeaking,
   } = useClara();
 
   const chatEndRef   = useRef(null);
@@ -620,18 +640,13 @@ export default function Layout() {
           <h1 className="text-[11rem] font-black text-white/[0.018] tracking-[0.4em] font-mono">CLARA</h1>
         </div>
 
-        {/* Voice waveform — appears when CLARA is speaking */}
+        {/* Voice waveform — appears when CLARA is speaking (TTS, incl. F10 hotkey replies) */}
         {claraIsSpeaking && (
           <div className="voice-waveform">
             {[...Array(5)].map((_, i) => (
               <div key={i} className="voice-bar" style={{ animationDelay: `${i * 0.1}s` }} />
             ))}
           </div>
-        )}
-
-        {/* Push-to-talk recording indicator */}
-        {voiceActive && (
-          <div className="voice-recording-indicator">● Recording… (release F4)</div>
         )}
 
         {/* messages */}

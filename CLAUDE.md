@@ -32,6 +32,21 @@ Include relevant brief numbers, affected modules, and key behavioral changes.
 
 ---
 
+## Work Backlog & Busy-Day Mode (Global Instruction)
+
+`BACKLOG.md` (repo root) is the **single canonical queue** of pending work, grouped by autonomy tier
+(🟢 do-unattended / 🟡 build-on-`autonomous`-dormant-uncommitted-Alkama-reviews-diff-and-commits / 🔴 queue-only-needs-Alkama-or-arming-risk). Keep it
+**fed**: at the end of every session, harvest newly-surfaced items into it (don't let pending state scatter
+across TIMELINE notes again).
+
+**Busy-day mode** — when Alkama says *"busy day / work the backlog"*, it's an explicit **permission-bypass**
+(same live session, not `claude -p`): do 🟢/🟡 work **without asking** (typical and complex), self-solve forks
+with the most reversible option + log it, **queue 🔴 instead of interrupting**, over-consume the window freely
+(under-consume never), self-check every action, and end with a session report + backlog update. Full operating
+contract is at the top of `BACKLOG.md`.
+
+---
+
 ## Development Commands
 
 ### Backend (FastAPI + WebSocket)
@@ -122,6 +137,15 @@ Evening runs the L1-L5 scorecard alone. Wrapped so a coherence hiccup never fail
    in the TIMELINE note (the questions lead; her self-verification follows — see the ladder note).
 6. **Write the JSON**, then update **TIMELINE.md** with an `[UPDATE]` entry (pass rate, what each FAIL was +
    its mechanism, Layer 1's performance, what rotated).
+7. **WRITE THE ANALYSIS INTO THE REPORT FILE — MANDATORY, NON-SKIPPABLE.** Overwrite the report's
+   `## Claude's Analysis` placeholder (`*Pending — open this report…*`) with the actual verdict for THIS run:
+   per-question pass/fail anchored to the scorecard, every confirmed FAIL elaborated per the
+   elaborate-on-real-problems rule (what/why/root-cause/blast-radius/disposition; clean passes stay terse),
+   Layer-1 performance, and what rotated. **The report file is the durable record — chat and TIMELINE are
+   not enough** (2026-06-19: 7 reports, 06-15e..06-19m, had real analysis in chat+TIMELINE but their report
+   sections silently stayed "Pending", so they were untrackable). The drill is NOT complete until this
+   section is written. Verify with `python tests/report_analysis_status.py` — it must report that day's
+   report as ANALYZED (it greps the section for the "Pending" placeholder and exits non-zero on any gap).
 
 **`verification` block (add to every new question — the reliable path, Brief 31):**
 - `{"type":"compute","code":"<one-liner that prints the answer>"}` — FAST math. Self-check it runs.
@@ -921,7 +945,7 @@ Add entries manually to `memory.json` when new paths need to be known. Format:
 "environment": {
   "known_locations": {
     "Screenshots": "C:\\Users\\alkam\\OneDrive\\Pictures\\Screenshots",
-    "AGENT_ZERO (Clara)": "E:\\ML PROJECTS\\AGENT_ZERO"
+    "AGENT_ZERO (Clara)": "E:\\ML_PROJECTS\\AGENT_ZERO"
   }
 }
 ```
@@ -953,7 +977,7 @@ Schema:
 ```json
 "filesystem_map": {
   "E": {
-    "ML PROJECTS": {
+    "ML_PROJECTS": {
       "AGENT_ZERO": {
         "api.py": null,
         "core_logic": { "agent.py": null, "tools.py": null }

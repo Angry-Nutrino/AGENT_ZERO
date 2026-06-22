@@ -23,7 +23,7 @@ from core_logic.orchestrator import Orchestrator
 from core_logic.background_tasks import BackgroundScheduler
 from core_logic.environment import EnvironmentWatcher
 from core_logic.tracer import Tracer
-from core_logic.tools import set_task_graph
+from core_logic.tools import set_task_graph, set_agent_ref
 from core_logic.session_logger import init_session_log, slog
 from core_logic.bench_logger import init_bench_log, close_bench_log
 from core_logic.tool_registry import ToolRegistry
@@ -47,6 +47,7 @@ tool_registry: ToolRegistry | None = None
 mcp_client: MCPClient | None = None
 voice: VoiceCoordinator | None = None
 telegram_bot: TelegramBot | None = None
+_whatsapp_task = None   # Brief 45 P1 — the read-only WhatsApp poller task (dormant unless WHATSAPP_ENABLED)
 active_connections: set = set()  # live WebSocket connections — used for speaking_start/stop broadcast
 
 async def _broadcast(payload: dict) -> None:
@@ -79,6 +80,47 @@ async def _broadcast_speaking(is_speaking: bool):
     await _broadcast({"type": "speaking_start" if is_speaking else "speaking_stop"})
 
 
+async def _broadcast_console(role: str, text: str, source: str, message_id: str = None):
+    """Live cross-channel mirror — pushes a message into the master console the instant it
+    happens, so telegram/whatsapp/voice exchanges appear WITHOUT a /history refresh. role is
+    'user' | 'clara'; source is 'telegram' | 'whatsapp' | 'voice'. No-op if no UI is connected."""
+    await _broadcast({"type": "console_message", "role": role, "content": text,
+                      "source": source, "message_id": message_id})
+
+
+async def _whatsapp_poll_loop():
+    """Brief 45 P1 — every ~2s, compile the due 15s batches and route them. SURFACE (Shobha) →
+    broadcast a whatsapp_alert + notifier + log; HOLD (everyone else) → archived to the console
+    (source='whatsapp'), NO interrupt. Read-only — nothing is ever sent back to WhatsApp."""
+    from core_logic.whatsapp_gate import poll
+    from core_logic.conversations import record_message, record_whatsapp_held
+    from core_logic.telegram_bot import notifier
+    while True:
+        try:
+            for d in poll():
+                sender, text, decision = d["sender"], d["text"], d["decision"]
+                if decision == "surface":
+                    # Priority sender (Shobha): into the chat feed + a live incoming alert + Telegram.
+                    # source='whatsapp' makes the UI render it as an INCOMING bubble (left, badged), never
+                    # as Alkama's own; the [sender] prefix carries the name on both live + /history reload.
+                    record_message("whatsapp", "user", f"[{sender}] {text}")
+                    await _broadcast({"type": "whatsapp_alert", "sender": sender,
+                                      "content": text, "count": d["count"]})
+                    try:
+                        await notifier.send(f"WhatsApp — {sender}:\n{text}")
+                    except Exception:
+                        pass
+                    slog.info(f"[WhatsApp] SURFACE {sender}: {text[:80]}")
+                else:
+                    # Everyone else (incl. spam): HELD QUIETLY — separate archive, NOT the chat feed,
+                    # NOT broadcast. Reviewable on demand ('what did I miss on WhatsApp?').
+                    record_whatsapp_held(sender, text)
+                    slog.info(f"[WhatsApp] HOLD {sender} ({d['count']} msg) — archived quietly, no chat, no interrupt")
+        except Exception as e:
+            slog.warning(f"[WhatsApp] poll loop error: {e}")
+        await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global clara, task_graph, event_queue, orchestrator, scheduler, env_watcher, tracer, voice
@@ -98,7 +140,8 @@ async def lifespan(app: FastAPI):
     clara = Clara_Agent()
     task_graph = TaskGraph()
     set_task_graph(task_graph)
-    slog.info("[API] TaskGraph reference injected into tools.")
+    set_agent_ref(clara)
+    slog.info("[API] TaskGraph + agent references injected into tools.")
     # Inject the agent's LIVE crud instance into the tool executor (Brief 36 C-35 —
     # it previously imported the crud CLASS, so fsmap auto-population never ran).
     from core_logic.tool_executor import set_db
@@ -182,9 +225,19 @@ async def lifespan(app: FastAPI):
     tg_chat_id = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "")
 
     if tg_token and tg_chat_id:
-        telegram_bot = TelegramBot(orchestrator, tg_token, tg_chat_id)
-        await telegram_bot.start()
-        slog.info("[API] Telegram bot active.")
+        # Telegram is a PERIPHERAL notifier — a connectivity/auth failure (e.g.
+        # api.telegram.org unreachable, VPN/region block) must NEVER take down the core
+        # backend. Before the fix, get_me() raising TimedOut here crashed the whole lifespan
+        # ("Application startup failed. Exiting.") and /soul never served — a Telegram outage
+        # took the entire AI system offline. Degrade gracefully, exactly like the Voice block.
+        try:
+            telegram_bot = TelegramBot(orchestrator, tg_token, tg_chat_id)
+            telegram_bot.on_console = _broadcast_console   # live console mirror (no refresh)
+            await telegram_bot.start()
+            slog.info("[API] Telegram bot active.")
+        except Exception as e:
+            telegram_bot = None
+            slog.warning(f"[API] Telegram bot failed to start ({e}) — continuing without it.")
     else:
         slog.info("[API] Telegram not configured — TELEGRAM_BOT_TOKEN or CHAT_ID missing.")
 
@@ -204,6 +257,21 @@ async def lifespan(app: FastAPI):
         slog.warning(f"[API] Voice system unavailable: {e}. Continuing without voice.")
         voice = None
 
+    # WhatsApp read-only poller (Brief 45 P1) — DORMANT unless WHATSAPP_ENABLED is set in .env.
+    # Off by default so the Node service can be stood up + QR-logged before this ever runs; when on,
+    # it compiles the 15s batches and routes them (Shobha → surface/notify, others → hold/store).
+    # Non-fatal, like Voice/Telegram — a poller hiccup never affects startup.
+    global _whatsapp_task
+    _whatsapp_task = None
+    if os.getenv("WHATSAPP_ENABLED", "").strip():
+        try:
+            _whatsapp_task = asyncio.create_task(_whatsapp_poll_loop())
+            slog.info("[API] WhatsApp read-only poller started (WHATSAPP_ENABLED).")
+        except Exception as e:
+            slog.warning(f"[API] WhatsApp poller failed to start ({e}) — continuing without it.")
+    else:
+        slog.info("[API] WhatsApp poller dormant (set WHATSAPP_ENABLED in .env to activate).")
+
     yield  # server is live here
 
     # Shutdown
@@ -214,6 +282,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     close_bench_log()
+    if _whatsapp_task:
+        _whatsapp_task.cancel()
     if voice:
         voice.unload()
         slog.info("[API] Voice system unloaded.")
@@ -270,6 +340,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def handle_message(user_text: str, image_data, file_data, message_id: str, via_voice: bool = False):
         try:
+            # Brief 43.4 — voice cancel-filter: a spoken request ending in "leave it / never mind"
+            # is REJECTED before process_request (never hits the LLM); Clara just acks. Text queries
+            # are not filtered (this is the omnipresent-voice "false request" case). Deterministic.
+            if via_voice and not image_data and not file_data:
+                from core_logic.intent_filters import is_false_request
+                if is_false_request(user_text):
+                    slog.info(f"[Voice] False-request (cancel) detected — skipping process: {user_text!r}")
+                    if _voice_ready():
+                        threading.Thread(target=voice.speak, args=("Got it.",), kwargs={"block": False}, daemon=True).start()
+                    await _broadcast({"type": "final_answer", "content": "Got it.", "message_id": message_id, "source": "voice"})
+                    return
+
             async def on_step(content, type="thought", turn_id=None, extra=None):
                 await send_update(
                     content, type=type,
@@ -287,6 +369,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     message_id=message_id,
                     on_step_update=on_step,
                     on_interpreted=_speak_ack if via_voice else None,
+                    channel=("voice" if via_voice else "interface"),
                 ),
                 timeout=600,
             )
@@ -299,6 +382,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "final_answer",
                 "content": response,
                 "message_id": message_id,
+                "source": ("voice" if via_voice else "interface"),  # Brief 43.3 — live source badge
             })
         except asyncio.TimeoutError:
             slog.error(f"[WS] handle_message timed out after 600s (message {message_id}).")
@@ -337,6 +421,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "type": "user_transcript",
                                 "content": text,
                                 "message_id": message_id,
+                                "source": "voice",  # Brief 43.3 — live source badge on the voice user bubble
                             })
                             asyncio.create_task(
                                 handle_message(text, None, None, message_id, via_voice=True)
@@ -484,7 +569,8 @@ async def query_endpoint(req: QueryRequest):
     try:
         response = await asyncio.wait_for(
             orchestrator.submit_user_event(
-                text=req.text, memory_mode=req.memory_mode, return_trace=req.return_trace
+                text=req.text, memory_mode=req.memory_mode, return_trace=req.return_trace,
+                channel="harness",   # Brief 43.3 — /query is the test harness; excluded from the console
             ),
             timeout=600,  # Brief 36 A-13 — a dropped future becomes an honest error, not a hang
         )
@@ -495,6 +581,94 @@ async def query_endpoint(req: QueryRequest):
     except Exception as e:
         slog.error(f"[/query] Error: {e}")
         return {"response": f"Error: {e}"}
+
+
+@app.get("/history")
+async def history_endpoint(limit: int = 200, include_harness: bool = False):
+    """Brief 43.3 — the persistent cross-channel conversation archive that feeds the unified master
+    console (one thread, source-badged). Harness/drill traffic excluded by default. Read-only, local."""
+    try:
+        from core_logic.conversations import load_recent
+        return {"messages": load_recent(limit=limit, include_harness=include_harness)}
+    except Exception as e:
+        slog.error(f"[/history] Error: {e}")
+        return {"messages": []}
+
+
+class VoiceQueryRequest(BaseModel):
+    audio_b64: str            # base64 WAV captured by the F10 hotkey listener (mic on-press only)
+    speak: bool = True        # speak the reply via Kokoro (set False if simultaneous play/record distorts)
+
+
+@app.post("/voice_query")
+async def voice_query_endpoint(req: VoiceQueryRequest):
+    """Brief 44.1 — the global F10 hotkey path. The standalone listener records its OWN audio (mic
+    only while F10 is held) and POSTs the WAV here; the backend transcribes with the loaded Whisper,
+    applies the cancel-filter, runs the full pipeline (channel='voice'), and optionally speaks. The
+    backend's persistent mic is NOT used for capture — honoring 'mic only on press'. Local-only."""
+    import base64, tempfile, os as _os
+    v = voice            # module global, set in lifespan (api.py imports set_voice, not get_voice)
+    if v is None or not orchestrator:
+        return {"transcript": "", "response": "Voice/orchestrator unavailable."}
+    tmp = None
+    try:
+        try:
+            data = base64.b64decode(req.audio_b64)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                tmp = f.name
+                f.write(data)
+        except Exception as e:
+            return {"transcript": "", "response": f"bad audio: {e}"}
+        transcript = await asyncio.to_thread(v.transcribe_file, tmp)
+    finally:
+        if tmp:
+            try: _os.unlink(tmp)
+            except OSError: pass
+    if not transcript:
+        return {"transcript": "", "response": ""}
+    import uuid as _uuid
+    mid = str(_uuid.uuid4())
+    # Live console: surface what the hotkey heard immediately (reuses the user_transcript
+    # handler → User bubble + query card + "thinking"), source-badged 'voice'.
+    await _broadcast({"type": "user_transcript", "content": transcript, "message_id": mid, "source": "voice"})
+    # Cancel-filter (Brief 43.4): "leave it / never mind" → reject before the LLM.
+    from core_logic.intent_filters import is_false_request
+    if is_false_request(transcript):
+        if req.speak and v:
+            threading.Thread(target=v.speak, args=("Got it.",), kwargs={"block": False}, daemon=True).start()
+        await _broadcast({"type": "final_answer", "content": "Got it.", "message_id": mid, "source": "voice"})
+        return {"transcript": transcript, "response": "Got it.", "cancelled": True}
+    try:
+        response = await asyncio.wait_for(
+            orchestrator.submit_user_event(text=transcript, channel="voice"), timeout=600)
+    except Exception as e:
+        await _broadcast({"type": "final_answer", "content": f"Error: {e}", "message_id": mid, "source": "voice"})
+        return {"transcript": transcript, "response": f"Error: {e}"}
+    if isinstance(response, dict):
+        response = response.get("response", "")
+    if req.speak and v:
+        threading.Thread(target=v.speak, args=(response,), kwargs={"block": True}, daemon=True).start()
+    await _broadcast({"type": "final_answer", "content": response, "message_id": mid, "source": "voice"})
+    return {"transcript": transcript, "response": response}
+
+
+class WhatsAppIncoming(BaseModel):
+    sender: str
+    text: str
+
+
+@app.post("/whatsapp_incoming")
+async def whatsapp_incoming_endpoint(msg: WhatsAppIncoming):
+    """Brief 45 P1 (read-only) — the external whatsapp-web.js service POSTs each incoming message here.
+    It enters the 15s per-sender debounce; the backend poller compiles + routes it (Shobha → surface,
+    others → hold). NEVER sends anything back to WhatsApp. Local-only."""
+    try:
+        from core_logic.whatsapp_gate import record_incoming
+        record_incoming(msg.sender, msg.text)
+        return {"ok": True}
+    except Exception as e:
+        slog.error(f"[/whatsapp_incoming] Error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/reset_conversation")

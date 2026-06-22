@@ -45,6 +45,13 @@ core_logic/.memory.json.*
 core_logic/archived_vault_facts.json
 faiss_index.bin
 faiss_index.pkl
+
+# --- CONVERSATION STORE (real voice/interface/telegram/WhatsApp message content — personal) ---
+conversations/
+
+# --- WHATSAPP WEB SESSION (a LIVE login — leaking it = account hijack) + puppeteer cache ---
+whatsapp_service/.wwebjs_auth/
+whatsapp_service/.wwebjs_cache/
 *.db
 core_logic/tasks.db-shm
 core_logic/tasks.db-wal

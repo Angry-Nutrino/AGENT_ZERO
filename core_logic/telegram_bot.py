@@ -149,6 +149,16 @@ class TelegramBot:
         self._token = token
         self._allowed_chat_id = str(allowed_chat_id)
         self._app: Application | None = None
+        # Optional live-console mirror, injected by api.py: on_console(role, text, source).
+        # Lets Telegram exchanges appear in the master console WITHOUT a /history refresh.
+        self.on_console = None
+
+    async def _mirror(self, role: str, text: str) -> None:
+        if self.on_console:
+            try:
+                await self.on_console(role, text, "telegram")
+            except Exception:
+                pass
 
     async def start(self) -> None:
         """Build the Application and start long-polling in the background."""
@@ -201,6 +211,7 @@ class TelegramBot:
             return
 
         slog.info(f"   [Telegram] Received: {user_text[:80]}")
+        await self._mirror("user", user_text)   # live console mirror (source='telegram')
 
         # Telegram's "typing" indicator expires after ~5s; refresh it while a long
         # DELIBERATE run is in flight so the phone doesn't look dead (Brief 36 D-21).
@@ -219,12 +230,13 @@ class TelegramBot:
         try:
             # Route through the full orchestrator pipeline — identical to web UI.
             # submit_user_event returns the final answer string directly.
-            final_answer = await self._orchestrator.submit_user_event(text=user_text)
+            final_answer = await self._orchestrator.submit_user_event(text=user_text, channel="telegram")
 
             if not final_answer or not final_answer.strip():
                 final_answer = "..."
 
             typing_task.cancel()
+            await self._mirror("clara", final_answer)   # live console mirror (source='telegram')
 
             # MarkdownV2 first; on a parse failure fall back to PLAIN text so a valid
             # answer is never lost to a formatting error (Brief 36 D-22).

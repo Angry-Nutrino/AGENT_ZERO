@@ -142,6 +142,7 @@ class Orchestrator:
         self, text: str, image_data=None, file_data=None,
         on_step_update=None, on_interpreted=None,
         message_id: str = None, memory_mode: str = "full", return_trace: bool = False,
+        channel: str = "interface",
     ) -> str:
         """
         Entry point for the WebSocket handler. Creates a response future,
@@ -168,6 +169,7 @@ class Orchestrator:
                 "response_future": future,
                 "memory_mode": memory_mode,
                 "return_trace": return_trace,
+                "channel": channel,   # Brief 43.3 — source tag for the persistent console (interface/telegram/voice/harness)
             },
             priority=1.0,
             source="user",
@@ -307,6 +309,7 @@ class Orchestrator:
         future = payload.get("response_future")
         memory_mode = payload.get("memory_mode", "full")
         return_trace = payload.get("return_trace", False)
+        channel = payload.get("channel", "interface")
 
         # Add task with only serializable context (image_data/file_data are base64 str — safe)
         task = self._task_graph.add_task(
@@ -316,7 +319,7 @@ class Orchestrator:
             dependencies=[],
             context={"text": text, "image_data": image_data, "file_data": file_data,
                      "message_id": message_id, "memory_mode": memory_mode,
-                     "return_trace": return_trace},
+                     "return_trace": return_trace, "channel": channel},
             origin="user",
         )
 

@@ -129,6 +129,44 @@ NATIVE_TOOL_SCHEMAS = [
             "required": ["keyword"]
         }
     },
+    {
+        "name": "whatsapp_missed",
+        "_server": "native",
+        "description": (
+            "Report WhatsApp messages that were HELD and NOT shown — the ones Alkama missed because "
+            "the sender was not a priority contact (spam, unknown senders). Use for 'what did I miss "
+            "on WhatsApp', 'any whatsapp messages today', 'who messaged me on whatsapp'. Priority "
+            "senders (Shobha) go straight to the chat and are NOT here. Not for sending anything."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Optional filter by sender name or text"},
+                "limit": {"type": "integer", "description": "Max messages to return (default 20)"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "episodic_search",
+        "_server": "native",
+        "description": (
+            "Search Alkama's CONVERSATION history (the episodic log) for past interactions "
+            "and return the most relevant ones WITH their timestamps. Use ONLY for explicit "
+            "temporal-locator questions about past talks — 'WHEN did I mention X', 'have I "
+            "EVER said X', 'the FIRST time I brought up X', 'search my memory for X'. NOT for "
+            "casual recall already answered by injected memory context, and NOT for documents "
+            "or architecture (that is consult_archive) or app/activity history (ambient_recall)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search the conversation history for"},
+                "k": {"type": "integer", "description": "How many results to return (default 5, max 10)"}
+            },
+            "required": ["query"]
+        }
+    },
 ]
 
 

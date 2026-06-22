@@ -231,6 +231,7 @@ from .tools import analyze_image_grok
 NATIVE_TOOLS = frozenset({
     "web_search", "python_repl", "date_time", "vision_tool",
     "consult_archive", "query_task_status", "tool_search", "ambient_recall",
+    "episodic_search", "whatsapp_missed",
 })
 
 
@@ -355,6 +356,14 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
                 _ar, args.get("window", "24"), args.get("query", ""), args.get("date", "")
             )
 
+        elif tool_name == "episodic_search":
+            from .tools import episodic_search as _es
+            return await asyncio.to_thread(_es, args.get("query", ""), args.get("k", 5))
+
+        elif tool_name == "whatsapp_missed":
+            from .tools import whatsapp_missed as _wm
+            return await asyncio.to_thread(_wm, args.get("query", ""), args.get("limit", 20))
+
         elif tool_name == "tool_search":
             # tool_search in FAST is an edge case — route to DELIBERATE
             return "Error: tool_search requires DELIBERATE mode. Escalating."
@@ -455,6 +464,16 @@ async def execute_deliberate(
             w, q, dt = _extract_param(query, "window", "query", "date")
             # flat non-JSON string = treat as the window/date ("2h", "June 11") or keyword
             return await asyncio.to_thread(_ar, w or "24", q or "", dt or "")
+
+        elif tool_name == "episodic_search":
+            from .tools import episodic_search as _es
+            (q,) = _extract_param(query, "query")
+            return await asyncio.to_thread(_es, q or query, 5)
+
+        elif tool_name == "whatsapp_missed":
+            from .tools import whatsapp_missed as _wm
+            (q,) = _extract_param(query, "query")
+            return await asyncio.to_thread(_wm, q or "", 20)
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:

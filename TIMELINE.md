@@ -1,5 +1,525 @@
 # CLARA Project Timeline
 
+## 2026-06-21
+
+[UPDATE] The Drill — 06-21 morning: clean **17/0/5** (effective 22/22), verifier 30/30. SAME anchor set as
+06-20m (climb-batch had been deferred), so this is the 3rd consecutive clean morning — anchors held (Q06 "all
+28" drift-proof; Q16 decimal-fix held; Q17 defer correct). Analysis written into the report.
+
+[UPDATE] MORNING PROMOTION (overdue climb-batch, done 2026-06-21) — 10 climb-due questions (pass_streak ≥ 3,
+non-baseline, non-knowledge, verifiable) promoted ONE rung each, same capability area, every oracle
+source-validated (all 8 key_facts climbs fire PASS on a correct stub; the 2 live-truth oracles confirmed by
+pattern resolution; engine self-test 30/30):
+- Q4 → append_recent_exchange caps (10 / user[:600] / clara[:900]) [crud.py conversation-hold, L4]
+- Q5 → log_system_episode zero-vector torch.zeros(384) + [AUTONOMOUS] filtered-from-retrieval [agent.py, L4]
+- Q6 → enumeration pattern rotated asyncio.to_thread → asyncio.create_task (search_set, drift-proof) [L3]
+- Q7 → TERMINAL_STATES {completed,invalidated} + why 'failed' isn't terminal (failed→active) [task_graph, L5]
+- Q8 → _run_fast numeric-fidelity guard (python_repl → raw on number-loss) [agent.py guardrail, L5]
+- Q9 → absence string rotated socket.socket → pickle.loads (grep-confirmed absent) [Rule-19, L5]
+- Q11 → PriorityQueue tuple (1.0-priority, counter, event) + counter = insertion-order tie-break [L5]
+- Q12 → _run_worker finally: resource_ledger.release_task + _task_resources.pop [orchestrator, L5]
+- Q14 → janitor age policy (uploads >1d, terminal rows 7d, keep 3 backups) [background_tasks, L5]
+- Q20 → MCP handshake (protocolVersion 2024-11-05 + notifications/initialized) [mcp_client, L4]
+HELD: baselines Q2/Q3/Q13 (fixed regression anchors), knowledge Q1/Q10/Q15 (rotate by cadence, UNVERIFIABLE),
+file-op Q18/Q19; datetime Q21/Q22 held pending a v_datetime R2 extension; Q16/Q17 at streak 2 (climb next).
+Each climbed question reset to pass_streak 0 / last_result pending; JSON metadata bumped to 2026-06-21.
+
+[BLOCKER] EVENING harness could not be run — HuggingFace model cache ACL denies non-interactive access.
+Attempting the missed evening session, every backend launch failed to boot with a repeating
+`PermissionError at C:\Users\alkam\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM-L6-v2\refs`
+(MiniLM never loads → /soul never comes up). Confirmed from my tool context: `.cache` is reachable but
+`.cache\huggingface` and below are "Access is denied" to Test-Path, ls, AND icacls (can't even read/modify the
+ACL — not the owner in this context). The model files are intact — it's a permission state, not corruption.
+Two compounding factors observed: (1) at 08:37 the `-StartWhenAvailable` auto-catch-up evening cron fired the
+missed run AT THE SAME TIME as my manual launch → two harnesses/backends collided on the cache; (2) the
+underlying ACL denies any NON-interactive token (scheduled-task + tool), so the nightly crons themselves are at
+risk until the ACL is reset. Only Alkama's interactive session retains access. FIX (needs his session, possibly
+elevated): `icacls "C:\Users\alkam\.cache\huggingface" /reset /T /C` (restore inherited perms), then a backend
+boots normally and crons/harness work again. Cleaned up all stuck processes; port 8001 free. Morning drill is
+unaffected/done; evening analysis + the cross-session promotion are pending the cache fix.
+
+[UPDATE] Cache-blocker RESOLUTION + EVENING drill: Alkama ran `icacls /reset` and rebooted — that restored
+access for his INTERACTIVE session + the scheduled-task (cron) token, but NOT my sandboxed tool context
+(reset + reboot both failed for me; I'm whoami=alkam yet still denied — a sandbox/token quirk past plain ACLs).
+So the daily CRONS are healthy again; only MY manual backend-boots stay blocked. Alkama ran the evening harness
+himself; I analyzed the report (reading needs no cache). Result: clean **18/0/4** (effective 22/22), verifier
+30/30, same anchors as 06-18e holding (Q11 os.replace 2/9, Q19 Lock 6/6, Q17 line 1823, Q01 ambient recall
+named 06-20's brave/claude/code — live A0 confirmation). Analysis written into the report.
+
+[UPDATE] EVENING PROMOTION (overdue since 06-09 — ~2-week backlog cleared) — 13 climb-due questions promoted
+one rung each, same area, EVERY oracle validated by a pre-write guard (aborts on brittleness; it caught
+os.system NOT being absent — tasks.db binary — and I swapped to os.fork): Q1 ambient deepened (top-2+hours);
+Q2 voice kokoro-CUDA-bug fix; Q3 vision model+503-retry-count; Q4 _atomic_search poll→COMPLETED; Q6
+get_archive_context 0.35 threshold; Q7 rest of TOOL_ARG_DEFAULTS (5000/8000/rewrite); Q9 absence rotated
+subprocess.Popen→os.fork; Q11 search_set rotated os.replace→asyncio.gather; Q12 _save_memory atomic
+(mkstemp→fsync→os.replace); Q13 two Glint-hallucination forms (bare/inline); Q16 _number_read_file_lines guard;
+Q19 search_set rotated threading.Lock→os.makedirs; Q20 new synthesis pair (interpreter non-reasoning=correct /
+consolidation-blocks=wrong). HELD: baselines Q10/Q14/Q18, knowledge Q5/Q8/Q15, datetime Q21/Q22, Q17 (just
+climbed). JSON rotated 06-09→06-21. With the morning's 10, BOTH banks are now caught up on the difficulty
+ladder (23 climbs total this session, all oracle-validated).
+
+## 2026-06-20
+
+[FIX] Backend held the mic open 24/7 (incl. during the text-only harness) — Alkama noticed the "mic in use"
+indicator. Root cause: VoiceCoordinator.load() unconditionally opened a persistent `sd.InputStream` at startup,
+and every backend start (harness included) loads voice. That stream's ONLY consumer was the F4/WebSocket
+push-to-talk — which was REMOVED when the interface voice mode was dropped (the F10 hotkey records its own mic
+on-press via transcribe_file; TTS uses the output stream). So the mic was being held open for a consumer that
+no longer exists (`start_recording`/`voice_start`/`voice_stop` confirmed to have zero callers). The earlier
+"mic isolation" only covered the F10 path, not this leftover backend stream. FIX: the persistent mic is now
+OPT-IN — opened only if `VOICE_MIC=1` (default OFF); otherwise `_in_stream=None` (unload() already guards None).
+TTS + F10 hotkey + transcribe_file all unaffected (none use the live input stream). Needs a backend restart;
+after it, an idle/harness backend no longer holds the microphone.
+
+[UPDATE] The Drill — 06-20 morning: clean **17/0/5** (effective 22/22). Two production validations of
+yesterday's fixes: Q16 (decimal key_facts) now PASSES — the exact answer the decimal-split bug false-failed on
+06-19m (verifier self-test 30/30); Q06 live-truth verifier absorbed the 24→28 asyncio.to_thread drift (this
+session's new code), grep-confirmed 28/5, where a frozen oracle would have false-failed. Q17 returned the
+code's exact defer-reason ("will retry next tick") vs yesterday's under-credited paraphrase. Minor: Q16 leaned
+on self-knowledge + line-imprecision (said 120, actual 140) but graded facts correct. Rotation: passes
+recorded; climb-batch deferred to a focused pass. Analysis written into the report.
+
+[FEATURE] A2 foundation — `ambient.compute_baseline()` (the 'normal' model AmbientGate.novelty consumes).
+A0 baseline confirmed MATURE: 10 continuous days (2026-06-11..06-20), 845 active_window samples, no gap days
+— clears the brief's '~a week' bar. compute_baseline() derives `process_hour_freq` ("proc|hour" -> share of
+that hour's observations) in the exact shape novelty() wants, + meta (days/samples/top_apps/mature flag). Pure
+read of ambient.json, zero side effects. Validated live: steam.exe@3am -> novelty 1.0 (unseen = unusual),
+familiar app@familiar hour -> low; profile = brave(433)/code(140)/claude(60)/explorer(50)/chatgpt(44).
+TUNING NOTE for the A2 wiring: novelty is share-of-hour, so a secondary-but-normal app (code@6am ~0.8 when
+brave dominates that hour) scores HIGH novelty — partly absorbed by the actionability multiplier (default 0.3
+-> score 0.24 < 0.45 = HOLD), but worth revisiting (seen-vs-dominant) before A2 goes live. REMAINING for full
+A2: the observation->gate->budget->surface loop + timing_ctx (don't interrupt during work/PTT) + a surface
+channel + DORMANT-by-default env flag (like the WhatsApp poller). Now unblocked — the data is ready.
+
+[FEATURE] whatsapp_missed native tool + held-archive hardening (closing the gaps from the WhatsApp redesign).
+- `whatsapp_missed(query, limit)` (tools.py) — answers "what did I miss on WhatsApp / any whatsapp today / who
+  messaged me". Reads the quiet held archive via `read_whatsapp_held()`, groups by sender, lists with
+  timestamps; optional sender/text filter. HELD-ONLY by design (priority senders like Shobha are surfaced into
+  the chat, so they were never "missed"). Wired: registry schema (native), tool_executor FAST+DELIBERATE +
+  NATIVE_TOOLS, interpreter routing rule + arg schema. Functional-tested (empty / grouped / filtered / cleanup).
+  Note: I had described "reviewable on demand" earlier but the tool didn't exist yet — this closes that gap.
+- [FIX] held-archive LEAK (a real bug found while hardening, in my own day-old code): `load_recent()` — which
+  feeds /history → the chat — globbed EVERY `*.jsonl` in conversations/, INCLUDING `whatsapp_held.jsonl`. Held
+  records (schema {ts,sender,text}, no source/role) passed the filter and would render as Alkama's own plain
+  bubbles on every reload — silently defeating the entire "held = not in chat" design. Fixed: load_recent now
+  excludes `_HELD_FILE`. Locked with a self-test assertion ("held leaked into chat feed!").
+- [FIX] held-archive UNBOUNDED GROWTH: the watcher runs 24/7 and catches spam, so the single
+  `whatsapp_held.jsonl` would grow forever (the B-20 bloat class this codebase bounds everywhere — ambient ring
+  2000, recent_exchanges 10, …). `record_whatsapp_held` now caps to the most recent `_HELD_CAP=500` (append,
+  then trim-to-tail past the cap). Self-test covers the cap + most-recent-tail correctness.
+conversations.py self-test extended (held write/read + cap + chat-feed isolation) — all green.
+
+## 2026-06-19
+
+[FIX] WhatsApp clutter + wrong-side rendering (Alkama caught it live, the day the watcher went live). Two
+faults, both mine: (1) my 16:11 boot-test smoke-test POSTed synthetic messages ("[Shobha] hey are you free",
+"[Random Person] URGENT claim your prize") to /whatsapp_incoming to verify routing — they persisted into the
+real conversation display store and looked like phantom messages (NOT in Clara's memory — memory.json 0 hits;
+purged from conversations/2026-06-19.jsonl). (2) I'd over-implemented "held" as a LIVE broadcast into the
+console, so real incoming spam (Luxury Souq Rolex promos the live watcher caught) cluttered the chat — AND
+rendered on ALKAMA's side (Layout.jsx sent anything-not-Clara to the right), so third-party messages looked
+like his own. FIXES, faithful to his standing rule ("only Shobha breaks through; everyone else held"):
+- Backend poller (api.py): SURFACE (Shobha) → chat feed + whatsapp_alert + Telegram, tagged source='whatsapp'.
+  HOLD (everyone else, incl. spam) → `record_whatsapp_held()` to a SEPARATE quiet archive
+  (conversations/whatsapp_held.jsonl), NOT the chat feed, NOT broadcast. Reviewable on demand via
+  `read_whatsapp_held()` ('what did I miss on WhatsApp?').
+- Frontend (Layout.jsx): new `isIncoming = source==='whatsapp'` third category — renders LEFT, distinct amber
+  bubble with a "Incoming · WhatsApp" header, never Alkama's right-side bubble. whatsapp_alert handler emits the
+  same source so live + /history reload match.
+- conversations.py: `record_whatsapp_held` / `read_whatsapp_held` (separate held archive); self-test green.
+Compile + conversations self-test + frontend build all pass. Needs a backend restart to take effect.
+
+[FIX] Missing-analysis PATTERN (Alkama caught it) + verifier decimal false-FAIL — found while clearing the
+06-18e/06-19m drill backlog.
+- THE PATTERN: drill analyses were recorded in chat + TIMELINE + the question JSONs but NEVER written back into
+  the report file's `## Claude's Analysis` section, so SEVEN recent reports (06-15e..06-19m) silently kept the
+  "*Pending*" placeholder — the durable, openable record was blank even when the analysis happened. Reports are
+  what you actually open to track things down later, so this was a real tracking hole. FIX: (a) new
+  `tests/report_analysis_status.py` — greps every report's analysis section, lists ANALYZED / PENDING / NO-SECTION,
+  exits non-zero on any gap (cron/hook-gateable); (b) CLAUDE.md drill protocol gained a MANDATORY step 7 —
+  "write the analysis INTO the report file; the drill is not complete until it's there; verify with the checker."
+- VERIFIER BUG (Brief-42 regression, found via 06-19m Q16): the hedge-guard's `_SENT_SPLIT = r"[.!?\n]+"` split
+  on EVERY '.', shredding decimals ("5.0" → "5"+"0") so any decimal-valued key_fact could never be matched and
+  ALWAYS false-FAILed. Blast radius: every decimal fact in the bank (5.0, 3.5, 0.85, 0.75…), silently since
+  06-14. FIX: `_SENT_SPLIT` now skips a digit-flanked period (`r"[!?\n]+|(?<!\d)\.|\.(?!\d)"`) + a regression
+  fixture ("key_facts decimal value -> PASS") — verifier self-test 29 → **30/30**.
+
+[UPDATE] The Drill — 06-19 morning (analyzed late, with the backlog): scorecard 15/2/5 → CORRECTED **17/0/5**,
+zero real answer failures. BOTH FAILs were verifier-side: Q16 the decimal false-FAIL above (Clara answered
+"5.0 seconds" + `_last_file_change` with exact line cites — 100% correct; now fixed), Q17 decision "defer"
+correct + reason a valid paraphrase of "retry next tick" ("future tick") that the key_facts+llm judge
+under-credited (minor "non-critical" embellishment noted). No rotation (no real failure to hold; substantive
+action was the verifier fix). Full per-question breakdown written into the report's Claude's Analysis section.
+
+[UPDATE] The Drill — 06-18 evening (BACKFILL — never analyzed at the time): clean run, scorecard **18/0/4**,
+the 4 UNVERIFIABLE judge out correct too → effective 22/22, zero verifier false-FAILs. Spot-checked the two
+historically-risky items: Q11 os.replace = 2 real calls of 9 (grep-confirmed: ambient.py:89, crud.py:92), Q17
+verbatim `_reformatted` quote = agent.py:1823 (verified). No retro-rotation (1-day-stale clean run; the bank
+has since climbed). Recorded in the report.
+
+[FEATURE] episodic_search native tool (Brief 47) — semantic recall over the FULL conversation history,
+WITH timestamps. Closes a real retrieval gap Alkama spotted: get_smart_context injects only top-2 semantic
+hits + last-3 recency, so (a) older interactions are unreachable, and (b) the two-part temporal follow-up
+breaks — "have I said X?" matches on content → "yes", but the bare follow-up "when?" embeds to nothing near
+the original episode, so the timestamp is lost. The tool reaches the whole user-facing episodic_log, cosine-
+ranks via the existing episodic_embeddings (+ keyword fallback if they ever drift out of alignment), and
+returns top-k as "[timestamp] (relevance) summary" so the FIRST answer already carries the date. Scoped
+NARROWLY in the interpreter (temporal-locator / exhaustive recall — "when did I (first) mention X", "have I
+ever", "search my memory for X") so it never cannibalizes the tool=null fast path for casual "do you remember"
+that injected context already answers. Wired: tools.py (set_agent_ref + episodic_search), tool_registry
+schema (native tools 7→8), tool_executor dispatch (FAST+DELIBERATE) + NATIVE_TOOLS, interpreter routing rule
++ arg schema, api.py set_agent_ref(clara) at startup. PROVEN LIVE: "when did I ask if everything is fine /
+system stable" → routed FAST → episodic_search → "Most relevant [2026-06-19 12:33] … next closest
+[2026-06-01 15:36], different day" (timestamps inline, recent vs first distinguished). Boot-test caught a
+real attribute bug compile-check couldn't: memory lives on clara.db.memory, not clara.memory — FAST errored
+and (impressively) fell back to filesystem search; fixed to read _agent_ref.db.memory, re-proven clean.
+
+[UPDATE] Interface voice mode removed (Alkama: "hotkey works, drop the baggage"). Stripped the in-browser F4
+push-to-talk (voice_start/stop/interrupt sends, voiceActive state/ref, the "● Recording…" indicator) from
+useClara.js + Layout.jsx. The F10 standalone hotkey (own-mic-on-press → /voice_query) is the voice path now.
+KEPT the "Clara is speaking" waveform — it is driven by TTS speaking_start/stop, which the hotkey replies
+still fire, so it is the one useful live voice cue, not baggage. Backend WS voice_* handlers left dormant
+(harmless, never invoked). Frontend builds clean; no dangling refs.
+
+[FEATURE] Live cross-channel console (Alkama: "voice/telegram/whatsapp must be LIVE, not the refresh thing").
+The master console now updates over the WebSocket the instant a non-interface exchange happens, instead of
+only on the /history seed at mount. Backend: _broadcast_console(role, text, source) helper; /voice_query now
+broadcasts user_transcript + final_answer (source='voice', reuses existing handlers → User bubble + query
+card + reply, live); TelegramBot got an injectable on_console mirror (wired in api.py, fires on each inbound
+msg + reply); the WhatsApp poller broadcasts live for BOTH paths — SURFACE → whatsapp_alert (emphasized),
+HOLD → console_message (archived live, no interrupt). Frontend: new console_message (generic source-badged
+append) + whatsapp_alert (⚡ emphasized) handlers; /history stays as the initial seed only. PROVEN LIVE:
+WhatsApp end-to-end through the running backend — Shobha → SURFACE, stranger → HOLD. Voice/telegram wiring is
+additive + compile/boot-clean (full visual confirm needs the browser; telegram still down till ~06-22).
+
+[FEATURE] Wave 2 + Wave 3 foundations — salience engine, F10 hotkey, read-only WhatsApp (built autonomously
+while Alkama was out; boot-validated; cron protected)
+Decided params (Alkama): ambient budget 4/day (not the brief's 2); WhatsApp — ONLY Shobha breaks through
+(drop-everything), everyone else HELD; 15s per-sender batch debounce (reset on each new msg); F10 hotkey
+(no Fn), mic ONLY on press.
+- SHARED SALIENCE ENGINE (core_logic/salience.py, NEW, self-tested): the one "right to interrupt" brain for
+  BOTH A2 (Brief 40) and WhatsApp (Brief 45). Budget (daily token bucket + per-class cooldown), timing gate
+  (hard NOs), AmbientGate (salience = novelty × relevance × actionability; relevance is a SUPPRESSOR not an
+  amplifier — neutral 1.0 when there's no discourse, so it never penalizes absence of context — a real
+  design fix caught by the self-test), MessageGate (person-map; Shobha=1.0 surfaces, others held; urgency
+  noted not actioned — conservative testing-phase policy), Batcher (15s per-sender debounce, reset-on-new,
+  per-sender window override). No LLM ever decides WHETHER to surface — code does; the LLM only composes /
+  breaks ties on the ambiguous slice. ~all branches self-tested.
+- WHATSAPP READ-ONLY (Brief 45 P1): core_logic/whatsapp_gate.py (NEW, self-tested — Shobha's 3 rapid-fire
+  msgs compile to one SURFACE; strangers incl. an 'urgent' one HOLD). Backend: /whatsapp_incoming endpoint
+  (Node pushes here) + a DORMANT poller (guarded by WHATSAPP_ENABLED — off until he stands up the service,
+  so zero startup risk now) that compiles batches → surface(Shobha: broadcast+notifier+log) / hold(archive
+  to console as source='whatsapp', no interrupt). whatsapp_service/ (NEW): whatsapp-web.js Node watcher
+  (event-driven on('message') push, READ-ONLY, never sends) + package.json + README. LIVE needs his
+  npm install + QR scan.
+- F10 HOTKEY (Brief 44.1): hotkey_listener.py (NEW, standalone) — global F10, opens its OWN mic ONLY while
+  held, closes on release (mic OFF during Clara's reply → no play/record distortion), POSTs the WAV to the
+  backend. Backend: voice.transcribe_file() (reuse the loaded Whisper on an arbitrary WAV) + /voice_query
+  (transcribe → cancel-filter → pipeline channel='voice' → speak). LIVE needs `pip install keyboard` + his
+  physical F10/mic test. OPEN: the backend's persistent mic vs the listener's on-demand mic — flagged for
+  his test, not blind-changed (won't risk the working F4 path).
+- BOOT-TEST (the cron-safety gate): started the backend with all edits → clean boot in 30s, /soul 200,
+  /whatsapp_incoming {ok:true}, poller dormant. CAUGHT a real bug compile-check couldn't: /voice_query used
+  get_voice() but api.py imports only set_voice -> NameError on EVERY call (the hotkey would never have
+  worked). Fixed (use the module-global `voice`), re-booted, /voice_query now graceful 200. Backend stopped,
+  port 8001 free for tonight's 20:00 cron. All edits additive; standalone modules carry zero startup risk.
+NEEDS ALKAMA (can't be done from the agent): (1) `pip install keyboard` + run hotkey_listener.py, hold F10,
+test voice in/out + the mic-distortion question; (2) `cd whatsapp_service && npm install`, `node
+whatsapp_clara.js`, scan QR, then WHATSAPP_ENABLED=1 + restart backend. Everything code-complete + the
+Python brain fully self-tested.
+
+## 2026-06-18
+
+[UPDATE] The Drill — 06-18 morning: scorecard 15/1/6 → CORRECTED 17/0/5 (both anomalies were ORACLE bugs, not Clara)
+Gold-seed back to ✅ MATCH (real/partial_answer vs gold real/hallucination) — validates yesterday's markdown-
+strip fix; the L2 guardrail parses bold tags correctly now. Two real findings, both harness/oracle (D7), both
+with Clara's answer actually CORRECT:
+- Q06 STALE FROZEN-COUNT (my own authoring error): on 06-16 I climbed Q06 to a key_facts oracle with a hardcoded
+  count ('22'+'15') — the brittle frozen-number pattern we de-brittled everywhere else. My OWN Wave-1 edits
+  (agent.py write-through asyncio.to_thread + new intent_filters.py) drifted the true count 22->24; Clara
+  answered 24/tool_executor=15 (CORRECT) and the frozen '22' false-flagged her UNVERIFIABLE. FIX: converted Q06
+  to search_set (live-truth line-coverage + the count-check sub-verifier) — drift-proof, count-claim probe
+  survives. Lesson: NEVER encode a count as a frozen key_facts literal; use the live-truth verifier.
+- Q08 TOO-LITERAL ORACLE + Tier-2 judge missed it: PROCESS_FAIL/NEGATIVE_OK are the real var names (agent.py:174,
+  179); Clara answered with surgical precision USING them ('a PROCESS_FAIL phrase present, no NEGATIVE_OK'), but
+  group-1 tokens were human-phrases only ('process failure'/'failure language') — no match for the code
+  identifier. The Brief-42 Tier-2 LLM judge ALSO returned None this run (method tag key_facts+hedge, not +llm —
+  a transient DeepSeek blip during grading), so the semantic net that should've rescued the paraphrase didn't
+  fire -> false-FAIL. Her L2 correctly called it verifier_artifact. FIX: added 'process_fail' to group 1 (passes
+  deterministically regardless of the judge). WATCH: Tier-2 judge returning None on a transient — if systematic,
+  the judge gating needs a retry/fallback look.
+CLIMB BATCH — 9 anchors at streak 3, one rung each (same area, oracle-validated): Q07 VALID_TRANSITIONS ->
+_crash_recovery (running/active -> pending); Q09 absence pickle.load -> socket.socket (grep-confirmed absent);
+Q11 wait_for/TimeoutError -> the get_nowait/QueueEmpty drain half; Q14 prune_terminal/backups -> the sweep
+throttle (5-min trigger, 6h max sweep); Q16 RAG_SOURCES tuple -> the 5.0s _last_file_change debounce; Q17
+user-task DISPATCH -> the system-task DEFER branch; Q20 notification-vs-request -> the id_counter request/response
+matching; Q21/Q22 temporal phrasing rotated (R1 kept; R2 relative-date/delta arithmetic held pending a v_datetime
+extension). All key_facts terms grep-confirmed in source; self-test still 29/29. NOTE: ~9 climbs in one run is a
+big step-up — expect a transient pass-rate dip next run = the climb landing, not regression.
+
+## 2026-06-17
+
+[UPDATE] The Drill — 06-17 evening: 18 PASS / 0 FAIL / 4 UNVERIFIABLE — FIRST scheduled run on the fixed cron
+The 20:00 cron fired on schedule at 20:09 at the underscore path (validates setup_schedule.ps1 fix) and the
+backend started clean with ALL of today's Wave-1 + verifier changes loaded (self-test 29/29) — the live proof
+the hot-path edits didn't break startup. Answer quality genuinely clean; every climbed anchor held; Q22's
+"8:08:23 PM" (with seconds) graded +0 min (the v_datetime seconds-fix working in production); Q19 now reads 6
+threading.Lock() across 5 files (my new conversations.py:24 lock is the 6th) — BOTH the live-truth verifier
+and Clara absorbed the 5->6 change automatically and the count-check held (stated 6 = truth 6).
+THE ONE REAL PROBLEM — gold-seed L2 "❌ MISMATCH" was a FALSE ALARM (a parser bug, not a calibration regression):
+- WHAT: the L2 pipeline self-test reported Clara classified the gold seed `undetermined` vs gold `real` ->
+  MISMATCH, which LOOKS like her self-diagnosis classifier regressed.
+- GROUND TRUTH (session log 20:08, line 4849): she actually emitted `**FAULT_CLASS:** real` /
+  `**MECHANISM:** memory_confabulation` — an EXACT match to the gold (is_real_failure=True,
+  mechanism=memory_confabulation). Her calibration was perfect.
+- WHY: she wrote the tags in MARKDOWN BOLD (the DELIBERATE path formatted them), and the extractor regex
+  `FAULT_CLASS:\s*(real|verifier_artifact|infra)` only tolerates whitespace between label and value — the
+  '**' broke it -> fc=None -> defaulted to "undetermined".
+- ROOT CAUSE: parser brittleness to markdown emphasis — the SAME class as the 2026-06-05 key_facts '**1**'
+  bug (fixed there by stripping '*'); the L2 tag extractor never got that strip.
+- BLAST RADIUS: the L2 GUARDRAIL itself. A false MISMATCH masquerades as a calibration regression (false-self-
+  blame signal we must not trust blindly); worse, the SAME parse miss on a LIVE real failure would yield
+  fault_class="undetermined", which fails fix_proposals.qualifies() (needs =="real") -> Brief-38 L3 would
+  SILENTLY NOT ENGAGE on a genuine persistent real failure. Latent functional risk, not cosmetic.
+- DISPOSITION: FIXED (test_harness.py diagnose_failure) — strip '*'/'`' before the FAULT_CLASS/MECHANISM
+  regexes. Validated: the exact bold form now parses to (real, memory_confabulation); plain/backtick forms
+  unaffected; genuine-absent still "undetermined". This is a harness/oracle fix (D7), NOT a Clara change.
+- CALIBRATION VERDICT: NOT a regression — she was a perfect MATCH; the guardrail's parser failed, not her.
+CLIMBS (3 due, one rung each, oracle-validated): Q09 absence os.system -> subprocess.Popen (grep-confirmed
+absent); Q13 pre_glint-split line -> the bare-Glint CORRECTIVE string ('Glints can ONLY come from actual tool
+execution.', agent.py:1664); Q16 numbered-join line -> the reassembly/return line (tool_executor.py:306).
+Self-test still 29/29; both question files parse.
+
+[FEATURE] Wave 1 (Brief 43) — Daily Integration: started. Briefs 43-46 written for the full usability
+roadmap (Daily Integration / Hands-Free Reach / Proactive WhatsApp / WakeWord+App), with Alkama's calls
+baked in: auto-reply is notify-AFTER not approve-before (safety = test rigor, not prompts); WhatsApp
+read-layers are low-risk, only SEND carries ban-exposure; latency reduction deferred (interpreter local
+routing already tried + rejected). Wave-1 pieces landed THIS pass (offline-validated, no hot-path risk
+before tonight's 20:00 cron):
+- 43.4a COUNT-CHECK verifier (verification.py `_stated_total_conflict` in v_search_set): closes the OTHER
+  half of the silent false-PASS gap (06-15e Q19 — enumerated 5 threading.Lock() correctly but STATED "4";
+  search_set graded line-coverage 5/5 and was blind to the wrong total). Conservative: fires only on a
+  clearly-stated total (number adjacent to the searched token / a count-noun / "total:") that conflicts
+  with truth AND truth isn't among the claims — never on per-file sub-counts or line numbers. Self-test
+  26->29 (correct-total PASS / wrong-total-despite-full-coverage FAIL / no-total coverage-decides). Both
+  halves of the false-PASS gap (key_facts hedge + count) are now closed.
+- 43.2 REPORT-BOT split (test_harness.py): drill/report status sends to REPORT_BOT_TOKEN, graceful fallback
+  to the main bot if unset. User action: create the 2nd bot via BotFather, set REPORT_BOT_TOKEN in .env.
+- 43.4b CANCEL-FILTER (core_logic/intent_filters.py, NEW): deterministic "leave it/never mind" reject before
+  process_request — whole-utterance or trailing-after-a-boundary, conservative so "don't leave it open" is
+  NOT cancelled. 15-case self-test green. LOGIC done; wiring into the voice path is in the validatable pass.
+- 43.3 PERSISTENCE STORE (core_logic/conversations.py, NEW): per-day JSONL cross-channel message archive
+  (source-tagged: interface/telegram/voice/harness), the feed for the future unified master console (one
+  thread + source badges, Alkama's choice). Outside logs/ so the janitor never prunes history. Self-test
+  green. STORAGE done; write-through + /history endpoint + React console are the validatable pass.
+DEFERRED to a backend-up validatable pass (deliberately NOT blind-edited before the 20:00 cron, to avoid
+re-breaking startup): 43.1 origin-tag threading + separate harness log (touches process_request hot path +
+the harness's own digest-grep), and the 43.3 wiring/console/endpoint. Decision: rock-solid over fast —
+hot-path edits get validated with a live backend, not gambled on the cron.
+
+[UPDATE] Wave 1 — validatable pass DONE (backend started, validated end-to-end, stopped before the 20:00 cron)
+Threaded a `channel` tag (interface/telegram/voice/harness) through submit_user_event -> payload -> task
+context -> process_request, mirroring the proven memory_mode chain. process_request now write-throughs every
+real user turn to the conversations store via record_exchange (background to_thread, co-located with
+append_recent_exchange) — gated `channel != "harness"` so drill traffic NEVER enters the console. Entry
+points set channel: WS handle_message -> "voice" if via_voice else "interface"; /query -> "harness";
+telegram_bot -> "telegram". New GET /history endpoint serves conversations.load_recent (harness excluded by
+default). Cancel-filter wired into handle_message: a via_voice transcript that is_false_request() -> "Got it."
+ack, NO process_request, no LLM. Frontend (useClara.js + Layout.jsx): master console seeds from /history on
+mount (one cross-channel thread, SAFE — only replaces when the server has data, never wipes localStorage to
+empty) + a source badge on non-interface messages.
+VALIDATED LIVE: backend started clean in 72s with ALL edits (api/orchestrator/agent/telegram_bot) — the
+critical cron-safety check; /soul 200; /history 200 -> {messages:[]}; /query (harness) -> "4." and created NO
+conversations entry (channel=harness correctly excluded, proving the tag threads end-to-end); direct
+record_exchange -> /history reflected it source-badged, oldest-first; CORS ["*"] + the existing /soul fetch
+confirm the frontend /history fetch works cross-origin. NO memory pollution (only memory_mode=none /query +
+a cleaned direct store write; no full-mode WS message sent). Backend stopped, port 8001 free for the cron.
+STILL DEFERRED (low-risk, not blocking): the raw session_*.log file-split for harness (the harness's
+digest-grep depends on the session log; the console-level separation — the user-visible "don't pollute"
+concern — is already handled by channel=harness exclusion). Frontend is code-complete + CORS-confirmed but
+needs Alkama's VISUAL check via `npm run dev` (can't run a browser from the agent). LIVE cross-channel push
+(telegram appearing in the interface in real time) is a follow-up — today telegram shows in the console on
+reload via /history.
+
+[FIX] Wave 1 follow-up — LIVE source badges (the WS stream now carries `source`)
+Field-validated from disk that the write-through works (conversations/2026-06-18.jsonl — Alkama's morning F4
+voice session, all correctly tagged source="voice"). But badges only showed on RELOAD: the live WS payloads
+(final_answer / user_transcript) didn't carry `source`, so the frontend defaulted live messages to "interface"
+(no badge). Fixed: api.py now puts `source` ("voice"/"interface") on the main final_answer, the cancel-filter
+ack, and the user_transcript; useClara.js addMessage passes `data.source` through (undefined -> "interface"
+default). So voice messages now badge LIVE as spoken, not just on reload. api.py compiles (cron-safe);
+useClara.js passes node --check. Takes effect on backend restart + frontend reload.
+
+[FEATURE] Brief 42 — assertion-aware key_facts (hedge-guard + gated LLM judge) IMPLEMENTED
+key_facts checked token PRESENCE, not ASSERTION — false-PASSing a hedged guess that contains the right
+token (06-17m Q20: "common patterns use _send_notification but I won't assert it" PASSED) and false-FAILing
+correct paraphrases (Q12/Q04, patched by an unwinnable hand-widening treadmill). Fix, two tiers in
+verification.py: (Tier 1.5) a FREE deterministic hedge-guard — a token present only inside a sentence
+carrying a high-precision uncertainty cue ("probably", "common pattern", "won't assert", "from memory",
+"can't name", "without confirm", "speculat", …) is not auto-credited → becomes ambiguous; (Tier 2) a GATED
+DeepSeek non-reasoning judge that adjudicates the ambiguous edge ONLY — present-but-hedged or
+missing-but-substantive — returning per-fact assert true/false (paraphrase counts, hedge/negation does not).
+A clean answer (all tokens present + unhedged) NEVER calls the LLM. Graceful: no key/offline/error →
+deterministic fallback biased to the LOUD false-FAIL, never the silent false-PASS; Layer 1 stays usable
+offline. Trigger ≈ 0 on clean runs, 0–2 calls otherwise; ~400–700 tokens/call, <2.5K tokens/day —
+negligible. Method tag in the scorecard now reads key_facts / key_facts+hedge / key_facts+llm so the path is
+visible. VALIDATED: self-test 21→26 (added hedge-guard FAIL + no-regression PASS + 3 stubbed-LLM gating
+checks; LLM forced off for the fixture loop = offline-deterministic). LIVE against real DeepSeek: Q20 hedged
+→ FAIL[+llm], a literal-missing paraphrase → PASS[+llm], a clean assertion → PASS[key_facts] with NO LLM call
+(gate confirmed). This is the same upgrade that retires the false-FAIL widening treadmill — semantic judgment
+cuts both ways. Companion gap still open: the count-check (stated total vs enumerated, the 06-15e Q19
+false-PASS). Brief doc: briefs/BRIEF_42_KeyFacts_Assertion_Aware_Verifier.md.
+
+[FIX] Folder-rename + resilience bundle — five latent faults surfaced while recovering two missed crons
+The project folder was renamed ML PROJECTS -> ML_PROJECTS (≈2026-06-16, between the 06-16 morning cron at
+09:40 which ran result=0 and the 06-16 evening cron at 20:00 which failed 0x80070002 file-not-found). That one
+rename, plus a Telegram outage and a depleted DeepSeek balance, cascaded into five distinct fixes:
+1. CRON PATHS: both CLARA_Test_* scheduled tasks (and the ambient watcher) hardcoded the old space-path ->
+   broke on rename. Fixed setup_schedule.ps1 to derive paths from $PSScriptRoot (rename/move-proof) +
+   -StartWhenAvailable so a run missed while the laptop is off catches up on wake (the 06-17 morning miss).
+   User ran it elevated; both crons verified at the underscore path, evening re-armed for 20:00. (Deleted a
+   buggy throwaway fix_test_crons.ps1 — a PowerShell array-flatten foot-gun; setup_schedule.ps1 is canonical.)
+   Also switched the ambient watcher to pythonw.exe earlier (no console window to accidentally close).
+2. HARNESS cp1252 CRASH: a '->' glyph in a start_backend log line killed the run under a cp1252 pipe.
+   test_harness.py now forces UTF-8 stdout/stderr at import so it can never die on its own logging.
+3. TELEGRAM-CRASHES-BACKEND (the important one): api.py lifespan awaited telegram_bot.start() unwrapped;
+   when api.telegram.org was unreachable, get_me() raised TimedOut and crashed the WHOLE lifespan
+   ("Application startup failed. Exiting.") -> /soul never served -> a peripheral notifier took the entire
+   backend offline. Now wrapped non-fatal (parallel to the Voice block): logs a warning, sets telegram_bot=None,
+   continues. Validated live — backend started clean with Telegram still down.
+4. v_datetime SECONDS BUG: the new datetime verifier's regex grabbed minute:second as hour:minute, so
+   "10:23:36 AM" false-FAILed (parsed 23:36). Clara's L2 correctly called it verifier_artifact. Fixed with an
+   optional (?::\d{2})? group; tested (PASS with seconds, still FAILs the +1hr bug); self-test 21/21.
+5. STALE SPACE-PATHS IN MEMORY (root cause of the file-read degradation): memory.json known_locations /
+   filesystem_map / a vault fact + 13 episodic summaries + CLAUDE.md's two examples still carried the dead
+   space-path. Clara tried it on DELIBERATE file reads, failed, fell back to MEMORY and CONFABULATED (Q5 invented
+   'episodic_raw'; Q11 invented '_queue_event.wait()'; Q20 speculated '_send_notification' which key_facts then
+   false-PASSED). Scrubbed all of it (memory.json space-paths -> 0, two backups taken; CLAUDE.md examples fixed)
+   so the dead path can no longer leak into context or RAG.
+
+[UPDATE] The Drill — 06-17 (manual recovery): degraded runs DISCARDED, clean re-runs are MORNING 17/0/5,
+EVENING 18/0/4 (zero real fails both)
+First runs were path-degraded (stale memory paths, before fix #5) and one full run 402'd mid-way on DeepSeek
+"Insufficient Balance" (account ran dry after 4 back-to-back drills; topped up). After fixes + topup, both clean:
+- TEMPORAL ANCHORS VALIDATED LIVE: the new Q21/Q22 + the [NOW]-trust PERSONA directive worked — she read the
+  12h time straight from [NOW] ("10:36 AM" / "11:31 AM") instead of hand-converting (the 06-16 miss). v_datetime
+  graded both "+0 min vs clock". The directive + dynamic verifier are doing their job.
+- THE 18 CLIMBS (8 evening 06-15 + 10 morning 06-16) HELD on clean reads: Q4 (dedup+order, with the .lower()
+  it missed under degradation), Q5 (episodic_log/episodic_embeddings pair), Q6 (count 22/tool_executor=15 — the
+  count-probe even caught a 16-vs-15 miscount during the degraded run), Q7/Q8/Q11/Q14/Q16/Q17 morning;
+  evening Q19 enumerated 5 with the CORRECT total (the 06-15e "4" miscount did NOT recur), Q20 mixed-premise
+  discrimination clean (affirmed the true claim, rejected the false). One cosmetic anomaly: evening Q19 answered
+  in Mandarin (DeepSeek language drift) — no verdict impact.
+- CALIBRATION: gold-seed real-axis MATCH both runs (evening even matched the fine mechanism). Clara's L2 caught
+  the v_datetime seconds bug as verifier_artifact — correct.
+- RESIDUAL CLOSED: Q20's space-path confabulation traced to episodic memory -> scrubbed (fix #5).
+CLIMBS THIS DRILL: Q12 morning (terminal-failure branch -> the RETRY branch: pop('active_tasks_context') stale-
+snapshot rationale + task_id refresh) and Q06 evening (503 condition+count -> backoff 8s/16s + the "Vision error
+after retries" exhaust line). Both grep-validated. NOTE: the 8 PM cron will re-run evening tonight on the updated
+suite. WATCH item still open: key_facts false-PASS on speculated tokens (Q20 '_send_notification') — the
+semantic-match Layer-1 upgrade remains the real fix.
+
+## 2026-06-16
+
+[UPDATE] The Drill — 06-16 morning: 14/1/5 scorecard → CORRECTED to 15/0/5 (Q04 verifier false-FAIL)
+Q04 (update_discourse_state dedup+order) FAILed the key_facts oracle. Ground truth (crud.py:409-431): dedup is
+case-insensitive via a seen-set of e.lower(); order is `new + existing` = most-recent-first (new prepended,
+stale falls off the cap). Clara described the mechanism CORRECTLY — "new + existing", "all newly provided
+entities come first, then the existing list", "stale topics trail behind until they drop off the cap" — but
+SUMMARIZED the order with the label "most-relevant-first" instead of "most-recent-first". The ORDER token group
+(most recent / new first / prepend / front) didn't match her correct phrasings -> false-FAIL. FIX: widened the
+group with correct recency phrasings (new + existing / new entities / fall off / drop off); deliberately did NOT
+add "relevant" (that's her mislabel, not a synonym for recency). Q04 -> pass, streak 0->1.
+CALIBRATION FINDING (the cross-run signal): the two self-axes SPLIT again on Q04, but INVERTED from 06-15m. This
+time her L2 OVER-classified it real/hallucination (there is no hallucination — she accurately described real
+code) while her NARRATIVE got it right (verifier_artifact). Combined with 06-15m (L2 right / narrative
+over-owned) and 06-15e (Q19 a real FAIL the verifier MISSED), the honest three-run conclusion is: NEITHER
+self-assessment axis is reliably calibrated — each errs in BOTH directions on borderline verdicts. Claude
+remains the necessary arbiter; do NOT yet trust either axis to gate Brief-38 auto-action unsupervised. Gold-seed
+L2 self-test still real-axis MATCH (classified the Q5 seed infra/non-answer vs gold not-real -> correct on the
+real/not-real axis). A SECOND systemic note: two consecutive mornings, a key_facts ORDER/CONTENT oracle
+false-FAILed a correct PROSE answer (06-15m Q12 'attempt count', 06-16m Q04 'most-recent-first') — the any-of
+token lists are too literal for fluent DELIBERATE prose; every key_facts FAIL on a prose question needs manual
+confirmation, and a semantic-match Layer-1 upgrade is the real fix (endless per-question widening is a treadmill).
+CLIMB BATCH — 10 anchors hit streak 3, promoted one rung each (same area, same DELIBERATE mode, streaks reset):
+  Q05 three-lock enumeration → L4 why _episodic_lock exists (the episodic_log/episodic_embeddings atomic pair).
+  Q06 asyncio.to_thread enumeration → L3 count+modal-file (total 22 + tool_executor.py=15) — DOUBLES as the
+      COUNT-CLAIM probe that closes the evening-Q19 gap from the question side: a wrong stated total now FAILS.
+  Q07 'targets from running' → L3 graph-reasoning (terminal nodes completed/invalidated + running's predecessor active).
+  Q08 _parse_completion return-contract → L5 conditional-logic (the BOTH-conditions INCOMPLETE flip + a
+      confident-negative phrase kept COMPLETE).
+  Q09 absence: neural_overdrive → pickle.load (a REAL-looking API — harder to dismiss from memory than a made-up token).
+  Q11 drain_blocking three-value → L4 mechanism (asyncio.wait_for raises asyncio.TimeoutError -> return []).
+  Q14 three file categories → L4 the NON-file half (task_graph.prune_terminal(days=7) + keep 3 backups).
+  Q16 'which trigger + class' → L4 exact predicate tuple RAG_SOURCES=("CLAUDE.md","ROADMAP.md","/docs/") verbatim.
+  Q17 severity values+soft-type → L4 behavior (soft/temporal on a user task is DISPATCHED with a note, not hard-blocked).
+  Q20 three-method sequence → L4 request-vs-notification (notifications/initialized via _send_notification).
+All 10 oracles validated (key_facts terms grep-confirmed in source, pickle.load absent, counts exact). Coherence
+this run: 100 recall / 100 didn't-need-to-ask / 0 appropriately-asked. NOTE: across two days I've now rotated
+~18 anchors (8 evening 06-15 + 10 morning 06-16) — the suite has stepped up a full rung broadly, so a dip in raw
+pass rate over the next 1-2 runs would be the climb landing, not regression.
+
+## 2026-06-15
+
+[UPDATE] The Drill — 06-15 evening: scorecard 16/0/4 → CORRECTED to 15/1/4 (one real, verifier-blind FAIL)
+The scorecard read clean, but ground-truth check caught a VERIFIER FALSE-PASS on Q19 (threading.Lock()
+enumeration). Truth = 5 Lock() instantiations across 4 files (agent.py has TWO: 378+385) + 1 RLock(crud.py:25).
+Clara ENUMERATED all 5 correctly with the right guarded variable for each — but her STATED TOTAL said
+"4 threading.Lock()" three times ("4 + 1 RLock = 5"), self-contradicting her own 5-item list. The search_set
+verifier passed her on LINE COVERAGE (5/5 present) — it is structurally blind to a wrong COUNT claim. This is
+the long-flagged Layer-1 list-count gap (CLAUDE.md: "does not yet verify list-counts") producing a false-PASS
+on a clean-looking run. NOT a verifier artifact in the usual sense (the verifier isn't broken, it just can't
+see counts) — it's a REAL answer error. Q19 → last_result fail, fail_count 1, streak reset 0; kept verbatim.
+LAYER-1 EXTENSION CANDIDATE logged: a count-check comparing the answer's stated total to the enumerated/true
+count (would have caught this in one line). Spot-checked the other high-stakes items independently: Q11
+os.replace = 2 calls + 7 doc/comment refs = 9 total, EXACT (incl. correctly treating the ambient.py:12 docstring
+mention as non-executable); Q01 ambient top-app brave on 06-14 confirmed by the dynamic verifier. Everything
+else holds.
+CLIMB BATCH (8 anchors hit streak 3 — promoted one rung each, same area, same DELIBERATE mode, streaks reset):
+  Q02 voice.py: read+compute (0.2s) → L4 dual-sample-rate synthesis (16000 Whisper STT vs 24000 Kokoro TTS).
+  Q04 tool_executor _atomic_search: _SESSION_ID_RE verbatim → L4 mechanism (MAX_SEARCH_POLLS=20 + the
+      PARTIAL/INCONCLUSIVE timeout note that stops a slow RUNNING search reading as "no matches").
+  Q07 tool_executor: _build_args_from_query/uri chain → L4 TOOL_ARG_DEFAULTS values+rationale (start_process
+      10000ms, list_directory depth 0, WHY 0 = dense dirs overflow the stdio chunk limit at depth>0).
+  Q09 absence-honesty: rotated string shutil.rmtree → os.system (grep-confirmed absent; same L5 Rule-19 class).
+  Q12 crud.py persistence: _save_memory PermissionError+uniqueness → L4 LOAD side (_load_memory catches
+      json.JSONDecodeError, copies corrupt file to a timestamped .corrupt- backup before defaults).
+  Q13 agent.py: _TASK_MARKER_RE verbatim → L5 behavioral-locate verbatim (must FIND the inline-Glint
+      hallucination-split line `pre_glint = _glint_re.split(...)[0].strip()` from a behavior description, not a name).
+  Q16 tool_executor: '[Reading' guard verbatim → L4 the doing-line verbatim (the f-string that numbers each line).
+  Q20 doc-vs-code: double-FALSE-premise → L5 MIXED-premise discrimination (one claim TRUE: FAST=Interpreter+
+      format_llm; one FALSE: CHAT runs a ReAct loop — it streams directly). Must AFFIRM the true one and REJECT
+      only the false one — blanket skepticism that "corrects" the true claim now fails the rung.
+All 8 new oracles validated (verbatim targets grep-confirmed present, key_facts terms present in source,
+os.system absent). Gold-seed L2 self-test real-axis MATCH again. Knowledge anchors (Q05/Q08/Q15) held (not
+cadence-due; Q15 remains the standing Shobha-confabulation guard).
+
+[UPDATE] The Drill — 06-15 morning: 14/1/5 scorecard → CORRECTED to 15/0/5 (zero real answer-failures)
+The lone scorecard FAIL (Q12) was a VERIFIER FALSE-FAIL, ground-truth confirmed. Q12 asks the terminal-failure
+branch behavior of orchestrator._handle_task_failure; truth is future.set_result("I was unable to complete this
+after N attempts. Last error: ...") + episode prefix [TASK FAILED]. Clara answered prefix [TASK FAILED] (✓) and
+"a failure message with attempt count and last error" — substantively correct (failure ✓, attempt count ✓, last
+error ✓), but her paraphrase "attempt count" missed the any-of literal-token group [unable to complete/was
+unable/could not complete/after/attempts]. FIX: added "attempt count" to the synonym group in
+questions_morning.json Q12 (oracle too narrow, not the question — analogous to the search_set code-only fix);
+Q12 → last_result pass, fail_count 0, pass_streak 0→1.
+CALIBRATION META-FINDING (the real signal this run): Clara's TWO self-assessment axes SPLIT on Q12 —
+her Layer-2 D1-D7 diagnosis correctly called it `verifier_artifact`, but her NARRATIVE self-assessment
+over-owned it as "a real failure" and wrote two "improvements" for a non-failure. The AUTHORITATIVE axis (L2,
+the gate for Brief 32→38) was RIGHT; the prose layer still skews to false-self-blame (the pattern the
+validate-self-diagnosis-calibration note tracks). Good news for trusting L2; the narrative remains the
+mis-calibrated layer. Gold-seed self-test: classified the Q8 hallucination seed real/memory_confabulation vs
+gold real/negative_fabrication → real-axis MATCH (fine-mechanism imprecise, as before).
+ONE REAL PROCESS GAP (Q7, answer still PASS): router sent a "list EVERY target state" question to FAST
+(session log 08:03:41 Mode: FAST, 0 ReAct turns) — answered the 4 running-state transitions correctly FROM
+MEMORY without reading task_graph.py. Confirmed correct vs VALID_TRANSITIONS line 33 (paused/completed/failed/
+invalidated), but the process skipped verification — a genuine under-escalation Clara flagged herself correctly
+(grounded, NOT confabulated; I verified the FAST routing in the log). This is the recurring mode_mismatch class:
+"list every X" source questions should gate to DELIBERATE. Q6 verified clean independently: asyncio.to_thread =
+22 across 4 files (agent 4 / background_tasks 2 / tool_executor 15 / voice 1), her enumeration exact. Coherence:
+75 recall / 100 didn't-need-to-ask / 0 appropriately-asked. No verifier/harness changes needed (self-test
+21/21 earlier; only the Q12 oracle widened).
+
 ## 2026-06-14
 
 [UPDATE] The Drill — 06-14 evening: 16/0/4 (best mechanical scorecard yet) + full self-assessment stack live

@@ -116,6 +116,52 @@ def load_observations(path: str = AMBIENT_PATH) -> list:
         return []
 
 
+def compute_baseline(observations=None, min_days=5) -> dict:
+    """A2 foundation — derive the 'normal' profile A0 has observed, in the exact shape
+    AmbientGate.novelty() consumes: {"process_hour_freq": {"<proc>|<hour>": share, ...}}, where
+    share = fraction of that HOUR's active_window observations that were that process. The usual
+    app at the usual hour -> high share -> low novelty; an unseen app at 3am -> share 0 -> novelty 1.
+
+    Also returns "meta" (days covered, sample count, top apps, whether the baseline is mature enough
+    to trust). Pure read of ambient.json — no surfacing, no side effects. A2's gate will pass the
+    process_hour_freq dict straight into novelty(); meta is for diagnostics / the readiness check.
+    """
+    obs = observations if observations is not None else load_observations()
+    aw = [o for o in obs
+          if o.get("sensor") == "active_window" and (o.get("payload") or {}).get("process")]
+
+    hour_total = {}                       # hour -> count
+    proc_hour = {}                        # "proc|hour" -> count
+    proc_total = {}                       # proc -> count
+    days = set()
+    for o in aw:
+        ts = str(o.get("ts", ""))
+        if len(ts) < 13:
+            continue
+        days.add(ts[:10])
+        hour = int(ts[11:13])
+        proc = str(o["payload"]["process"]).lower()
+        hour_total[hour] = hour_total.get(hour, 0) + 1
+        key = f"{proc}|{hour}"
+        proc_hour[key] = proc_hour.get(key, 0) + 1
+        proc_total[proc] = proc_total.get(proc, 0) + 1
+
+    process_hour_freq = {k: round(c / hour_total[int(k.split("|")[1])], 4)
+                         for k, c in proc_hour.items()}
+    top_apps = sorted(proc_total.items(), key=lambda kv: -kv[1])[:8]
+
+    return {
+        "process_hour_freq": process_hour_freq,
+        "meta": {
+            "days_covered": len(days),
+            "samples": len(aw),
+            "hours_seen": sorted(hour_total),
+            "top_apps": top_apps,
+            "mature": len(days) >= min_days and len(aw) >= 200,
+        },
+    }
+
+
 _MONTHS = {m.lower(): i for i, m in enumerate(
     ["", "January", "February", "March", "April", "May", "June",
      "July", "August", "September", "October", "November", "December"]) if i}

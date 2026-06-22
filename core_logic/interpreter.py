@@ -30,6 +30,10 @@ TOOL_ARG_SCHEMAS = {
                           "question": "string — what to ask about the image",
                           "paths": "list[string] — optional: multiple image paths"},
     "consult_archive":   {"query": "string — question for the archive"},
+    "episodic_search":   {"query": "string — topic to find in past conversations (not the time-word)",
+                          "k": "int — optional, how many results (default 5)"},
+    "whatsapp_missed":   {"query": "string — optional filter by sender/text",
+                          "limit": "int — optional, max messages (default 20)"},
     "query_task_status": {"keyword": "string — keyword from task goal"},
     "ambient_recall":    {"date": "string — a specific day: '2026-06-11', 'June 11', 'yesterday' (preferred for a named day)",
                           "window": "string — hours to look back, e.g. '2', '24' (used only when no date given)",
@@ -130,11 +134,24 @@ Personal memory rules:
   you discussed previously, or anything phrased as "do you remember X" or
   "did I tell you about X" → answer from [MEMORY_CONTEXT_BLOCK] directly.
   Set tool=null, requires_planning=false.
+- EXCEPTION — episodic_search: when the question is an explicit TEMPORAL-LOCATOR
+  or exhaustive recall over past conversations that the injected context may not
+  cover — "WHEN did I (first) mention/say X", "have I EVER talked about X",
+  "the first/last time I brought up X", "search/look through my memory for X" →
+  tool=episodic_search, args {"query": "<the topic, not the time-word>"},
+  requires_planning=false. It returns matching past interactions WITH timestamps,
+  so the answer can give the date. Use the TOPIC as the query ("the gym", "Shobha",
+  "the job offer") — never "when" alone. Casual "do you remember X" that the
+  context already answers stays tool=null (don't pay a tool call for it).
+- WhatsApp held-message recall: "what did I miss on WhatsApp", "any whatsapp
+  messages (today)", "who messaged me on whatsapp" → tool=whatsapp_missed,
+  requires_planning=false. It returns the HELD (non-priority) messages Alkama
+  didn't see. NOT for sending anything (read-only).
 - Do NOT use consult_archive for personal memory lookups.
   consult_archive searches indexed documentation (CLAUDE.md, ROADMAP.md,
   resume) — it does not contain conversation history.
-- If the memory context has no relevant information, say so directly.
-  Do not search for it — it either exists in memory or it doesn't.
+- If a casual recall has no match in the injected context, say so directly — but a
+  "when did I ever…" locator should use episodic_search before concluding absence.
 
 Follow-up resolution:
 If the query is short (under 6 words), uses demonstrative references without

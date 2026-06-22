@@ -350,6 +350,136 @@ def set_task_graph(tg) -> None:
     _task_graph_ref = tg
 
 
+# Injected at startup by api.py — the live Clara_Agent, so episodic_search can read
+# the in-RAM episodic_log + episodic_embeddings and reuse the agent's encoder.
+_agent_ref = None
+
+def set_agent_ref(agent) -> None:
+    """Called once by api.py after Clara_Agent is created."""
+    global _agent_ref
+    _agent_ref = agent
+
+
+def whatsapp_missed(query: str = "", limit: int = 20) -> str:
+    """
+    Report the WhatsApp messages that were HELD — the ones Alkama did NOT see because the sender
+    was not on the priority roster (Brief 45). Priority senders (Shobha) are surfaced straight into
+    the chat, so they are never 'missed' and are NOT in this archive by design. Optional `query`
+    filters by sender or text. For "what did I miss on WhatsApp", "any whatsapp today", "who messaged
+    me on whatsapp".
+    """
+    try:
+        from .conversations import read_whatsapp_held
+    except ImportError:
+        from conversations import read_whatsapp_held
+    try:
+        limit = max(1, min(int(limit or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    rows = read_whatsapp_held(limit=limit)
+    if not rows:
+        return ("No held WhatsApp messages — nothing waiting. (Priority senders like Shobha come "
+                "straight to the chat, so they're never held here.)")
+
+    if query and query.strip():
+        q = query.lower().strip()
+        rows = [r for r in rows
+                if q in str(r.get("sender", "")).lower() or q in str(r.get("text", "")).lower()]
+        if not rows:
+            return f"No held WhatsApp messages match {query!r}."
+
+    from collections import OrderedDict
+    by_sender = OrderedDict()
+    for r in rows:
+        by_sender.setdefault(str(r.get("sender", "unknown")), []).append(r)
+
+    lines = [f"{len(rows)} held WhatsApp message(s) you haven't seen "
+             f"(from {len(by_sender)} sender(s); priority senders go straight to the chat):"]
+    for sender, msgs in by_sender.items():
+        lines.append(f"\n**{sender}** ({len(msgs)}):")
+        for m in msgs[-5:]:
+            ts = str(m.get("ts", ""))[:16].replace("T", " ") or "undated"
+            body = " ".join(str(m.get("text", "")).split())
+            if len(body) > 160:
+                body = body[:160] + "…"
+            lines.append(f"  [{ts}] {body}")
+    return "\n".join(lines)
+
+
+def episodic_search(query: str, k: int = 5) -> str:
+    """
+    Semantic search over the FULL user-facing episodic log, returning the top-k most
+    relevant past interactions WITH their timestamps (best match first).
+
+    Why this exists (Brief 47): get_smart_context injects only the top-2 semantic hits +
+    last-3 by recency. That passive window structurally misses (a) older interactions, and
+    (b) the two-part temporal follow-up — "have I said X?" matches on content, but the bare
+    follow-up "when?" embeds to nothing near the original episode, so the timestamp is
+    unreachable. A deliberate tool call reaches the whole log and returns the timestamp
+    inline, so the FIRST answer can already say "yes — on June 11 ~21:30".
+    """
+    if _agent_ref is None or getattr(_agent_ref, "db", None) is None:
+        return "Error: episodic memory not available."
+    try:
+        k = max(1, min(int(k or 5), 10))
+    except (TypeError, ValueError):
+        k = 5
+
+    # Memory dict lives on the agent's CRUD instance (clara.db.memory), not the agent itself.
+    episodes = (_agent_ref.db.memory or {}).get("episodic_log", [])
+    if not episodes:
+        return "No episodic memories recorded yet."
+
+    try:
+        from .crud import SYSTEM_PREFIXES
+    except ImportError:
+        SYSTEM_PREFIXES = ("[AUTONOMOUS]", "[TASK")
+    user_idx = [i for i, ep in enumerate(episodes)
+                if not ep.get("summary", "").startswith(SYSTEM_PREFIXES)]
+    if not user_idx:
+        return "No user-facing episodic memories recorded yet."
+
+    def _fmt(idx, score=None):
+        ep = episodes[idx]
+        ts = ep.get("timestamp", "")[:16].replace("T", " ") or "undated"
+        rel = f" (relevance {score:.2f})" if score is not None else ""
+        return f"- [{ts}]{rel} {ep.get('summary', '')}"
+
+    embs = getattr(_agent_ref, "episodic_embeddings", None)
+    # Semantic path — only when embeddings are present AND index-aligned with the log.
+    if embs and len(embs) == len(episodes):
+        try:
+            import torch
+            q_emb = _agent_ref._encode_sync(query).to("cpu")
+            user_embs = torch.stack([embs[i] for i in user_idx])
+            sims = torch.nn.functional.cosine_similarity(q_emb.unsqueeze(0), user_embs)
+            kk = min(k, len(user_idx))
+            top = sims.topk(kk).indices.tolist()
+            lines = [_fmt(user_idx[li], float(sims[li])) for li in top]
+            header = "Most relevant past interactions (best match first):"
+            if float(sims[top[0]]) < 0.30:
+                header = ("No strongly matching memory — closest interactions below "
+                          "(low relevance; treat as weak matches):")
+            return header + "\n" + "\n".join(lines)
+        except Exception:
+            pass  # fall through to keyword scan
+
+    # Keyword fallback — embeddings missing or drifted out of alignment.
+    q_words = [w for w in query.lower().split() if len(w) > 2]
+    scored = []
+    for i in user_idx:
+        s = episodes[i].get("summary", "").lower()
+        hits = sum(1 for w in q_words if w in s)
+        if hits:
+            scored.append((hits, i))
+    if not scored:
+        return f"No episodic memory mentions: {query!r}."
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    return "Past interactions mentioning that (keyword match):\n" + "\n".join(
+        _fmt(i) for _, i in scored[:k])
+
+
 def query_task_status(keyword: str) -> str:
     """
     Search the TaskGraph for tasks whose goal contains the keyword.

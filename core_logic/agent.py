@@ -1262,6 +1262,17 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     asyncio.to_thread(self.db.append_recent_exchange, query, final_answer)
                 )
 
+            # Brief 43.3 — persistent cross-channel archive for the unified master console.
+            # Source-tagged (interface/telegram/voice); harness/test traffic is EXCLUDED so the
+            # console isn't polluted by twice-daily drills. Decoupled (background, never raises).
+            channel = (task_context or {}).get("channel", "interface")
+            if source == "user" and final_answer and channel != "harness":
+                from .conversations import record_exchange
+                _mid = (task_context or {}).get("message_id", "")
+                asyncio.create_task(
+                    asyncio.to_thread(record_exchange, channel, query, final_answer, _mid)
+                )
+
             # 6b. Memory consolidation — SKIP the first soft-failed attempt that will be retried.
             # Don't canonize a failure the retry may resolve (a "I couldn't" episode that resurfaces
             # becomes self-narrative ground truth — the exact Q15/Shobha class). The detached retry's

@@ -16,9 +16,10 @@ export default function useClara() {
   const [selectedFile, setSelectedFile] = useState(null);   // { name, data } — non-image document upload
   const [streamingContent, setStreamingContent] = useState("");
   const [lastTokenUsage, setLastTokenUsage] = useState(null);
-  const [voiceActive, setVoiceActive]       = useState(false);
+  // In-interface voice capture (F4 PTT) was removed — the F10 hotkey (own-mic, standalone)
+  // is the voice path now. claraIsSpeaking is kept: TTS (including hotkey replies) drives the
+  // "Clara is speaking" waveform via speaking_start/stop.
   const [claraIsSpeaking, setClaraIsSpeaking] = useState(false);
-  const voiceActiveRef      = useRef(false);
   const claraIsSpeakingRef  = useRef(false);
   const socketRef           = useRef(null);
   const retryCountRef       = useRef(0);
@@ -31,10 +32,10 @@ export default function useClara() {
     try { localStorage.setItem('clara_messages', JSON.stringify(messages)); } catch {}
   }, [messages]);
 
-  const addMessage = (sender, text, image = null, messageId = null) => {
+  const addMessage = (sender, text, image = null, messageId = null, source = "interface") => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     if (sender === "User" && messageId) pendingRef.current.set(messageId, true);
-    setMessages(prev => [...prev, { sender, text, image, time: timestamp, messageId }]);
+    setMessages(prev => [...prev, { sender, text, image, time: timestamp, messageId, source }]);
   };
 
   const addSystemLog = (text) => {
@@ -200,7 +201,7 @@ export default function useClara() {
 
       // ── user_transcript (voice) ───────────────────────────────────────────────
       if (data.type === "user_transcript") {
-        addMessage("User", data.content, null, data.message_id);
+        addMessage("User", data.content, null, data.message_id, data.source);
         pendingRef.current.set(data.message_id, true);
         setQueryCards(prev => [
           makeCard(data.message_id, data.content),
@@ -225,7 +226,7 @@ export default function useClara() {
       // ── final_answer ──────────────────────────────────────────────────────────
       if (data.type === "final_answer") {
         const msgId = data.message_id || null;
-        addMessage("Clara", data.content, null, msgId);
+        addMessage("Clara", data.content, null, msgId, data.source);
         if (msgId) {
           pendingRef.current.delete(msgId);
           setQueryCards(prev => prev.map(c => c.messageId === msgId ? { ...c, isComplete: true } : c));
@@ -237,6 +238,22 @@ export default function useClara() {
         }
         setStreamingContent("");
         if (pendingRef.current.size === 0) setStatus("idle");
+        return;
+      }
+
+      // ── console_message — live cross-channel mirror (telegram / whatsapp-hold / voice) ──
+      // Pushes the exchange into the master console the instant it happens, no /history refresh.
+      if (data.type === "console_message") {
+        const sender = data.role === "clara" ? "Clara" : "User";
+        addMessage(sender, data.content, null, data.message_id || null, data.source || "interface");
+        return;
+      }
+
+      // ── whatsapp_alert — a surfaced (priority) WhatsApp message. source="whatsapp" makes the
+      // bubble render as an INCOMING message (left, amber, badged), never as Alkama's own. Held
+      // (non-priority) messages do NOT arrive here — they're archived quietly server-side.
+      if (data.type === "whatsapp_alert") {
+        addMessage("User", `[${data.sender}] ${data.content}`, null, null, "whatsapp");
         return;
       }
     };
@@ -253,6 +270,31 @@ export default function useClara() {
     };
   }, []);
 
+  // Brief 43.3 — seed the master console from the server's cross-channel archive (/history):
+  // one unified thread of interface + telegram + voice, source-badged. Harness/drill traffic is
+  // excluded server-side. SAFE: only replaces the local list when the server actually has data, so
+  // it never wipes existing localStorage history to empty (the store starts empty and accrues).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("http://localhost:8001/history?limit=200");
+        if (!res.ok) return;
+        const data = await res.json();
+        const msgs = (data.messages || []).map(m => ({
+          sender: m.role === "clara" ? "Clara" : "User",
+          text: m.text,
+          image: null,
+          time: (m.ts || "").slice(11, 16),
+          messageId: m.message_id || null,
+          source: m.source || "interface",
+        }));
+        if (!cancelled && msgs.length > 0) setMessages(msgs);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
     connect();
@@ -262,36 +304,6 @@ export default function useClara() {
       socketRef.current?.close();
     };
   }, [connect]);
-
-  // Push-to-talk
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.code !== "F4") return;
-      e.preventDefault();
-      if (claraIsSpeakingRef.current) {
-        socketRef.current?.send(JSON.stringify({ type: "voice_interrupt" }));
-        return;
-      }
-      if (!voiceActiveRef.current) {
-        voiceActiveRef.current = true;
-        setVoiceActive(true);
-        socketRef.current?.send(JSON.stringify({ type: "voice_start" }));
-      }
-    };
-    const handleKeyUp = (e) => {
-      if (e.code !== "F4" || !voiceActiveRef.current) return;
-      voiceActiveRef.current = false;
-      setVoiceActive(false);
-      const messageId = crypto.randomUUID();
-      socketRef.current?.send(JSON.stringify({ type: "voice_stop", message_id: messageId }));
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, []);
 
   const cancelTask = useCallback((taskId) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -343,6 +355,6 @@ export default function useClara() {
     input, setInput, sendMessage, cancelTask, toggleCard, status,
     selectedImage, setSelectedImage, selectedFile, setSelectedFile, handleImageUpload,
     streamingContent, clearHistory, lastTokenUsage,
-    voiceActive, claraIsSpeaking,
+    claraIsSpeaking,
   };
 }
