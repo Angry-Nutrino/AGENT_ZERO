@@ -16,6 +16,7 @@ Self-test: `python core_logic/conversations.py`.
 """
 import os
 import json
+import uuid
 import threading
 from datetime import datetime
 
@@ -62,22 +63,56 @@ def record_exchange(source, user_text, clara_text, message_id="", conv_dir=None)
 
 _HELD_FILE = "whatsapp_held.jsonl"
 _HELD_CAP = 500   # the watcher runs 24/7 and catches spam — bound the archive like everything else
+VALID_HELD_STATUS = ("unread", "read")   # read is a LABEL (engage-to-read), never a delete
+
+
+def _held_path(conv_dir=None):
+    return os.path.join(conv_dir or _DEFAULT_DIR, _HELD_FILE)
+
+
+def _ensure_held_migrated(path):
+    """Read all held rows, back-filling id + status on any legacy row (pre-read/unread schema).
+    Idempotent: rewrites the file ONLY when a row was missing either field, so once upgraded reads are
+    pure. A legacy row = never-labelled = 'unread'. Caller must hold _lock. Returns the rows; never raises."""
+    try:
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+        changed = False
+        for r in rows:
+            if not r.get("id"):
+                r["id"] = uuid.uuid4().hex[:12]
+                changed = True
+            if r.get("status") not in VALID_HELD_STATUS:
+                r["status"] = "unread"
+                changed = True
+        if changed:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return rows
+    except Exception:
+        return []
 
 
 def record_whatsapp_held(sender, text, ts=None, conv_dir=None):
     """Held (non-priority) WhatsApp messages go HERE — a separate quiet archive, NOT the main
     conversation feed the UI renders. Keeps the Clara chat clean (Alkama's 'only Shobha breaks
     through; everyone else held') while preserving a 'what did I miss on WhatsApp?' record.
-    Bounded to the most recent _HELD_CAP entries so a 24/7 spam feed can't grow it forever.
-    Never raises."""
+    Each row carries a stable `id` + `status` ('unread' on arrival; flipped to 'read' only when Alkama
+    engages with it — engage-to-read). Bounded to the most recent _HELD_CAP entries so a 24/7 spam feed
+    can't grow it forever. Never raises."""
     try:
         d = conv_dir or _DEFAULT_DIR
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, _HELD_FILE)
         rec = {
+            "id": uuid.uuid4().hex[:12],
             "ts": (ts or datetime.now()).isoformat(timespec="seconds"),
             "sender": str(sender),
             "text": "" if text is None else str(text),
+            "status": "unread",
         }
         with _lock:
             with open(path, "a", encoding="utf-8") as f:
@@ -96,17 +131,52 @@ def record_whatsapp_held(sender, text, ts=None, conv_dir=None):
         return False
 
 
-def read_whatsapp_held(limit=50, conv_dir=None):
-    """Return the most recent held WhatsApp messages (for 'what did I miss?'). Never raises."""
+def read_whatsapp_held(limit=50, status=None, conv_dir=None):
+    """Return held WhatsApp messages (oldest→newest). `status` filters to 'unread' or 'read'
+    (None/'all' = both). `limit<=0` returns the whole filtered archive (used by a sender drill-down
+    that must see everything, not just the recent tail). Lazily migrates legacy rows to carry
+    id+status. Never raises."""
     try:
-        path = os.path.join(conv_dir or _DEFAULT_DIR, _HELD_FILE)
-        if not os.path.exists(path):
-            return []
-        with open(path, encoding="utf-8") as f:
-            rows = [json.loads(ln) for ln in f if ln.strip()]
-        return rows[-limit:]
+        with _lock:
+            rows = _ensure_held_migrated(_held_path(conv_dir))
+        if status in VALID_HELD_STATUS:
+            rows = [r for r in rows if r.get("status", "unread") == status]
+        if limit and limit > 0:
+            rows = rows[-limit:]
+        return rows
     except Exception:
         return []
+
+
+def mark_whatsapp_read(ids=None, sender=None, conv_dir=None):
+    """Flip held messages from unread→read (engage-to-read). Match by exact `ids` (precise: the rows
+    just shown to Alkama) and/or `sender` (substring, case-insensitive: an explicit 'mark all from X
+    read'). With neither, nothing is marked (so a bare call can't silently clear the inbox). Read is a
+    LABEL — the row is never removed and stays fully queryable (status='all' / by sender) any number of
+    times. Returns the count newly marked. Never raises."""
+    try:
+        id_set = {str(i) for i in ids} if ids else None
+        snd = sender.lower().strip() if sender else None
+        if id_set is None and not snd:
+            return 0
+        path = _held_path(conv_dir)
+        n = 0
+        with _lock:
+            rows = _ensure_held_migrated(path)
+            for r in rows:
+                if r.get("status") == "read":
+                    continue
+                if (id_set is not None and str(r.get("id")) in id_set) or \
+                   (snd and snd in str(r.get("sender", "")).lower()):
+                    r["status"] = "read"
+                    n += 1
+            if n:
+                with open(path, "w", encoding="utf-8") as f:
+                    for r in rows:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return n
+    except Exception:
+        return 0
 
 
 def load_recent(limit=200, sources=None, include_harness=False, conv_dir=None):
@@ -177,6 +247,25 @@ if __name__ == "__main__":
         chat = load_recent(include_harness=True, conv_dir=tmp)
         assert all("Rolex 64000" != r.get("text") for r in chat), "held leaked into chat feed!"
         assert not any(r.get("sender") for r in chat), "held record (has 'sender') reached chat feed!"
+
+        # ── read/unread (engage-to-read) ──
+        un = read_whatsapp_held(status="unread", conv_dir=tmp)
+        assert len(un) == 2 and all(r["status"] == "unread" and r.get("id") for r in un), "new held not unread/ided"
+        souq_ids = [r["id"] for r in un if r["sender"] == "Luxury Souq"]
+        assert mark_whatsapp_read(ids=souq_ids, conv_dir=tmp) == 1, "mark by id should flip exactly 1"
+        assert mark_whatsapp_read(ids=souq_ids, conv_dir=tmp) == 0, "re-marking an already-read row is a no-op"
+        assert len(read_whatsapp_held(status="unread", conv_dir=tmp)) == 1, "one unread should remain"
+        assert len(read_whatsapp_held(status="read", conv_dir=tmp)) == 1, "one read should exist"
+        assert len(read_whatsapp_held(conv_dir=tmp)) == 2, "read is a LABEL — nothing removed (all still queryable)"
+        assert mark_whatsapp_read(sender="+91", conv_dir=tmp) == 1, "mark by sender should flip the remaining unread"
+        assert read_whatsapp_held(status="unread", conv_dir=tmp) == [], "inbox now all read"
+        assert mark_whatsapp_read(conv_dir=tmp) == 0, "bare mark (no ids, no sender) must be a no-op"
+        # legacy migration: a pre-schema row (no id/status) reads as unread and is back-filled
+        with open(_held_path(tmp), "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"ts": "2026-06-01T09:00:00", "sender": "Legacy", "text": "old row"}) + "\n")
+        legacy = [r for r in read_whatsapp_held(conv_dir=tmp) if r["sender"] == "Legacy"]
+        assert legacy and legacy[0]["status"] == "unread" and legacy[0].get("id"), "legacy row not migrated"
+
         # cap: archive is bounded to _HELD_CAP
         for i in range(_HELD_CAP + 25):
             record_whatsapp_held("spam", f"msg {i}", conv_dir=tmp)

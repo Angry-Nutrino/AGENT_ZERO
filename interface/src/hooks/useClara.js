@@ -21,6 +21,7 @@ export default function useClara() {
   // "Clara is speaking" waveform via speaking_start/stop.
   const [claraIsSpeaking, setClaraIsSpeaking] = useState(false);
   const claraIsSpeakingRef  = useRef(false);
+  const [ambientFeed, setAmbientFeed] = useState([]);   // A2 passive ambient nudges (Brief 40 Y1e)
   const socketRef           = useRef(null);
   const retryCountRef       = useRef(0);
   const retryTimerRef       = useRef(null);
@@ -256,6 +257,14 @@ export default function useClara() {
         addMessage("User", `[${data.sender}] ${data.content}`, null, null, "whatsapp");
         return;
       }
+      if (data.type === "ambient_nudge") {
+        // Passive — no sound/poke; just prepend to the feed. Newest first, capped.
+        setAmbientFeed(prev => [
+          { id: data.id, remark: data.remark, category: data.category, ts: data.ts, feedback: null },
+          ...prev.filter(n => n.id !== data.id),
+        ].slice(0, 50));
+        return;
+      }
     };
 
     ws.onerror = () => {};
@@ -295,6 +304,21 @@ export default function useClara() {
     return () => { cancelled = true; };
   }, []);
 
+  // A2 ambient feed (Brief 40 Y1e) — load recent passive nudges on connect, so the feed shows entries
+  // surfaced while the UI was closed. Server returns oldest-last; we show newest first.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("http://localhost:8001/ambient_feed?limit=50");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setAmbientFeed((data.feed || []).slice().reverse());
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
     connect();
@@ -304,6 +328,16 @@ export default function useClara() {
       socketRef.current?.close();
     };
   }, [connect]);
+
+  // 👍/👎 on an ambient nudge (Brief 40 §4 calibration) — optimistic UI + POST. Tapping the same vote
+  // again clears it (toggle).
+  const sendAmbientFeedback = useCallback((id, vote) => {
+    setAmbientFeed(prev => prev.map(n => n.id === id ? { ...n, feedback: n.feedback === vote ? null : vote } : n));
+    fetch("http://localhost:8001/ambient_feedback", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, vote }),
+    }).catch(() => {});
+  }, []);
 
   const cancelTask = useCallback((taskId) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -356,5 +390,6 @@ export default function useClara() {
     selectedImage, setSelectedImage, selectedFile, setSelectedFile, handleImageUpload,
     streamingContent, clearHistory, lastTokenUsage,
     claraIsSpeaking,
+    ambientFeed, sendAmbientFeedback,
   };
 }

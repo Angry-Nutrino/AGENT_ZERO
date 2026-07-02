@@ -133,25 +133,39 @@ def compute_baseline(observations=None, min_days=5) -> dict:
     hour_total = {}                       # hour -> count
     proc_hour = {}                        # "proc|hour" -> count
     proc_total = {}                       # proc -> count
+    proc_hour_day = {}                    # "proc|hour" -> set(distinct days) — RECOGNITION (Y1a)
+    hour_day = {}                         # hour -> set(distinct days) — TIMING (Y1a)
     days = set()
     for o in aw:
         ts = str(o.get("ts", ""))
         if len(ts) < 13:
             continue
-        days.add(ts[:10])
+        day = ts[:10]
+        days.add(day)
         hour = int(ts[11:13])
         proc = str(o["payload"]["process"]).lower()
         hour_total[hour] = hour_total.get(hour, 0) + 1
         key = f"{proc}|{hour}"
         proc_hour[key] = proc_hour.get(key, 0) + 1
         proc_total[proc] = proc_total.get(proc, 0) + 1
+        proc_hour_day.setdefault(key, set()).add(day)
+        hour_day.setdefault(hour, set()).add(day)
 
     process_hour_freq = {k: round(c / hour_total[int(k.split("|")[1])], 4)
                          for k, c in proc_hour.items()}
+    # Recognition / timing inputs (Y1a): DISTINCT-DAY counts, not raw frequency. novelty for an app
+    # is 1 - days_seen(proc,hour)/days_observed (a daily 2pm habit -> ~0; a never-at-3am app -> ~1),
+    # and for an hour is 1 - days_active(hour)/days_observed. Frequency-within-an-hour (the old share)
+    # mislabels a daily-but-minority app as novel — recognition fixes that.
+    proc_hour_days = {k: len(v) for k, v in proc_hour_day.items()}
+    hour_days = {h: len(v) for h, v in hour_day.items()}
     top_apps = sorted(proc_total.items(), key=lambda kv: -kv[1])[:8]
 
     return {
-        "process_hour_freq": process_hour_freq,
+        "process_hour_freq": process_hour_freq,   # legacy share signal (default-class novelty fallback)
+        "proc_hour_days": proc_hour_days,          # "proc|hour" -> distinct days seen (recognition)
+        "hour_days": hour_days,                    # hour -> distinct days active (timing)
+        "days_observed": len(days),
         "meta": {
             "days_covered": len(days),
             "samples": len(aw),

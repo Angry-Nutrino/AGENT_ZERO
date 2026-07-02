@@ -36,14 +36,27 @@ Include relevant brief numbers, affected modules, and key behavioral changes.
 
 `BACKLOG.md` (repo root) is the **single canonical queue** of pending work, grouped by autonomy tier
 (🟢 do-unattended / 🟡 build-on-`autonomous`-dormant-uncommitted-Alkama-reviews-diff-and-commits / 🔴 queue-only-needs-Alkama-or-arming-risk). Keep it
-**fed**: at the end of every session, harvest newly-surfaced items into it (don't let pending state scatter
-across TIMELINE notes again).
+**fed** and **comprehensive**: whenever a feature/idea is discussed and confirmed, add it to **BOTH**
+`BACKLOG.md` **and** `briefs/ROADMAP.md` (the backlog is the operational queue; the roadmap is the
+sequenced plan + dependencies — they must stay in sync). Don't let pending state scatter across TIMELINE
+notes.
 
-**Busy-day mode** — when Alkama says *"busy day / work the backlog"*, it's an explicit **permission-bypass**
-(same live session, not `claude -p`): do 🟢/🟡 work **without asking** (typical and complex), self-solve forks
-with the most reversible option + log it, **queue 🔴 instead of interrupting**, over-consume the window freely
-(under-consume never), self-check every action, and end with a session report + backlog update. Full operating
-contract is at the top of `BACKLOG.md`.
+**The decision chain (how to choose what to work on): `BACKLOG.md` → `briefs/ROADMAP.md` → the brief →
+decide.** Start at the backlog (the queue). For a candidate, trace to the ROADMAP to see where it sits and
+**its dependencies** — is it the right time, are its prerequisites done? Then check for a **brief** (design
+doc / proposed code): if briefed-and-confirmed, implement; if briefed-awaiting-confirmation, don't; if it's
+complex and unbriefed, write the brief instead of editing. Only then decide whether to start it **or not** —
+an item whose dependencies aren't met should not be started; do the prerequisite first or pick another.
+Each backlog item should therefore carry its dependencies + roadmap/brief references.
+
+**Busy-day mode** — when Alkama says *"use busy-mode" / "busy day / work the backlog"*, it's an explicit
+**permission-bypass** (same live session, not `claude -p`): do 🟢/🟡 work **without asking** (typical and
+complex), self-solve forks with the most reversible option + log it, **queue/brief 🔴 instead of
+interrupting** (there is no one to answer — briefs are async questions), over-consume the window freely
+(under-consume never), self-check every action. Log everything **as you go** to a per-lifetime report in
+`busy-mode-reports/` (status Ongoing→Ended; a 150–200-word "which & why" before each task — the
+skill-evaluation signal), **in addition to** TIMELINE/BACKLOG. Full operating contract + the loop is the
+`busy-mode` skill (`.claude/skills/busy-mode/SKILL.md`); queue/contract in `BACKLOG.md`.
 
 ---
 

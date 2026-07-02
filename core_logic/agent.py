@@ -118,6 +118,41 @@ def _repair_json_for_parse(s: str) -> str:
     s = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
     return s
 
+
+# ── Fabricated-Glint detector (Brief 48 → Brief 51) ──────────────────────────────────────────────
+# A FABRICATED glint is the model imitating the system's injected tool-result line: a line that STARTS
+# with "Glint:" / "Glint from <tool>:" (optionally markdown-decorated). A "Glint:" embedded mid-prose
+# ("**Bare Glint:**", "a fabricated `Glint:`") is ANSWER TEXT and must NOT trip the guard. Anchoring to a
+# LINE START is marker-independent — it supersedes Brief 48's "Final Answer:" gate, which only fired when
+# the model used that literal marker; the 06-27 boot-test showed the model answers off-format (no marker),
+# so the gate never engaged and Q13 still truncated (06-22e/06-24e/06-25e).
+_GLINT_RE = re.compile(r'(?m)^[ \t>#*`\-]*Glint(?:\s+from\s+[\w._-]+)?\s*:', re.IGNORECASE)
+
+
+def _detect_fabricated_glint(raw_content: str):
+    """Return (has_glint, pre_glint). has_glint is True ONLY when some line in raw_content begins with a
+    glint token (a fabricated tool-result line); pre_glint is the text before it. Prose that merely
+    mentions 'Glint:' mid-line is never flagged. Pure + module-level so it is unit-testable both ways
+    (tests/test_glint_detector.py)."""
+    m = _GLINT_RE.search(raw_content)
+    if not m:
+        return False, None
+    return True, raw_content[:m.start()].strip()
+
+
+# ── Real-action detector (Brief 52) ──────────────────────────────────────────────────────────────
+# A REAL action is the model emitting "Action: [...]" — a line that STARTS with "Action:" (optionally
+# markdown-decorated), the format the system prompt mandates. An "Action:" embedded mid-prose ("the model
+# writes `Action: [...]`") is ANSWER TEXT (a self-referential answer about the ReAct loop), NOT a tool call.
+# Same line-start anchor as the glint detector (Brief 51). Used so the loop doesn't try to PARSE a prose
+# "Action:" as a tool call and lose the real answer (2026-06-28 Q13: parse failed -> "already answered" trap).
+_ACTION_LINE_RE = re.compile(r'(?m)^[ \t>#*`\-]*Action\s*:', re.IGNORECASE)
+
+
+def _has_line_start_action(raw_content: str) -> bool:
+    """True only when a LINE begins with an Action token (a real tool-call attempt), not a prose mention."""
+    return bool(_ACTION_LINE_RE.search(raw_content))
+
 from .crud import crud
 from .session_logger import slog
 from .tool_executor import execute_deliberate, execute_fast
@@ -1339,6 +1374,11 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 if on_step_update:
                     await on_step_update(f"Running {tool_name}...", type="status")
                 tool_result = await self._execute_fast_tool(tool_name, args, task_id=task_id)
+                # Log the RAW tool output (truncated) — FAST only logged the formatted response, which made
+                # a tool-vs-formatter failure opaque (2026-06-24: whatsapp_missed's real "no match" was
+                # invisible until the raw output was reconstructed by hand). Observability parity with the
+                # ReAct loop's Glint logging.
+                slog.info(f">> [FAST] tool result: {str(tool_result)[:500]}")
                 if tool_result.startswith("Error"):
                     raise ValueError(tool_result)
                 # Register resource into live ledger (Layer 3)
@@ -1648,10 +1688,11 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
             await asyncio.sleep(0.05)  # yield to event loop so UI updates flush before next turn
 
-            # Matches both "Glint:" and "Glint from tool_name:" hallucination patterns
-            _glint_re = re.compile(r'Glint(?:\s+from\s+[\w._-]+)?\s*:', re.IGNORECASE)
-            has_glint = bool(_glint_re.search(raw_content))
-            pre_glint = _glint_re.split(raw_content)[0].strip() if has_glint else None
+            # Brief 51: a fabricated glint is a LINE that STARTS with "Glint:" / "Glint from <tool>:"
+            # (see _detect_fabricated_glint). Marker-independent — supersedes Brief 48's "Final Answer:"
+            # gate: a "Glint:" embedded in answer prose ("**Bare Glint:**") no longer trips the guard,
+            # while a real bare/inline fabrication (its own line starting with Glint:) still is caught.
+            has_glint, pre_glint = _detect_fabricated_glint(raw_content)
 
             if has_glint and "Action:" not in raw_content:
                 # Bare fabricated Glint — no Action at all
@@ -1698,7 +1739,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # below then wasted a whole turn (~9/run, measured) making it re-send. The marker IS the
             # completion signal: if it's present with no Action, accept the turn as the Final Answer
             # on ANY turn. (The [[TASK: …]] marker is stripped downstream by _parse_completion.)
-            if _TASK_MARKER_RE.search(response_text) and "Action:" not in response_text:
+            if _TASK_MARKER_RE.search(response_text) and not _has_line_start_action(response_text):
                 final = (response_text.split("Final Answer:")[-1].strip()
                          if "Final Answer:" in response_text else response_text.strip())
                 if on_step_update:
@@ -1770,6 +1811,23 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         "Re-emit your Thought and follow it with an Action now."
                     ))
                 continue
+
+            # Brief 52: a SUBSTANTIVE turn with NO line-start Action (so any "Action:" in it is prose), no
+            # "Final Answer:" and no "Thought:", is a COMPLETE answer the model delivered directly — return it
+            # rather than trying to parse the prose "Action:" as a tool call and looping into the
+            # "already answered" meta-response trap (2026-06-28 Q13: a self-referential answer that DESCRIBES
+            # the loop, so it contains "Action:"/"Glint:" as prose). A real (even malformed) action is at a
+            # line start, so it still routes to parse_actions below; a Thought-bearing preamble is excluded.
+            if (not _has_line_start_action(response_text)
+                    and "Final Answer:" not in response_text
+                    and "Thought:" not in response_text
+                    and len(response_text.strip()) >= 150):
+                slog.warning(f"   [Loop] Turn {turn_count}: substantive answer, no line-start Action — "
+                             f"delivering (Brief 52: a prose 'Action:'/'Glint:' is not a tool call).")
+                slog.info(f">> [DELIBERATE] Final Answer (implicit, Brief 52):\n{response_text}")
+                if on_step_update:
+                    await on_step_update(response_text.strip(), type="stream", turn_id=turn_count)
+                return response_text, deliberate_usage_list
 
             # Parse all actions
             actions = self.parse_actions(response_text)

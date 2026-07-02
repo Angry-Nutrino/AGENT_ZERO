@@ -32,9 +32,14 @@ IGNORED_PATTERNS: list = [
     ".pkl",
     ".tmp.",             # Editor temp files (e.g., agent.py.tmp.xxxxx) — ignore, debounce real file
     ".memory.json.",     # crud._save_memory atomic-write temp (.memory.json.XXXX.tmp, unique per write) — ignore
+    "admissibility_ledger",  # BRIEF_54 gate audit ledger (+ its .admissibility_ledger.* temps via substring) —
+                             # written on every gated action; must never spawn file_change tasks
     "ambient.json",      # A0 watcher store (+ its .ambient.json.* temps match via substring) — flushes
     "ambient_patterns.json",  # backend-derived baseline. Without these, every ~30s flush spawns a
     "ambient_watch.log",      # file_change task. (ambient.py CODE edits still trigger normally.)
+    "ambient_shadow.jsonl",   # A2 Y1c shadow log (loop writes candidate remarks here in shadow mode)
+    "ambient_loop_state.json", # A2 Y1c cursor state (+ .tmp via substring); both are runtime, not code
+    "ambient_ledger.json",    # A2 Y1e live feed + 👍/👎 store (runtime, written on every nudge/vote)
     ".swp",              # Vim/Neovim swap files
     ".swo",              # Vim/Neovim swap files (older)
     "node_modules",      # JS deps. An npm install under core_logic/interface/ emitted 12,640

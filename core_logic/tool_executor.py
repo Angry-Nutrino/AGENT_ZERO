@@ -22,6 +22,7 @@ import os
 import re
 from .session_logger import slog
 from .resource_ledger import resource_ledger
+from . import admissibility
 
 # ── Filesystem tools whose paths we track in filesystem_map ──────────────────
 _FS_PATH_TOOLS = frozenset({
@@ -231,7 +232,7 @@ from .tools import analyze_image_grok
 NATIVE_TOOLS = frozenset({
     "web_search", "python_repl", "date_time", "vision_tool",
     "consult_archive", "query_task_status", "tool_search", "ambient_recall",
-    "episodic_search", "whatsapp_missed",
+    "episodic_search", "whatsapp_missed", "ocr_pdf",
 })
 
 
@@ -246,6 +247,29 @@ async def _execute_mcp(server: str, tool_name: str, args: dict, mcp_client, task
     before either wrote — the second then silently clobbered the first, the exact
     read-modify-write hazard the ledger exists to stop.
     """
+    # ── Admissibility gate (BRIEF_54 phase 0) — BEFORE any dispatch/lock. Mutating tools only;
+    # µs when off/shadow (local adapters). In enforce mode a DENY/REVIEW blocks the action and
+    # returns an Error-string, which rides the EXISTING failure machinery (FAST→DELIBERATE
+    # escalation / ReAct adaptation) — the agent is never halted, only the one action.
+    decision = admissibility.gate(tool_name, args, task_id=task_id)
+    if decision["enforced"]:
+        slog.info(f">> [Admissibility] {decision['verdict']} '{tool_name}' — {decision['reason']} "
+                  f"(receipt {decision['receipt_id']})")
+        if decision["verdict"] == admissibility.DENY:
+            return (f"Error: Action denied by admissibility gate — {decision['reason']} "
+                    f"(receipt {decision['receipt_id']}). This action was NOT executed.")
+        # REVIEW: hold + best-effort Telegram note (no-ops if Telegram unconfigured).
+        try:
+            from .telegram_bot import notifier
+            asyncio.create_task(notifier.send(
+                f"[Admissibility] Action HELD for review: {tool_name} — {decision['reason']} "
+                f"(receipt {decision['receipt_id']})"))
+        except Exception:
+            pass
+        return (f"Error: Action held for review by admissibility gate — {decision['reason']} "
+                f"(receipt {decision['receipt_id']}). This action was NOT executed; "
+                f"Alkama has been notified for approval.")
+
     if task_id and tool_name == "write_file":
         path = args.get("path", "")
         if path:
@@ -327,7 +351,7 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
             return await asyncio.to_thread(run_python_code, args.get("code", ""))
 
         elif tool_name == "date_time":
-            return await asyncio.to_thread(get_time_date)
+            return await asyncio.to_thread(get_time_date, int(args.get("offset_days", 0) or 0))  # Brief 50
 
         elif tool_name == "consult_archive":
             return await asyncio.to_thread(consult_archive, args.get("query", ""))
@@ -363,6 +387,11 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
         elif tool_name == "whatsapp_missed":
             from .tools import whatsapp_missed as _wm
             return await asyncio.to_thread(_wm, args.get("query", ""), args.get("limit", 20))
+
+        elif tool_name == "ocr_pdf":
+            from .tools import ocr_pdf as _ocr
+            return await asyncio.to_thread(_ocr, args.get("path", "") or args.get("query", ""),
+                                           args.get("max_pages", 10), args.get("question", ""))
 
         elif tool_name == "tool_search":
             # tool_search in FAST is an edge case — route to DELIBERATE
@@ -474,6 +503,11 @@ async def execute_deliberate(
             from .tools import whatsapp_missed as _wm
             (q,) = _extract_param(query, "query")
             return await asyncio.to_thread(_wm, q or "", 20)
+
+        elif tool_name == "ocr_pdf":
+            from .tools import ocr_pdf as _ocr
+            (pth,) = _extract_param(query, "path")
+            return await asyncio.to_thread(_ocr, pth or query.strip(), 10, "")
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:

@@ -16,6 +16,15 @@ import uuid as _uuid
 # --- PATH SETUP ---
 sys.path.append(os.path.join(os.path.dirname(__file__), "core_logic"))
 
+# --- HF CACHE REDIRECT (MUST precede any HuggingFace import below) ---
+# Point the HuggingFace cache into the repo (.hf_cache) instead of ~/.cache/huggingface.
+# The user-profile cache became permission-walled to non-interactive / sandboxed contexts
+# (2026-06-21 — collision + ACL state that survived icacls /reset and a reboot), which
+# blocked every backend boot (MiniLM/Whisper would not load). A repo-local cache is writable
+# by ALL contexts (cron, tool, interactive), so the backend now boots uniformly everywhere.
+# setdefault so an explicit HF_HOME in the environment still wins.
+os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".hf_cache"))
+
 from core_logic.agent import Clara_Agent
 from core_logic.task_graph import TaskGraph
 from core_logic.event_queue import EventQueue, make_event
@@ -48,6 +57,8 @@ mcp_client: MCPClient | None = None
 voice: VoiceCoordinator | None = None
 telegram_bot: TelegramBot | None = None
 _whatsapp_task = None   # Brief 45 P1 — the read-only WhatsApp poller task (dormant unless WHATSAPP_ENABLED)
+_ambient_task = None    # Brief 40 Y1c — the A2 ambient shadow loop task (dormant unless A2_MODE=shadow|live)
+_a3_task = None         # Brief 36 F.7 — the A3 screen sensor task (dormant unless A3_SCREEN_SENSOR=on)
 active_connections: set = set()  # live WebSocket connections — used for speaking_start/stop broadcast
 
 async def _broadcast(payload: dict) -> None:
@@ -119,6 +130,23 @@ async def _whatsapp_poll_loop():
         except Exception as e:
             slog.warning(f"[WhatsApp] poll loop error: {e}")
         await asyncio.sleep(2)
+
+
+async def _a3_screen_loop():
+    """A3 screen sensor (Brief 36 F.7) — DORMANT unless A3_SCREEN_SENSOR=on. Each cycle: capture the screen,
+    store ONLY a one-line Gemini description (the raw image is captured in-memory, used for the Gemini call,
+    then deleted — never persisted). Self-gates per cycle, so disarming mid-run takes effect next tick.
+    Read-only; non-fatal. Privacy contract lives in core_logic/screen_sensor.py."""
+    from core_logic.screen_sensor import run_once, interval_seconds, a3_enabled
+    while True:
+        try:
+            if a3_enabled():
+                desc = await asyncio.to_thread(run_once)
+                if desc:
+                    slog.info(f"[A3] screen: {desc[:80]}")
+        except Exception as e:
+            slog.warning(f"[A3] loop error: {e}")
+        await asyncio.sleep(interval_seconds())
 
 
 @asynccontextmanager
@@ -272,6 +300,36 @@ async def lifespan(app: FastAPI):
     else:
         slog.info("[API] WhatsApp poller dormant (set WHATSAPP_ENABLED in .env to activate).")
 
+    # A2 ambient shadow loop (Brief 40 Y1c) — DORMANT unless A2_MODE is shadow|live in .env. In shadow it
+    # logs candidate proactive remarks to ambient_shadow.jsonl (sends nothing); off = not even started.
+    # Non-fatal like the others. Live delivery needs an injected notifier sink, so shadow can never spam.
+    global _ambient_task
+    _ambient_task = None
+    try:
+        from core_logic.ambient_loop import ambient_shadow_loop, a2_mode, set_broadcast
+        set_broadcast(_broadcast)   # live sink pushes ambient nudges to the UI via this primitive
+        if a2_mode() != "off":
+            _ambient_task = asyncio.create_task(ambient_shadow_loop())
+            slog.info(f"[API] A2 ambient loop started (A2_MODE={a2_mode()}).")
+        else:
+            slog.info("[API] A2 ambient loop dormant (set A2_MODE=shadow|live in .env).")
+    except Exception as e:
+        slog.warning(f"[API] A2 ambient loop failed to start ({e}) — continuing without it.")
+
+    # A3 screen sensor (Brief 36 F.7) — DORMANT unless A3_SCREEN_SENSOR=on. Captures the screen on a slow
+    # cadence and stores ONLY a one-line Gemini description (never the raw image). Off by default; non-fatal.
+    global _a3_task
+    _a3_task = None
+    try:
+        from core_logic.screen_sensor import a3_enabled, interval_seconds
+        if a3_enabled():
+            _a3_task = asyncio.create_task(_a3_screen_loop())
+            slog.info(f"[API] A3 screen sensor ARMED (interval {interval_seconds() / 60:.0f} min).")
+        else:
+            slog.info("[API] A3 screen sensor dormant (set A3_SCREEN_SENSOR=on in .env to arm).")
+    except Exception as e:
+        slog.warning(f"[API] A3 screen sensor failed to start ({e}) — continuing without it.")
+
     yield  # server is live here
 
     # Shutdown
@@ -284,6 +342,10 @@ async def lifespan(app: FastAPI):
     close_bench_log()
     if _whatsapp_task:
         _whatsapp_task.cancel()
+    if _ambient_task:
+        _ambient_task.cancel()
+    if _a3_task:
+        _a3_task.cancel()
     if voice:
         voice.unload()
         slog.info("[API] Voice system unloaded.")
@@ -408,26 +470,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg_type   = payload.get("type", "")
                 message_id = payload.get("message_id", str(_uuid.uuid4()))
 
-                if msg_type == "voice_start":
-                    if _voice_ready():
-                        voice.start_recording()
-                    continue
-
-                if msg_type == "voice_stop":
-                    if _voice_ready():
-                        text = await voice.stop_recording_async()
-                        if text:
-                            await websocket.send_json({
-                                "type": "user_transcript",
-                                "content": text,
-                                "message_id": message_id,
-                                "source": "voice",  # Brief 43.3 — live source badge on the voice user bubble
-                            })
-                            asyncio.create_task(
-                                handle_message(text, None, None, message_id, via_voice=True)
-                            )
-                    continue
-
+                # The F4 in-interface voice path (voice_start/voice_stop WS handlers) was RETIRED 2026-06-24:
+                # the standalone F10 hotkey (own-mic → POST /voice_query) replaced it, and the frontend no
+                # longer sends these. The backend's persistent-mic capture (start_recording/stop_recording_async
+                # in voice.py) is now orphaned — a follow-up cleanup. voice_interrupt stays (TTS-stop is still
+                # a valid capability via interrupt_speech).
                 if msg_type == "voice_interrupt":
                     if voice:
                         voice.interrupt_speech()
@@ -650,6 +697,26 @@ async def voice_query_endpoint(req: VoiceQueryRequest):
         threading.Thread(target=v.speak, args=(response,), kwargs={"block": True}, daemon=True).start()
     await _broadcast({"type": "final_answer", "content": response, "message_id": mid, "source": "voice"})
     return {"transcript": transcript, "response": response}
+
+
+@app.get("/ambient_feed")
+async def ambient_feed_endpoint(limit: int = 50):
+    """Recent ambient nudges for the interface feed (Brief 40 Y1e — passive, novelty-gated). The UI loads
+    this on connect so the feed is populated even for nudges surfaced while it was closed. Local-only."""
+    from core_logic.ambient_loop import read_ledger
+    return {"feed": read_ledger(limit=max(1, min(int(limit or 50), 200)))}
+
+
+class AmbientFeedback(BaseModel):
+    id: str
+    vote: str            # "up" | "down" — the 👍/👎 calibration tap
+
+
+@app.post("/ambient_feedback")
+async def ambient_feedback_endpoint(fb: AmbientFeedback):
+    """Record a 👍/👎 on an ambient nudge (Brief 40 §4 — calibrate the novelty picks). Local-only."""
+    from core_logic.ambient_loop import set_feedback
+    return {"ok": set_feedback(fb.id, fb.vote)}
 
 
 class WhatsAppIncoming(BaseModel):

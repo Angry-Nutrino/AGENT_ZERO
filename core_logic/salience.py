@@ -28,8 +28,9 @@ SURFACE, HOLD, DROP = "surface", "hold", "drop"
 
 # ── Budget: a daily token bucket with per-class cooldowns ──────────────────────
 class Budget:
-    """Daily cap (no accumulation) + optional per-class cooldown. Ambient uses per_day=4; the
-    WhatsApp drop-everything tier BYPASSES the budget entirely (priority never gets capped)."""
+    """Optional daily cap (per_day=None -> NO cap) + per-class cooldown. The ambient feed dropped its
+    daily cap 2026-06-24 (passive interface delivery doesn't interrupt, so scarcity isn't load-bearing)
+    but KEEPS the cooldown for dedup (one nudge per session). WhatsApp drop-everything BYPASSES both."""
     def __init__(self, per_day=4, cooldowns=None):
         self.per_day = per_day
         self.cooldowns = cooldowns or {}     # class -> min seconds between two of that class
@@ -45,7 +46,7 @@ class Budget:
     def allow(self, cls=None, now=None):
         now = now if now is not None else time.time()
         self._roll(now)
-        if self._count >= self.per_day:
+        if self.per_day is not None and self._count >= self.per_day:   # per_day=None -> no daily cap
             return False
         cd = self.cooldowns.get(cls)
         if cd is not None and cls in self._last_by_class and (now - self._last_by_class[cls]) < cd:
@@ -61,21 +62,18 @@ class Budget:
 
     def remaining(self, now=None):
         self._roll(now if now is not None else time.time())
-        return max(0, self.per_day - self._count)
+        return None if self.per_day is None else max(0, self.per_day - self._count)
 
 
-# ── Timing etiquette: hard NOs (any True -> never surface, regardless of score) ─
+# ── Manual mute hook (the interrupt/timing layer was removed 2026-06-24 — passive feed) ─
 def timing_blocked(ctx):
-    """ctx: dict with optional flags. Returns a reason string if blocked, else None."""
+    """ctx: dict with optional flags. Returns a reason string if blocked, else None. These are the
+    HARD timing NOs from Brief 40 — 'is now a decent moment?' — checked AFTER salience+budget clear."""
     ctx = ctx or {}
-    if ctx.get("ptt_held"):            return "PTT held"
-    if ctx.get("task_in_flight"):      return "a user task is in flight"
-    if ctx.get("clara_speaking"):      return "Clara is speaking"
-    if ctx.get("dnd"):                 return "DND window"
-    mins = ctx.get("mins_since_interaction")
-    floor = ctx.get("min_quiet_mins", 0)
-    if mins is not None and floor and mins < floor:
-        return f"only {mins:.1f} min since last interaction (< {floor})"
+    # Interrupt-timing inference (deep_work / clock-DND / min_quiet) was REMOVED 2026-06-24: A2 delivers
+    # passively to the interface (no sound/poke), so a nudge cannot interrupt — there is nothing to gate.
+    # timing_blocked is kept only as the hook for a future MANUAL dnd flag ({"dnd": True} = user muted).
+    if ctx.get("dnd"):                 return "DND (manual mute)"
     return None
 
 
@@ -87,31 +85,119 @@ def _cosine(a, b):
     return dot / (na * nb) if na and nb else 0.0
 
 
+def _clamp01(x):
+    return max(0.0, min(1.0, x))
+
+
 # ── Ambient gate (Brief 40): salience = novelty × relevance × actionability ─────
 _ACTIONABILITY = {
-    "battery_low": 0.9, "meeting_soon": 0.9, "odd_hours": 0.5,
+    # odd_hours 0.5 -> 0.6 (2026-06-24, tuned against the shadow pass): late-night activity scored 0.429,
+    # a hair under 0.45; at 0.6 a novel odd-hour (novelty >= 0.75) clears the bar. Volume is held sane by
+    # the per-class cooldown (one nudge per session) + the 4/day budget — so this fires the class without
+    # spamming. Refine further from accumulated shadow data.
+    "battery_low": 0.9, "meeting_soon": 0.9, "odd_hours": 0.6,
     "new_app_seen": 0.25, "long_session": 0.5, "off_rhythm": 0.6, "default": 0.3,
 }
+
+# Per-class cooldowns (seconds) for the AMBIENT default budget — a SUSTAINED session (e.g. a long
+# late-night browse) must yield ONE nudge, not one per sample. The 2026-06-24 shadow pass showed ~12
+# near-identical odd_hours candidates for a single 23:2x session; without a cooldown, any threshold that
+# fires would spam. Budget already supports cooldowns — the ambient gate just needs to use them.
+_AMBIENT_COOLDOWNS = {"battery_low": 3600, "odd_hours": 7200, "new_app_seen": 10800, "long_session": 7200}
+
+# ── Observation classifier (Y1b, Brief 40): raw A0 record -> a candidate obs {class, ...} or None ─
+# Deterministic, NO LLM. Decides WHAT KIND of moment a record is (which sets actionability + which
+# novelty sub-formula runs); the gate then decides whether it is salient enough. Returns None to DROP
+# a record that is not a candidate at all (healthy/plugged battery, routine session transitions) so the
+# gate never wastes a score on it. off_rhythm/long_session need session-duration state A0 does not yet
+# expose -> not emitted in this step (documented follow-up); session_rhythm records currently drop.
+BATTERY_LOW_PCT   = 25       # unplugged AND at/below this -> battery_low candidate
+ODD_HOUR_DAY_FRAC = 0.25     # active at this hour on < this fraction of observed days -> odd_hours
+_NIGHT_HOURS      = set(range(0, 6))   # fallback "odd" hours when there is no baseline yet
+
+
+def _is_odd_hour(hour, baseline):
+    """An hour is 'odd' if Alkama is rarely active then. Baseline-relative when available
+    (days_active(hour)/days_observed < ODD_HOUR_DAY_FRAC); falls back to night hours otherwise."""
+    if not baseline:
+        return hour in _NIGHT_HOURS
+    days_obs = baseline.get("days_observed", 0)
+    if not days_obs:
+        return hour in _NIGHT_HOURS
+    return (baseline.get("hour_days", {}).get(hour, 0) / days_obs) < ODD_HOUR_DAY_FRAC
+
+
+def classify(record, baseline=None, now=None):
+    """Raw A0 record ({sensor, ts, payload}) -> classified candidate obs, or None to DROP it."""
+    sensor  = record.get("sensor")
+    payload = record.get("payload") or {}
+    ts      = str(record.get("ts", ""))
+    hour    = int(ts[11:13]) if len(ts) >= 13 else time.localtime(now or time.time()).tm_hour
+    base    = {"hour": hour, "ts": ts, "sensor": sensor}
+
+    if sensor == "system_state":
+        pct = payload.get("battery_pct")
+        if pct is not None and not payload.get("plugged", False) and pct <= BATTERY_LOW_PCT:
+            return {**base, "class": "battery_low", "battery_pct": pct,
+                    "text": f"battery {pct}% and unplugged"}
+        return None                                  # healthy / plugged battery is not a candidate
+
+    if sensor == "active_window":
+        proc = str(payload.get("process", "")).lower()
+        if not proc:
+            return None
+        title = str(payload.get("title", ""))
+        cls = "odd_hours" if _is_odd_hour(hour, baseline) else "new_app_seen"
+        return {**base, "class": cls, "process": proc, "title": title, "text": title or proc}
+
+    return None                                      # session_rhythm / unknown: no candidate in Step 1
 
 
 class AmbientGate:
     def __init__(self, budget=None, threshold=0.45):
-        self.budget = budget or Budget(per_day=4)
+        # No daily cap (per_day=None) — the passive feed isn't interrupt-scarce; the cooldown still dedups.
+        self.budget = budget or Budget(per_day=None, cooldowns=_AMBIENT_COOLDOWNS)
         self.threshold = threshold
 
     @staticmethod
     def novelty(obs, baseline):
-        """Deviation from the A0 baseline (0..1). baseline: {process_hour_freq:{(proc,hour):p}, ...}.
-        Unseen process at this hour -> ~1; the usual app at the usual hour -> ~0."""
+        """PER-CLASS deviation from the A0 baseline (0..1), baseline-relative so it personalizes (Y1a):
+        - new_app_seen -> RECOGNITION: 1 - days_seen(proc,hour)/days_observed. A daily 2pm habit -> ~0
+          even if it's the minority app that hour (the share-based bug); a never-at-3am app -> ~1.
+        - odd_hours    -> TIMING: 1 - days_active(hour)/days_observed. Active at an hour he rarely is -> ~1.
+        - battery_low  -> trajectory: 1 - battery_pct/100 (lower = more novel/urgent; actionability leads).
+        - off_rhythm   -> session-start deviation (rhythm_dev; default until the rhythm baseline lands).
+        - default      -> legacy share signal (1 - process_hour_freq share), preserving old behavior."""
         baseline = baseline or {}
+        cls = obs.get("class", "default")
+        days_obs = baseline.get("days_observed") or baseline.get("meta", {}).get("days_covered", 0)
+
+        if cls == "battery_low":
+            pct = obs.get("battery_pct")
+            return _clamp01(1.0 - pct / 100.0) if pct is not None else 0.7
+
+        if cls == "odd_hours":
+            if not days_obs:
+                return 0.6
+            active = baseline.get("hour_days", {}).get(obs.get("hour"), 0)
+            return _clamp01(1.0 - active / days_obs)
+
+        if cls == "new_app_seen":
+            proc = str(obs.get("process", "")).lower()
+            if not proc or not days_obs:
+                return 0.5
+            seen = baseline.get("proc_hour_days", {}).get(f"{proc}|{obs.get('hour')}", 0)
+            return _clamp01(1.0 - seen / days_obs)
+
+        if cls == "off_rhythm":
+            return _clamp01(obs.get("rhythm_dev", 0.6))
+
+        # default: legacy share-based fallback (frequency of (proc,hour) within that hour)
         proc = str(obs.get("process", "")).lower()
-        hour = obs.get("hour")
-        freqs = baseline.get("process_hour_freq", {})
-        # frequency of (proc,hour) as a share of that hour's observations; novelty = 1 - share
-        p = freqs.get(f"{proc}|{hour}")
+        p = baseline.get("process_hour_freq", {}).get(f"{proc}|{obs.get('hour')}")
         if p is None:
-            return 1.0 if proc else 0.5         # never seen at this hour
-        return max(0.0, min(1.0, 1.0 - p))
+            return 1.0 if proc else 0.5
+        return _clamp01(1.0 - p)
 
     @staticmethod
     def relevance(obs, discourse_vecs, encode):
@@ -252,23 +338,65 @@ if __name__ == "__main__":
     check(not bc.allow("battery_low", now=t0 + 60), "cooldown blocks within 1h")
     check(bc.allow("battery_low", now=t0 + 3601), "cooldown clears after 1h")
 
-    # ── Timing ────────────────────────────────────────────────────────────────
-    check(timing_blocked({"clara_speaking": True}) is not None, "timing blocks while speaking")
-    check(timing_blocked({"mins_since_interaction": 1, "min_quiet_mins": 5}) is not None, "timing blocks too-soon")
-    check(timing_blocked({"mins_since_interaction": 30, "min_quiet_mins": 5}) is None, "timing ok when quiet")
+    # ── Timing (passive feed: only the manual-DND mute hook remains) ────────────
+    check(timing_blocked({"dnd": True}) is not None, "manual DND mute blocks")
+    check(timing_blocked(None) is None and timing_blocked({}) is None, "no mute -> never timing-blocked")
+
+    # ── classify (Y1b) ────────────────────────────────────────────────────────
+    cb = {"days_observed": 10, "hour_days": {10: 10, 3: 0}}        # active 10am daily, never 3am
+    check(classify({"sensor": "system_state", "ts": "2026-06-23T14:00:00",
+                    "payload": {"battery_pct": 100, "plugged": True}}) is None,
+          "classify drops a plugged/healthy battery")
+    bl = classify({"sensor": "system_state", "ts": "2026-06-23T14:00:00",
+                   "payload": {"battery_pct": 15, "plugged": False}})
+    check(bl and bl["class"] == "battery_low" and bl["battery_pct"] == 15,
+          f"classify -> battery_low when low+unplugged (got {bl})")
+    aw = classify({"sensor": "active_window", "ts": "2026-06-23T10:00:00",
+                   "payload": {"process": "Code.exe", "title": "x"}}, cb)
+    check(aw and aw["class"] == "new_app_seen" and aw["process"] == "code.exe",
+          f"classify -> new_app_seen at a usual hour (got {aw})")
+    odd = classify({"sensor": "active_window", "ts": "2026-06-23T03:00:00",
+                    "payload": {"process": "Code.exe", "title": "x"}}, cb)
+    check(odd and odd["class"] == "odd_hours", f"classify -> odd_hours at a rarely-active hour (got {odd})")
+    check(classify({"sensor": "session_rhythm", "ts": "2026-06-23T10:00:00",
+                    "payload": {"state": "active", "event": "watcher_start"}}) is None,
+          "classify drops routine session_rhythm")
+
+    # ── novelty: RECOGNITION (Y1a) — the daily-but-minority app must NOT read as novel ──
+    recog = {"days_observed": 10, "proc_hour_days": {"code.exe|14": 10, "neverseen.exe|14": 0},
+             "hour_days": {14: 10}}
+    nv = AmbientGate.novelty({"process": "code.exe", "hour": 14, "class": "new_app_seen"}, recog)
+    check(nv <= 0.05, f"recognition: daily app at usual hour -> ~0 novelty (got {nv})")
+    nv2 = AmbientGate.novelty({"process": "neverseen.exe", "hour": 14, "class": "new_app_seen"}, recog)
+    check(nv2 >= 0.95, f"recognition: never-seen app -> ~1 novelty (got {nv2})")
 
     # ── AmbientGate ───────────────────────────────────────────────────────────
     ag = AmbientGate(budget=Budget(per_day=4), threshold=0.45)
-    base = {"process_hour_freq": {"code.exe|10": 0.9}}    # code at 10am is the norm
+    base = {"days_observed": 10,
+            "proc_hour_days": {"code.exe|10": 9},   # code at 10am seen 9 of 10 days = habitual
+            "hour_days": {10: 10, 3: 0},            # active at 10am daily; never at 3am
+            "process_hour_freq": {"code.exe|10": 0.9}}
     d, det = ag.evaluate({"process": "code.exe", "hour": 10, "class": "new_app_seen"}, base, now=t0)
-    check(d == HOLD, f"ambient HOLDs the usual app (got {d}, {det})")
-    d, det = ag.evaluate({"process": "setup.tmp", "hour": 23, "class": "off_rhythm", "text": "installer at 11pm"},
+    check(d == HOLD, f"ambient HOLDs the habitual app (recognition; got {d}, {det})")
+    # new_app_seen is informational-only by design (actionability 0.25 caps it below threshold) —
+    # even a never-seen app does NOT surface on its own.
+    d, det = ag.evaluate({"process": "neverseen.exe", "hour": 12, "class": "new_app_seen"}, base, now=t0)
+    check(d == HOLD, f"new_app_seen alone never surfaces (act 0.25 cap; got {d}, {det})")
+    # battery_low (low + unplugged) clears: novelty 0.85 × act 0.9 = 0.765
+    d, det = ag.evaluate({"class": "battery_low", "battery_pct": 15, "hour": 14, "text": "battery 15%"},
                          base, now=t0)
-    check(d == SURFACE, f"ambient SURFACEs a novel off-rhythm event (got {d}, {det})")
+    check(d == SURFACE, f"ambient SURFACEs a low unplugged battery (got {d}, {det})")
+    # odd_hours: active at 3am where days_active=0 -> novelty 1 × act 0.5 = 0.5 >= 0.45
+    d, det = ag.evaluate({"process": "foo.exe", "hour": 3, "class": "odd_hours", "text": "foo at 3am"},
+                         base, now=t0 + 10)
+    check(d == SURFACE, f"ambient SURFACEs activity at a rarely-active hour (got {d}, {det})")
+    # odd_hours at a USUAL hour holds (active 10am daily -> novelty 0)
+    d, det = ag.evaluate({"process": "foo.exe", "hour": 10, "class": "odd_hours"}, base, now=t0 + 20)
+    check(d == HOLD, f"odd_hours at a usual hour holds (got {d}, {det})")
     # budget exhaustion holds even a salient one
     ag2 = AmbientGate(budget=Budget(per_day=1), threshold=0.45)
-    ag2.evaluate({"process": "x.exe", "hour": 3, "class": "off_rhythm"}, {}, now=t0)
-    d, _ = ag2.evaluate({"process": "y.exe", "hour": 3, "class": "off_rhythm"}, {}, now=t0 + 1)
+    ag2.evaluate({"class": "battery_low", "battery_pct": 10, "hour": 3}, {}, now=t0)
+    d, _ = ag2.evaluate({"class": "battery_low", "battery_pct": 10, "hour": 3}, {}, now=t0 + 1)
     check(d == HOLD, "ambient HOLDs once budget exhausted")
 
     # ── MessageGate ───────────────────────────────────────────────────────────

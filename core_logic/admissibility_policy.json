@@ -1,0 +1,7 @@
+{
+  "_doc": "Alkama-authored local admissibility policy (BRIEF_54 phase 0). Used when ADMISSIBILITY_ADAPTER=policy. The agent doesn't self-authorize; this written policy does. deny/review_tools = exact MCP tool names; deny_path_substrings = case-insensitive raw-path matches (checked locally, never leaves the machine); default = allow|review|deny.",
+  "deny_tools": ["kill_process", "force_terminate"],
+  "review_tools": [],
+  "deny_path_substrings": ["C:\\Windows", "System32", ".env", "memory.json"],
+  "default": "allow"
+}

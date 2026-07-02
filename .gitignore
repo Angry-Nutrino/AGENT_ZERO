@@ -39,12 +39,22 @@ core_logic/memory.json
 core_logic/ambient.json
 core_logic/ambient_patterns.json
 core_logic/.ambient.json.*
+core_logic/ambient_shadow.jsonl
+core_logic/ambient_loop_state.json*
+core_logic/ambient_ledger.json*
+core_logic/.ambient_loop_oneshot.tmp
+core_logic/ambient_screen.json
+core_logic/.ambient_screen.*
+a3_screen_*.png
 core_logic/memory.json.bak-*
 core_logic/memory.json.corrupt-*
 core_logic/.memory.json.*
 core_logic/archived_vault_facts.json
 faiss_index.bin
 faiss_index.pkl
+
+# --- HF MODEL CACHE (repo-local redirect; large model weights — never track) ---
+.hf_cache/
 
 # --- CONVERSATION STORE (real voice/interface/telegram/WhatsApp message content — personal) ---
 conversations/
@@ -87,3 +97,6 @@ jarvis_v2/
 .DS_Store
 Thumbs.db
 style.md
+core_logic/admissibility_ledger.json
+core_logic/.partner_a_key
+deadlines.md

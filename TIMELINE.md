@@ -1,5 +1,582 @@
 # CLARA Project Timeline
 
+## 2026-07-02
+
+[FEATURE] Telegram voice notes — local Whisper STT into the full pipeline (Alkama greenlit: "Build this").
+`core_logic/telegram_bot.py`: new `_handle_voice` handler, registered ONLY when `TELEGRAM_VOICE=on` (armed
+in .env; off = today's silently-ignored behavior). Flow: chat-id gate (same security as text) → download the
+OGG/Opus voice note to a temp file → transcribe LOCALLY via the already-loaded faster-whisper
+(`voice.transcribe_file`, Brief 44.1 — PyAV decodes ogg natively, no ffmpeg binary; audio never leaves the
+machine; temp deleted in finally) → echo the transcript back (🎤 "…") so Alkama can verify the STT → route
+through the SAME `submit_user_event` pipeline as typed text (full memory, mirror, typing indicator, reply).
+Refactor: `_handle_message`'s tail (mirror/typing/submit/reply) extracted into a shared `_process_text` used
+by both handlers — no duplication. Graceful degrade: voice system not loaded → polite "unavailable" reply;
+empty STT → "couldn't make out any speech". Validated: parse OK + boot-test (handler ARMED in log, bot
+polling, Whisper on CUDA, zero startup errors). END-TO-END (real voice note + refactored text path via
+Telegram) NEEDS ALKAMA'S PHONE — backend left running for the live test.
+
+[FEATURE] BRIEF_54 Phase 0 — pre-execution admissibility gate (Alkama greenlit: "build the gate + noop
+ledger + local policy ourselves"). New `core_logic/admissibility.py`: before a MUTATING MCP tool dispatches,
+the gate builds an ABSTRACT governance envelope (tool, intent, sha256(basename) path-hash, arg keys+lengths
+ONLY — never content/full paths), asks an adapter for ALLOW/REVIEW/DENY, and records every decision to a
+local atomic ring ledger (`admissibility_ledger.json`, mkstemp→fsync→replace, cap 2000). Adapters: `noop`
+(observe-only ALLOW) + `policy` (Alkama-authored rules in `core_logic/admissibility_policy.json` —
+deny/review tools, deny-path substrings checked locally, default verdict; the agent doesn't self-authorize,
+the written policy does). Modes: `shadow` (verdicts logged, NEVER blocks) / `enforce` (DENY → Error-string
+into the EXISTING failure machinery — FAST→DELIBERATE escalation / ReAct adaptation — agent never halted;
+REVIEW → hold + best-effort Telegram notify). Fail-open default (gate crash = allow + ledger the outage).
+Hook: ONE call at the top of `tool_executor._execute_mcp` (the shared FAST+DELIBERATE choke point, same spot
+as resource_ledger) — reads/searches/native tools never gate (µs overhead; `python_repl` exemption is a
+DOCUMENTED v1 hole). Wired: `environment.py` IGNORED_PATTERNS + `.gitignore` (ledger is runtime telemetry;
+policy file stays tracked), `.env` armed at phase 0 (GATE=on, ADAPTER=noop, MODE=shadow, FAIL=open).
+Validated: module self-test 7/7 (off-by-default silent, classification, abstract-envelope privacy incl.
+no-content-leak, policy deny/review/path/default, enforce flag, fail-open/closed, ring cap); live boot-test —
+write query via /query (memory_mode=none) executed normally in shadow, exactly 1 ledger entry
+(ALLOW/noop/shadow + receipt), envelope leak-check clean, probe cleaned, backend stopped. Enforce-branch
+live-fire deliberately deferred to the pilot demo (phase 2). partner A adapter = next phase (contract
+confirmed in BRIEF_54 §7). Fills the pre-action-authority gap flagged by the stability review and
+independently by ~8 governance founders.
+
+[FIX] `core_logic/screen_sensor.py` `_capture_to_temp` — privacy-relevant temp leak on the error path
+(busy-mode G2 sweep). `tempfile.mkstemp` creates the temp PNG *before* `img.save()`; if `save()` raised, the
+outer `except` returned `None` without deleting it → a partial/empty **raw screenshot orphaned on disk**,
+violating A3's "raw screenshot NEVER persists" privacy floor (and accumulating temps). Wrapped the save in its
+own try/except that removes the temp before returning `None`. Added self-test case (4) that forces a save
+failure (mocked `ImageGrab.grab`) and asserts no `a3_screen_*` temp leaks — fails pre-fix, passes post-fix.
+Untested-by-the-drill path (A3 is dormant/off), so this only ever surfaced when armed. Self-test 4/4 green.
+
+[FIX] `core_logic/tools.py` `ocr_pdf` — honored its "never raises" contract (busy-mode G2 sweep). The main
+body (text-layer probe `doc[i].get_text()` + `doc.page_count`) sat under a bare `try/finally` with no
+`except`, so an **encrypted or corrupt PDF** — a realistic input for a scanned-PDF OCR tool — would propagate
+an exception out instead of returning an error string (the per-page OCR loop was already guarded; the
+text-layer check wasn't). Added `except Exception → "Error: OCR failed while reading the PDF: {e}"`, keeping
+the `finally: doc.close()`. Added `tests/test_ocr_pdf.py` case (5): a `get_text()`-raising doc must return an
+error string, not raise (fails pre-fix). Test 5/5 green. `tools.py` tracked; `tests/` gitignored (R11).
+
+[UPDATE] The Drill — 06-30 EVENING (18/0/4) + 07-01 MORNING (17/0/5), **0 real Clara failures across both**
+(busy-mode lifetime 4, task 1). Both clean; the notable content is production-validation of the last few
+days' fixes. (1) **The count-parser fix went live and the 06-30m Q06 false-FAIL is resolved** — 07-01m ran
+with verifier self-test **41/41** (the cron picked up the 06-30 `_stated_total_conflict` noun-set broadening),
+and Q06 (`json.dumps`, 17/9) PASSED with no count-conflict (this run's phrasing was "17 matches", already
+covered; the new time/place/location/line nouns cover the 06-30m "17 times/5 hits" variant going forward).
+(2) **Brief 51+52 frictionless:** 06-30e Q13 delivered both fabricated-glint forms in ONE turn (was 3 on
+06-29e). (3) **Brief 50 date-math steady:** 06-30e Q21 (−12d → Thu 06-18), 07-01m Q21 (+10d → Sat 07-11),
+both times PASS. (4) **Layer-2 gold-seed calibration RESOLVED as a one-off** — 06-30m MISMATCH (known-real
+seed → `verifier_artifact`) was followed by MATCH on 06-30e AND 07-01m, so the under-self-blame drift was a
+blip, not a trend. (5) **Calibration good**, best on 07-01m (Q4 7-turn flagged precisely as "efficiency
+weakness, not a failure"); slightly over-strict on 06-30e (called correct-but-CHAT Q20 a "real failure").
+**Watch-item (process, not correctness):** 06-30e Q9 (`os.fork` negative) took 5 turns / 5 flags — a
+format-correction cascade (one malformed-JSON Action snowballing corrections) on a 1-turn search; no answer
+impact, intermittent (absent on 07-01m). Queued as a hardening candidate (see BACKLOG G13, Y5-adjacent —
+loop-behavior change → brief before touching). Rotation deferred (~26 climb-due accruing → dedicated batch).
+
+[FIX] Verifier count-parser — broadened `_stated_total_conflict` total-noun set to kill a RECURRING false-FAIL
+class [`tests/verification.py`, `tests/test_verification.py`]. 06-30m Q06 (`json.dumps`) false-FAILed: Clara
+answered correctly ("**17 times** across **9 files**… conversations.py with **5** hits"; ground-truth grep
+confirms 17/9), but the count-check captured only the per-file "5 **hits**" as the stated total because its
+noun set (`match(es)/occurrence/instance/result/hit`) did **not** include "**time**", so the correct total
+"17 times" was never read → "states total 5 vs true 17" → FAIL. Same CLASS as the 28-Jun fix (the `matches`
+-es gap on 06-27e/06-28m), recurring with new vocabulary — the model phrases a grand total with varied nouns.
+**Fix:** added `time / place / location / line` to cand-B's noun set (kept broad by design; comment documents
+why). Locked with a new fixture (n=79: "3 times … 2 hits" must PASS) → self-test **40 → 41 passed**; the
+wrong-total fixture (n=78) still FAILs (count-check not weakened); a direct call on Clara's exact Q06 phrasing
+now returns `None` (PASS). Q06 will PASS next run.
+
+[UPDATE] The Drill — 06-29 EVENING (18/0/4) + 06-30 MORNING (16/1/5), verifier self-test 40/40 at run time
+(41/41 after the count-parser fix). **0 real Clara failures across both runs.** Highlights: (1) **Brief 51 +
+52 validated in production** — 06-29e was the first cron after they shipped, and Q13 (the self-referential
+"two fabricated-glint forms" probe) DELIVERED BOTH FORMS IN FULL and PASSED. Its residual `hallucination-
+correction` flag was confirmed (session log) to be a CORRECT catch of a genuine mid-loop fabrication on an
+earlier turn — NOT a Brief-51 false-positive on the answer's `Glint:` prose (which delivered intact). The old
+06-27e "5 turns, passed by accident via the glint-cycle crutch" is gone; the answer now lands on its own. (2)
+The 06-30m **Q06 FAIL was a verifier artifact** (the count-parser "times"/"hits" gap above), fixed in-drill;
+0 real failures. (3) **Brief 50 holds** incl. month-crossing: Q21-30m (+10d) → Friday 2026-07-10 (June→July)
+PASS; 06-29e Q21 (−12d → Wed 2026-06-17) PASS. (4) **Q09-30m model Rule-19 behavior** — Clara sanity-checked
+the search tool (confirmed `os.replace` returns 13 hits) BEFORE reporting `yaml.load` absent. **Watch-item:**
+06-30m Layer-2 gold-seed MISMATCH — Clara classified the known-real gold seed (Q11, gold `negative_fabrication`)
+as `verifier_artifact`; her LIVE Q06 classification was correct, so this reads as over-generalizing the
+(correct) "it's the verifier" verdict onto the seed — a mild drift toward UNDER-self-blame. One data point;
+watch the gold seed over coming runs before acting. ~26 climb-due items now accrued across clean runs —
+deferred for a dedicated rotation/climb pass.
+
+## 2026-06-29
+
+[FIX] Brief 52 — self-referential answers no longer break the ReAct loop (the `Action:`-in-prose half)
+[`core_logic/agent.py`, `tests/test_glint_detector.py`]. Follow-on to Brief 51 (which fixed the `Glint:`-in-
+prose half). Q13 ("name the two fabricated-glint forms") is self-referential — its answer DESCRIBES the loop,
+so it contains `Action:` (and `Glint:`) as PROSE ("the model writes `Action: [...]`"); the action parser
+tried to parse that prose, failed ("Malformed JSON in Action… Skipped"), dropped the real answer, and a
+`[[TASK]]`-marked "already answered" meta-response got delivered (exposed once Brief 51 stopped the glint
+cycle from accidentally masking it). **Fix (mirrors Brief 51):** module-level `_has_line_start_action` —
+a REAL action is a LINE that STARTS with `Action:` (the mandated format), not an `Action:` embedded mid-prose.
+Two changes in `run_task`: (1) the `[[TASK]]`-marker delivery path now gates on `not
+_has_line_start_action(...)` (so a marked answer with prose `Action:` delivers); (2) BEFORE `parse_actions`, a
+substantive turn (≥150 chars) with no line-start Action, no "Final Answer:" and no "Thought:" is returned as
+the answer (a Thought-bearing preamble is excluded; a real even-malformed action is at a line start so it
+still routes to the parser). Unit test (both directions, prose-not-flagged + real-action-flagged) in
+`tests/test_glint_detector.py`; verified live: **Q13 delivers both forms in full** AND a normal tool query
+("search core_logic for os.makedirs") still parses+executes (5 across 4 files). With Brief 51, the
+self-referential-answer class is fully closed. Applied on Alkama's confirm ("implement brief 52").
+
+[UPDATE] The Drill — 06-28 EVENING (18/0/4) + 06-29 MORNING (17/0/5), verifier self-test 40/40 both. **Two
+clean runs, ZERO real failures AND zero verifier artifacts — and they validate the 28-Jun fixes in
+production.** (1) **The verifier hardening holds:** Q11-28e (`asyncio.gather`) and Q06-29m (`json.dumps`) —
+both verifier FALSE-FAILs the day before (06-27e / 06-28m) — now PASS cleanly with the count-parser fix; the
+06-28e Q22 show-your-work time ("75 min from 8:08 PM is 9:23 PM") PASSES with the datetime grade-the-result
+fix. (2) **Brief 50 closed the recurring date-math bug:** the +10d month-boundary crossing (Q21-29m →
+Thursday 2026-07-09) — which FAILED 06-24m AND 06-25m — now PASSES, and Clara's self-assessment confirms she
+called `date_time` with `offset_days` rather than hand-computing (06-28e −12d likewise). (3) Bonus: Clara's
+"8 files vs 9" slip from 06-28m is gone (she wrote "9 files" correctly on 06-29m). Q13-28e passed but with an
+action-prose correction cycle (it had Brief 51, not yet Brief 52 — which shipped today and makes it clean).
+**Watch-items still open:** coherence appropriately-asked is volatile and back to 0% (under-asking on genuine
+ambiguity); malformed-Action-JSON-on-first-attempt is a recurring execution-polish flag (Q13/Q17 06-28e);
+the key_facts hedge-guard on spaced tokens (latent). 25 climb-due across the two runs DEFERRED (quality-first).
+
+## 2026-06-28
+
+[FEATURE] Y4 / A3 — screenshot ambient sensor (screen -> Gemini description), DORMANT [`core_logic/screen_sensor.py`
+(new), `api.py`, `.gitignore`]. Alkama greenlit Y4. Built as a SEPARATE backend module, NOT in
+`core_logic/ambient.py` — that module's design rules explicitly forbid API keys + screenshots ("NO API KEYS
+anywhere in this module"; "no screenshots in A0/A1"), and the A0 watcher single-owns `ambient.json`. A3 is
+the higher "earned-trust" tier: it runs in the backend (which has the Gemini key + vision tool), captures the
+screen, asks Gemini for a ONE-LINE high-level activity description, and stores ONLY that text to its own
+backend-owned `ambient_screen.json` (preserving the watcher's single-writer rule). **Privacy floor (load-
+bearing):** OFF BY DEFAULT — `_a3_screen_loop` in `api.py` self-gates on `A3_SCREEN_SENSOR` (boot logs
+"dormant" until armed); raw screenshots are NEVER persisted (captured in-memory → temp PNG only for the
+Gemini call → deleted immediately — only the text description is stored); the prompt asks for activity only,
+explicitly NOT a transcription of text/code/passwords; conservative cadence (`A3_SCREEN_INTERVAL_MIN`, default
+15 min). Self-test `python core_logic/screen_sensor.py` (consent gate OFF-by-default, capture→describe→store,
+raw-temp-deleted/privacy, vision-error-stores-nothing — all mocked, never touches the real screen). Boot-test:
+backend starts clean, logs A3 dormant, no errors. `ambient_screen.json` + temps gitignored. **Arming is
+Alkama's step** (set `A3_SCREEN_SENSOR=on`); a LIVE real-screen capture was deliberately NOT run here (it
+would send actual screen content to the cloud — the user's call). A1-recall integration (reading
+`ambient_screen.json`) is a deferred follow-up.
+
+[FEATURE] Brief 50 — relative-date deterministic path [`core_logic/tools.py`, `tool_executor.py`,
+`tool_registry.py`, `interpreter.py`, `system_prompt.py`]. `get_time_date(offset_days=N)` now appends a
+deterministically-computed target line ("N day(s) from today/ago: <weekday, date>") so Clara never
+hand-computes a calendar date (she erred intermittently on month-boundary rollovers: +10d failed
+06-24m/06-25m). Wired: the FAST `date_time` dispatch passes `offset_days`; the registry schema +
+interpreter arg-hint + a routing rule ("date/weekday N days from now/ago → date_time offset_days=±N");
+a PERSONA line extending the existing [NOW] guardrail. Validated live: a `POST /query` "what's the date 10
+days from now" returned "Wednesday, 08 July 2026" (computed, no hand-arithmetic); `get_time_date` offset
+check passes (+10 month-cross, −12 in-month, bad-arg graceful). Applied on Alkama's confirm (his greenlight
+of Brief 50).
+
+[FIX] Brief 51 — glint detector anchored to a LINE START [`core_logic/agent.py`]. Extracted the
+fabricated-glint detection into a module-level pure helper `_detect_fabricated_glint` whose regex
+`(?m)^[ \t>#*\`\-]*Glint(?:\s+from\s+[\w._-]+)?\s*:` matches only a LINE that STARTS with a glint token
+(the model imitating the system's injected tool-result), not a `Glint:` embedded mid-prose. **Supersedes
+Brief 48's "Final Answer:" gate** (marker-independent — the 06-27 boot-test showed the model answers
+off-format, so that gate never engaged). Both-directions unit test `tests/test_glint_detector.py` (4 prose
+not-flagged, 5 fabrications flagged). Validated live: the boot log confirmed NO glint-correction fired on
+Q13's `Glint:` prose. Applied on Alkama's confirm.
+
+[UPDATE] Brief 51 boot-test exposed BRIEF_52 — the `Action:`-in-prose self-referential class. Q13's answer
+*describes* the ReAct loop, so it also contains `Action:` as prose ("model writes `Action: [...]`"); the
+action parser tries to parse it, fails ("Malformed JSON in Action… Skipped"), and the loop drops the real
+answer → a `[[TASK]]`-marked "already answered" meta-response gets delivered. Brief 51 (glint) is correct,
+but it removed the glint-correction cycle that had been *accidentally* forcing Q13 to re-deliver, so Q13's
+outcome regressed on this one pathological self-referential probe. The fix (line-start-anchor the action
+parser, same as Brief 51 for glint) is a central-loop change → **briefed as BRIEF_52, not blind-edited**.
+An off-format-substantive-deliver patch was implemented + live-validated (a normal tool query still worked)
+then **reverted** to keep the core-loop footprint to just Brief 51, pending the holistic BRIEF_52 review.
+
+[FIX] Layer-1 verifier — two token-parser false-FAIL classes [`tests/verification.py`]. The 06-27e + 06-28m
+drills produced **three scorecard FAILs that were all verifier artifacts** (Clara was correct; confirmed by
+my grep + a 5-agent adversarial-verification workflow). Two root-cause parser bugs, both fixed:
+**(1) `_stated_total_conflict` (count-check):** its candidate regex `(?:match|…)s?\b` could not match
+**"matches"** (the `-es` plural — `match`+`s?` = "match"/"matchs", never "matches"), so a correct total stated
+as *"N matches"* was never captured; only a per-file sub-count (*"1 occurrence each"* / *"conversations.py (5
+occurrences)"*) was, and the parser then false-FAILed a correct total (06-27e Q11 read as "total 1" not 4;
+06-28m Q06 read as "total 5" not 17). It also missed *"Total count: N"* (the "count" infix). Now matches the
+`-es` plural and the "total count:" form. **(2) `v_datetime` (time-of-day):** used `re.search` for the FIRST
+AM/PM time, so a "shows-its-work" answer (*"8:07 AM + 90 min = 9:37 AM"*) was graded on the START (8:07) not
+the RESULT (9:37) → false-FAIL (06-28m Q22). Now accepts any time in the answer that satisfies the tolerance
+band (the result will; the start of a ≥75-min delta is always outside the band, so a wrong result still
+fails). Four new self-test fixtures (both directions for each fix); verifier self-test **36 → 40 green**.
+A verifier bug looks exactly like a Clara fail — these were caught by hand-grep + the workflow, then fixed +
+fixture-guarded so they can't silently return.
+
+[UPDATE] The Drill — 06-27 EVENING (17/1/4) + 06-28 MORNING (14/2/6), verifier self-test 36/36 both runs.
+**Clara had ZERO real failures across BOTH runs** — every scorecard FAIL (Q11-27e, Q06-28m, Q22-28m) and one
+UNVERIFIABLE (Q11-28m event_queue) is a confirmed verifier artifact (Clara correct), all now fixed (the
+[FIX] above + a key_facts synonym broadening for Q11-28m). Real-but-minor defects: **(a)** 06-27e Q06 began
+with a stray fabricated "256." prefix before the correct "0.35" (context bleed; key_facts ignores leading
+garbage). **(b)** 06-28m Q06 said "8 files" but listed 9 (Clara self-flagged). Other notables: **Q13-27e**
+(Brief-48 probe) delivered the full two-forms answer but with glint-correction friction (5 turns, 2 flags) —
+the model answered off-format so Brief-48's gate didn't engage; confirms **BRIEF_51** (line-start glint
+anchor) is still needed, now manifesting as wasted turns not truncation. **Date arithmetic** is intermittent
+on month-crossing: +10d FAILED 06-24m/06-25m but PASSED 06-28m → G11/BRIEF_50 is a reliability fix.
+**Coherence (06-28m):** appropriately-asked 0%→50% (the under-asking gap is closing). 21 climb-due questions
+deferred to a focused pass (quality-first; do not ship 21 rushed oracles on top of a just-fixed verifier).
+
+## 2026-06-27
+
+[FEATURE] Y2 — OCR for scanned / image-only PDFs, via a Gemini-vision fallback [`core_logic/tools.py`,
+`tool_executor.py`, `tool_registry.py`, `interpreter.py`, `requirements.txt`]. New native tool `ocr_pdf(path,
+max_pages=10)`: opens the PDF with **PyMuPDF (fitz)**, and if it already has a real text layer (≥100 chars)
+extracts that directly (cheap, accurate); otherwise rasterizes each page (≤25, default 10) at 200 DPI and
+transcribes it via the existing `analyze_image_grok` (Gemini 2.5 Flash, 503-retry built in), concatenated
+with `--- Page N ---` markers. **Deliberately NOT `markitdown-ocr`**: that path's `magika` dep pulls CPU
+`onnxruntime`, shadowing `onnxruntime-gpu` and silently dropping Kokoro TTS to CPU — the vision-fallback reuses
+the live Gemini tool and adds only PyMuPDF (a self-contained wheel, no onnxruntime). Hazard guard verified:
+`onnxruntime.get_available_providers()` still lists `CUDAExecutionProvider` after the install. Wired as a
+native tool (registry + executor FAST/DELIBERATE + interpreter arg hint); additive + read-only (the working
+office/text-PDF `convert_to_markdown` path is untouched; `ocr_pdf` self-guards by short-circuiting text PDFs),
+so it ships safe-on (no env flag needed — the model only reaches it for scans). Validated:
+`tests/test_ocr_pdf.py` (4 deterministic cases: missing-path, text-layer-short-circuit-no-vision-call,
+scanned-rasterize+OCR, max_pages coercion) + a **live Gemini smoke** (correctly OCR'd "OCR SMOKE TEST 4242"
+off a synthetic image-only PDF) + a **backend boot-test** (registry now reports 10 native tools, was 9;
+indexed into the (37,384) embeddings; zero startup errors). `pymupdf` added to `requirements.txt`;
+`tests/test_ocr_pdf.py` is gitignored (R11).
+
+[FIX] G7 — Layer-2 root-cause judge resilient to a transient (Brief 32 hardening) [`tests/test_harness.py`].
+`diagnose_failure` called `ask_clara` once with no retry; on a transient `ask_clara` returns
+`"(request failed: …)"`, which silently defaulted `fault_class` to `"undetermined"` — losing that FAIL's
+Layer-2 diagnosis for the run AND (since `fault_class != "real"`) blocking Brief-38 Layer-3 for it. Now it
+retries ONLY the unambiguous transient signal (the `"(request failed:"` prefix) 2× with backoff — never a
+valid-but-mis-tagged answer (a retry can't fix that) — and classifies a *persistent* transient as
+`infra`/`infra_non_answer` (accurate: the judge genuinely couldn't run) instead of `undetermined`. New
+`tests/test_diagnose_failure_retry.py` (4 cases, no backend: retry-then-recover, persistent→infra,
+no-retry-on-clean, no-retry-on-mistagged). `tests/` is gitignored (R11) so this isn't in the git diff, but
+it hardens the live daily harness.
+
+[FEATURE] WhatsApp read/unread — engage-to-read (Brief 49 core) [`core_logic/conversations.py`,
+`tools.py`, `tool_registry.py`, `interpreter.py`]. Resolves Alkama's "messages shouldn't be a one-time read"
+concern with read/unread STATE on the held archive. Held rows now carry a stable `id` + `status`
+("unread" on arrival), and legacy rows are lazily back-filled to `unread`+id on first read (idempotent
+rewrite). New `mark_whatsapp_read(ids|sender)` flips unread→read as a non-destructive **LABEL** — nothing is
+ever removed, so a message stays fully queryable (by sender / `status='all'`) any number of times (the exact
+"gone after one read" fear, structurally prevented). `whatsapp_missed` now has two behaviours by intent: **no
+query → a DIGEST of UNREAD** ("what did I miss"; marks nothing — a glance isn't engagement) vs **a named
+sender → that sender's messages VERBATIM** ("what did Yash say") which marks the shown rows read
+(engage-to-read, precise by id); `mark_read=False` peeks without marking, `status` overrides the default
+(unread for the digest, all for a drill-down so a re-ask still returns read messages). Decisions from Alkama
+2026-06-27: engage-to-read (not mark-on-glance); no UI panel now (queued R13 for later). Tests: extended the
+`conversations.py` self-test (status filter, mark-by-id/sender, no-op bare mark, legacy migration) +
+rewrote `tests/test_whatsapp_missed.py` end-to-end against the real store (the 06-24 buried-sender bug case
+still guarded, plus digest-excludes-read, read-is-requeryable, peek-no-mark, caught-up). The ingestion path
+(`api.py` poller → `record_whatsapp_held`) is unchanged and backward-compatible (records just gained two
+fields). **Deferred:** the full two-store unification (Shobha is already durable in the chat feed, so the gap
+was held-archive-only). Live boot-test of ingestion needs the Node service → recommended before commit.
+
+[FIX] Brief 48 — Glint-detector Final-Answer false-positive [`core_logic/agent.py`]. The inline-fabrication
+guard in `run_task` flagged ANY turn containing `Action:` + a `Glint:` token and delivered it truncated at the
+first glint. A *self-referential* DELIBERATE answer — one literally explaining the two fabricated-Glint forms
+(bare Glint / inline Action+Glint) — contains those tokens as PROSE, so it was cut in half (the 06-22e/06-23e
+Q13 real FAIL, `fail_count=2`). **Fix:** compute the glint match position and gate the whole hallucination
+check — if `Final Answer:` precedes the first glint token, the glint is answer prose (not a fabricated loop),
+so `has_glint=False` and the full answer falls through to the else branch. A genuine bare Glint or inline
+fabrication has NO Final Answer before the glint (`_fa_idx == -1` or `> glint.start()`), so it is still caught
+— verified deterministically on all 4 cases (self-referential delivered in full; bare / inline / premature-FA
+all still caught) + AST parse clean. Live confirmation deferred to the 06-27 evening cron (runs Q13 directly).
+Applied on Alkama's explicit confirm as the closing task of the 06-24 busy-mode lifetime (R10 → done).
+
+[UPDATE] Brief 48 found INCOMPLETE via a live boot-test [`core_logic/agent.py`]. A 06-27 busy-mode boot-test
+(`api.py` + `POST /query`, `memory_mode=none`) confirmed the backend boots clean with all of today's changes
+AND that the WhatsApp read/unread feature works live (digest returned "19 unread" + an engage-to-read offer,
+no mutation) — but revealed Brief 48 does NOT fix the real Q13 failure. The model delivers the answer
+**off-format** (logged `>> [DELIBERATE] Final Answer (implicit)` — no literal `Final Answer:` marker), so the
+Brief-48 gate (which keys on a literal `Final Answer:` preceding the first glint) never engages, and the
+bare-glint detector still truncates at the prose heading `**Form 1 — Bare Glint:**` (the colon trips the
+regex). The deterministic logic test passed only because it fed idealized `Final Answer:`-prefixed inputs;
+the live model omits the marker — exactly the runtime gap a compile-check can't catch. Cleaner fix → anchor
+the glint regex to a LINE START (a fabricated glint is a line *starting* with `Glint:`, never `Glint:`
+embedded mid-prose). **Briefed as BRIEF_51** (core hallucination guard → brief, don't blind-edit: the
+false-positive direction is live-validatable but the false-negative one — real fabrications still caught —
+is not, autonomously). This supersedes the "live confirmation deferred to the evening cron" note on the
+Brief 48 entry above.
+
+[UPDATE] The Drill — CATCH-UP analysis of 3 reports left PENDING by the 24→27 Jun weekly-limit pause:
+**06-24-evening (17/1/4), 06-25-morning (16/1/5), 06-25-evening (18/0/4 on paper)** — verifier self-test
+36/36 all three. Done in busy-mode; **rotation deliberately deferred** on all three (records-only, not a live
+drill cycle — mutating the live question JSON from 2–3-day-stale snapshots risks incoherence with the next
+cron; the next fresh drill rotates from current truth). Findings: **(1) Brief 48 vindicated three times.**
+Q13 (name the two fabricated-Glint forms) was truncated by the inline-fabrication guard on BOTH 06-24e
+(FAIL, cut at the first `Glint:`) and 06-25e — where the scorecard **FALSE-PASSED** it: the delivered answer
+cut off at *"detects two forms of fabricated"* (naming neither form) yet Layer-1 passed it. **[Mechanism
+corrected 06-27 — re-verified against the harness: my first read was wrong.]** It is NOT a delivery-vs-grading
+gap — `test_harness.py` grades the same `r["response"]` it displays (lines 581/630/877), i.e. the delivered
+text. The real cause is an **LLM-judge false-positive**: `v_key_facts` routes a missing-but-substantive
+(≥40-char) fact to a gated `_llm_judge` (DeepSeek); the truncated answer named neither form, both facts went
+to the judge, and it generously returned `[true,true]`. So Q13-06-25e had TWO distinct defects: truncation
+(Brief 48/51) AND the LLM-judge false-PASS (harden `_llm_judge` to not certify a clearly-truncated answer).
+Caught only by manual spot-check. The truncation is the bug Brief 48 targets; 06-27 evening is the first
+post-fix run. **(2) Date arithmetic — month-boundary
+crossing is the specific failure.** Q21 `+10d` (June→July rollover) FAILED both mornings (off-by-one on
+June's 30 days); Q21 `−12d` (stays in June) PASSED both evenings. Sharpens **G11** (deterministic date path).
+**(3) Coherence drill (06-25m):** entity-recall 100%, didn't-need-to-ask 100%, but appropriately-asked **0%**
+(2 controls) — she under-asks on genuine ambiguity (over-indexed on inference). Watch-item. **(4) Minor:**
+Q06-06-25m said "8 files", listed 9 (Layer-1 doesn't verify list-counts). Reports written to ANALYZED;
+`report_analysis_status.py` clean for all three.
+
+## 2026-06-24
+
+[FIX] `whatsapp_missed` limit-before-filter bug [`core_logic/tools.py`]. A sender drill-down
+(`whatsapp_missed(query, limit)`) applied `limit` to `read_whatsapp_held` BEFORE filtering by query, so it
+only searched the most-recent `limit` held messages. Diagnosed from `session_2026-06-23_10-44-15.log`: Clara
+correctly routed FAST → `whatsapp_missed(query="Yash", limit=5)`, but it read only the last 5 held rows — and
+"Yash" (batch held 10:46:12) was buried under ~14 newer-held numeric-spam batches from the same 10:46:25 wave
+— so a REAL message returned *"no held WhatsApp messages match 'Yash'"*. **Data was never lost** (19 entries
+from 06-23 persist, incl. both `Yash` and `Yashu`); the append-only archive + storage are healthy — the
+"gone after one read" was a retrieval artifact, not deletion. **Fix:** when a query is present, read the
+WHOLE archive (`read_whatsapp_held(limit=0)`) → filter → THEN cap to `limit`. Verified against the real
+archive (OLD limit-then-filter = 0 Yash matches; NEW filter-then-cap finds Yash). Observability gap noted:
+FAST logs only the formatted response, not the raw tool output. Regression test = queued G6. (The larger
+unified-WhatsApp-store + read/unread redesign remains a separate, pending-decisions discussion.)
+
+[UPDATE] The Drill — 06-24 MORNING (busy-mode): **16/1/5**, verifier self-test 36/36. The lone FAIL is **Q21**
+(the R2 `date_offset +10d` climb made 06-23) doing its job on its FIRST morning run: Clara got the DATE right
+(2026-07-04) but the WEEKDAY wrong ("Sunday" vs the real **Saturday**) — a genuine mental-date-arithmetic miss
+(she even offered a tool but didn't call it). Layer-2 self-classified **REAL** (good calibration). **Q22**
+(`time_delta +90`) PASSED — she nailed the clock but botched the date-weekday (the asymmetry she diagnosed
+herself). The 06-23 **L5 climbs** (Q16 debounce-bounding 256/3600, Q17 dispatch-precedence) both PASSED their
+first morning run. Q21 → `fail_count 1` / `last_result fail`, **kept verbatim** (good probe; found a real gap).
+**SYSTEMIC-FIX CANDIDATE flagged (not built):** route relative-date questions to a deterministic path
+(`date_time` offset / `python_repl`), not mental math — a PERSONA/routing change with real blast radius →
+watch-item / future brief, not a drill-time edit. **PROMOTIONS:** 9 climb-due (streak 3). Did the 2 zero-risk
+dynamic-verifier ROTATIONS now — Q06 `search_set` `asyncio.create_task`→`json.dumps` (14/9, a harder
+enumeration + count), Q09 absence `pickle.loads`→`yaml.load` (grep-confirmed absent). **DEFERRED** the 7 deeper
+promotions (Q04/05/20 L4→L5 deepenings + Q07/08/12/14 L5-maxed→fresh-L1) to a dedicated next pass —
+quality-first: cramming 9 rushed oracle designs is exactly how brittle false-FAILs creep in (the recurring
+CLAUDE.md warning); the 2 rotations carry zero design risk and went now. Analysis written into the report;
+JSON metadata → 2026-06-24. Coherence 75/75/50 (the known `db-scale` over-ask + `ambiguous-service` under-ask
+pair — not a regression).
+
+[FEATURE] Regression test for `whatsapp_missed` [`tests/test_whatsapp_missed.py` NEW] (BACKLOG G6, whatsapp
+half). Locks in the 06-24 limit-before-filter fix: a synthetic held archive buries "Yash" under 10 newer spam
+batches, then asserts `whatsapp_missed("Yash", 5)` FINDS Yash (the exact failure case) — plus text-substring
+match, the no-query summary path, an unknown-sender clean no-match, and the empty-archive branch. Against the
+OLD code this fails; against the fix it passes. Mirrors `api.py`'s `HF_HOME`→`.hf_cache` redirect at the top
+(the test imports `tools.py`, which loads MiniLM at import — without the redirect the import hits the
+permission-walled user-profile HF cache; a reusable pattern for any test importing a model-loading module).
+The test caught a case-mismatch bug in its own first draft (searched a mixed-case literal in a lower-cased
+string). G6 whatsapp half done; the `episodic_search` self-test (needs agent mocking) remains.
+
+[FEATURE] Regression test for `episodic_search` [`tests/test_episodic_search.py` NEW] — **completes BACKLOG
+G6** (both new tools now tested). A fake agent supplies `db.memory['episodic_log']` (the exact attribute path
+that broke the tool when first built — `db.memory`, not `.memory`) with empty `episodic_embeddings` to force
+the keyword-fallback path (no MiniLM). Asserts: keyword match returns the right episode; an `[AUTONOMOUS]`
+entry that WOULD match is correctly FILTERED (the system-prefix invariant — load-bearing); honest no-match;
+and the missing-agent / empty-log / all-system guards. Same `HF_HOME`→`.hf_cache` redirect as the whatsapp
+test. **Semantic/cosine path now ALSO covered** (`run_semantic` added 2026-06-24): tiny orthogonal torch
+vectors make the cosine ranking + the <0.30 weak-match header deterministic — asserts the right episode ranks
+first, the [AUTONOMOUS] entry stays filtered, and an orthogonal query hits the weak-match header. Both paths
+guarded; G6 fully closed including its follow-up.
+
+[UPDATE] Drill promotion (busy-mode, deferred-batch progress) — promoted **Q05 morning L4→L5**: from the
+`log_system_episode` zero-vector to the `_context_warmup` SELF-REPAIR (the repair side of the same
+episodic-alignment machinery — when `len(episodic_embeddings) != len(episodic_log)` it re-encodes all
+summaries and replaces the list) — and **Q20 L4→L5**: from the handshake to the MCP RESILIENCE fact (each
+server's state keeps command+args so `_ensure_alive` can RESTART a dead subprocess; before this a crashed DC
+subprocess bricked every tool call until a full backend restart — Brief 36 C-14). Both oracles validated
+PASS-correct/FAIL-wrong before write; key_facts on the mechanism (no line numbers → drift-proof). Q20's
+apparent rung was itself a trap — the code comment says 3 per-server keys but the dict actually has 5
+(process/lock/id_counter + command/args) — so I steered to the command/args resilience fact instead of "name
+the three." **5 of 7 deferred promotions remain** (BACKLOG G12): Q04 (the get_smart_context 6-vs-10 overlap)
++ the 4 L5-maxed → fresh-L1. The traps confirm the quality-first deferral was right, not laziness.
+
+[FIX] FAST-path raw-tool-output logging [`core_logic/agent.py` `_run_fast`]. FAST logged the tool CALL
+(`>> [FAST] tool=…`) and the formatted RESPONSE but NOT the raw tool output — so a tool-vs-formatter failure
+was opaque (the 06-24 Yash diagnosis had to reconstruct by hand that `whatsapp_missed` actually returned
+"no match"). Added `slog.info(">> [FAST] tool result: {raw[:500]}")` right after `execute_fast` — observability
+parity with the ReAct loop's Glint logging; truncated to 500 chars to avoid log spam. Pure log line
+(parse-checked; cannot alter control flow → no boot-test needed). Closes the G11 observability sub-item.
+
+[REFACTOR] Retired the dead F4 voice WS handlers [`api.py`] (BACKLOG G5). The `voice_start`/`voice_stop` WS
+message handlers (the F4 in-interface persistent-mic capture path) were dormant — the standalone F10 hotkey
+(own-mic → `POST /voice_query`) replaced them and the frontend (`interface/src`) sends neither (grep-confirmed:
+zero references). Removed both `if msg_type == "voice_start"/"voice_stop"` blocks from the WS loop; kept
+`voice_interrupt` (TTS-stop is still valid via `interrupt_speech`). Safe dead-branch removal — the frontend
+never sent them, so it cannot change live behaviour (parse-checked; no boot-test needed, same reasoning as the
+FAST log line). FOLLOW-UP: `voice.py` `start_recording`/`stop_recording_async` are now orphaned (removing them
+needs verifying the persistent-mic/`_in_stream` logic — deferred).
+
+[FEATURE] A2 Step 1 — Y1a (per-class novelty) + Y1b (observation classifier) [`core_logic/salience.py`,
+`core_logic/ambient.py`]. The salience inputs for Brief-40 proactivity:
+- `compute_baseline` (ambient.py) now also emits **`proc_hour_days`** (`"proc|hour"` → distinct days seen),
+  **`hour_days`** (hour → distinct days active), and **`days_observed`** — RECOGNITION/TIMING inputs
+  (distinct-day counts, not raw frequency).
+- `AmbientGate.novelty` (salience.py) rewritten **PER-CLASS**: `new_app_seen` → recognition
+  `1 − days_seen(proc,hour)/days_observed` (fixes the share-based bug where a daily-but-minority app read as
+  novel); `odd_hours` → timing `1 − days_active(hour)/days_observed`; `battery_low` → `1 − pct/100`;
+  `off_rhythm` → `rhythm_dev` default; `default` → legacy share fallback.
+- **`classify(record, baseline)`** (salience.py, Y1b): deterministic raw-record → `{class,…}` | None.
+  `system_state` low+unplugged → `battery_low` (else drop); `active_window` → `odd_hours` at a rarely-active
+  hour else `new_app_seen`; `session_rhythm` → drop (off_rhythm/long_session need session-duration state A0
+  doesn't expose yet — follow-up). Self-tests extended (classify + recognition + per-class gate); salience.py
+  self-test green.
+- **EMPIRICAL PREVIEW** over the real **14-day** baseline (1202 active_window samples): classes =
+  **1150 new_app_seen / 52 odd_hours / 359 dropped**. **0 of 1202 clear the 0.45 salience threshold
+  pre-budget** — `new_app_seen` is informational-only by design (act 0.25 caps it), `odd_hours` lands
+  ~0.39–0.43 (just under), and no battery low+unplugged events occurred → A2 is currently **near-SILENT** (the
+  safe direction). Tuning levers for the shadow phase: `odd_hours` actionability (0.5) and/or the 0.45
+  threshold — Alkama's call, tuned against this data in shadow mode per BRIEF_40. YELLOW, dormant (no loop
+  wired). Next: **Y1c** (the loop, shadow mode) + **Y1d** (timing_ctx).
+
+[FEATURE] A2 Step Y1c — the salience loop (DORMANT / SHADOW-first) [`core_logic/ambient_loop.py` NEW].
+`AmbientLoop`: persisted cursor/watermark + baseline-refresh (`baseline_fn`) + classify→evaluate→compose,
+gated by **`A2_MODE`** tri-state (**off**=no-op default / **shadow**=log candidate remarks to
+`ambient_shadow.jsonl`, send NOTHING / **live**=injected sink, NOT wired — needs the interrupt rebuild +
+arming). Deterministic TEMPLATE compose in shadow (tune selection+frequency first; LLM composer injected for
+live). Self-tested (`--selftest`: off no-op, shadow surfaces odd+battery, cursor no-resurface, budget cap).
+One-shot historical pass `python core_logic/ambient_loop.py` prints what would surface + a near-miss tuning
+view. **SHADOW PASS over the real 14 days: 0 would surface (thresh 0.45); top near-miss = odd_hours brave.exe
+23:24–23:31 (06-21) at 0.429** — a late-night browse, a hair under. The pass REVEALED a spam risk (one session
+→ ~12 near-identical candidates) → added per-class cooldowns to the ambient default `Budget` (`odd_hours` 2h,
+`battery_low` 1h, `new_app_seen` 3h; `salience._AMBIENT_COOLDOWNS`) so a session = ONE nudge. Shadow artifacts
+gitignored + IGNORED_PATTERNS (`ambient_shadow.jsonl`, `ambient_loop_state.json`). YELLOW, dormant. Next: wire
+the loop as a dormant background task for continuous shadow accumulation; **Y1d** (timing_ctx); the
+threshold/actionability tuning (Y1-tuning) against shadow data; then **Y1e** live delivery.
+
+[FEATURE] A2 Y1c WIRED + tuned + boot-validated (2026-06-24). (1) **TUNED** `odd_hours` actionability 0.5→0.6
+(`salience._ACTIONABILITY`) so a novel odd-hour clears 0.45 (the late-night brave near-miss was 0.429); volume
+held sane by the 2h cooldown + 4/day budget. (2) **WIRED**: `ambient_shadow_loop()` (`ambient_loop.py`) started
+from `api.py` lifespan, gated on `A2_MODE` (mirrors the WhatsApp poller — dormant unless shadow|live,
+non-fatal, cancelled on shutdown); `get_loop()` singleton preserves cursor+budget across ticks. **SAFETY
+FLOOR:** the default sink only WRITES, so even `A2_MODE=live` cannot reach Telegram until a notifier sink is
+injected. (3) Two loop bugs caught by the shadow pass + fixed: the `AmbientLoop` default gate bypassed
+cooldowns (passed a cooldown-less `Budget`) → now `AmbientGate()`; the historical one-shot scored every record
+at real-now → added `time_from_obs` so the replay uses each obs's own time (realistic: **2 nudges across 14
+days**, one per late session, the rest cooldown-collapsed). (4) `A2_MODE=shadow` set in `core_logic/.env`. (5)
+**BOOT-VALIDATED**: backend up (`/soul` 200), first tick wrote a real entry to `ambient_shadow.jsonl`
+(`odd_hours` brave 22:00, `would_send=false`), zero errors, no `file_change` spam (IGNORED_PATTERNS held);
+stopped clean. Shadow now accumulates live whenever the backend + A0 both run. Boot-test artifacts reset to a
+clean slate. Next: **Y1d** (timing_ctx) + tune from accumulated shadow; then **Y1e** live delivery (interrupt
+rebuild + arming).
+
+[FEATURE] A2 Step Y1d — `timing_ctx`, the "when NOT to speak" gate [`salience.py`, `ambient_loop.py`]. The
+hard-NOs were already consumed by `timing_blocked()`; Y1d adds the PRODUCER + two new gates: (1) **deep_work**
+— an in-flow heuristic: ≥4 active_window samples in the last 25 min, ALL the same process, SPANNING ≥60% of
+the window (the span check is load-bearing — a brief glance isn't flow; only a sustained session is, so a
+3-min late-night browse still fires while a 25-min single-app session is protected). (2) **`in_dnd`** — clock
+DND with past-midnight wrap (default 23:00–08:00). **`build_timing_ctx()`** assembles the ctx; DND (clock) +
+deep_work (recent obs) need NO backend state, so they're live in shadow now; the transient flags
+(clara_speaking/task_in_flight/ptt/mins_since_interaction) are injected by the backend later (default
+not-blocking — they matter most for live delivery). Wired into `ambient_shadow_loop` (builds timing_ctx each
+tick) and the loop now watches **FORWARD only** (fresh start sets cursor=latest, skips the historical
+backlog whose timing context would wrongly be 'now'; the one-shot remains the salience-only history view).
+Self-tested (deep_work sustained/mixed/brief, DND wrap/bounds, build_timing_ctx). **BOOT-VALIDATED**: backend
+up, loop started clean, forward-cursor set (no backlog dump), zero errors. **TUNING NOTE flagged**: a sustained
+single-app *browse* reads as deep_work and would suppress an `odd_hours` nudge — the shadow data decides if
+that's right (refine by app-kind if not). YELLOW, dormant. Next: a few days of shadow **soak**, then tune; then
+**Y1e** live delivery (interrupt rebuild + notifier sink + arming).
+
+[REFACTOR] A2 re-plan (2026-06-24, Alkama) — **the interrupt/timing layer is REMOVED.** Realization: A2
+delivers **passively to the interface** (no sound/poke; seen only when Alkama opens the panel), so a nudge
+**cannot interrupt** — the entire anti-Clippy-via-timing machinery was solving a non-problem. Removed today's
+**Y1d** in full (`deep_work` inference, clock-`in_dnd`, `min_quiet`, the `build_timing_ctx` producer, the loop
+timing wiring, their self-tests) — `timing_blocked` is kept ONLY as the hook for a future **manual mute**
+(`timing_ctx={"dnd": True}`; a no-op today since there's no push). **Bigger consequence: Brief 40 §5 — the
+planned interrupt-model rebuild** (cooperative cancellation, pause/resume, preemptible 0.2-priority tasks, the
+single biggest/riskiest remaining A2 piece) — **is DROPPED.** A2 is now: novelty-gated passive feed → interface
+(+ optional muteable push later) → novelty-based calibration. The loop surfaces on **novelty + budget +
+cooldown** only (one-shot still shows 2/14-days, novelty-only). Self-tests green; Brief 40 stamped partially
+superseded. OPEN (BACKLOG): budget's purpose now (interrupt-scarcity → feed-hygiene; keep/loosen?),
+calibration channel (interface tap vs WhatsApp), and — since passive delivery is low-risk — whether to skip the
+long shadow soak and surface to the interface feed sooner, calibrating live.
+
+[FEATURE] A2 Y1e — LIVE to the interface feed + 👍/👎 calibration (2026-06-24; Alkama's decisions: no daily
+cap, interface-tap feedback, go-live now) [`salience.py`, `ambient_loop.py`, `api.py`, `interface/`]. (1)
+Budget **daily cap dropped** (`Budget(per_day=None)`; the passive feed isn't interrupt-scarce) — the dedup
+**cooldown stays** (one nudge/session). (2) **`ambient_ledger.json`** (record/read/set_feedback, cap 200) = the
+live feed + 👍/👎 store; each nudge gets a uuid `id`. (3) **live sink** (`ambient_loop._live_sink`, broadcast
+injected via `api.set_broadcast`): on `A2_MODE=live` the loop broadcasts an `ambient_nudge` WS event AND
+records to the ledger (records even with no UI connected — no sound/poke, purely passive). (4) **endpoints**:
+`GET /ambient_feed` (UI loads recent nudges on connect) + `POST /ambient_feedback` (👍/👎). (5) **frontend**: an
+"Ambient" section in the Neural Stream panel renders the feed with 👍/👎 (`useClara`: `ambientFeed` +
+`ambient_nudge` WS handler + `/ambient_feed` load on mount + optimistic `sendAmbientFeedback`; `Layout.jsx`
+card + ThumbsUp/Down icons). `A2_MODE=live` in `.env`. Tested: salience + ambient_loop self-tests (incl.
+ledger), live-path integration (surface→ledger→feedback), `npm run build` clean, backend boot (loop live,
+endpoints respond, zero errors). The loop watches FORWARD only, so nudges accrue as Alkama uses the machine;
+the one-shot remains the history view. **This completes A2's buildable path** — NO interrupt model, NO Telegram
+push (passive interface only). Remaining: calibrate from the 👍/👎 ledger + a future Beta-counter auto-tune of
+the novelty threshold (Y1-tuning).
+
+## 2026-06-23
+
+[UPDATE] The Drill — 06-23 morning: clean **17/0/5** (effective 22/22), verifier self-test 30/30 (engine
+healthy → scorecard trustworthy). Layer 2 idle (gold-seed self-test MATCH), Layer 3 idle — both expected on a
+clean run. Independently grep-confirmed the two climb-stakes PASSes before promoting: Q16 (environment.py
+debounce 5.0s + `_last_file_change`, lines 140/233) and Q17 (conflict.py system-task defer branch, 137-144).
+Analysis written into the report (`report_analysis_status` → ANALYZED). First drill of the maiden busy-mode run
+(`busy-mode-reports/2026-06-23_1538_busy-mode.md`).
+
+[UPDATE] MORNING PROMOTION (2026-06-23) — 2 climb-due questions promoted one rung (same area), both oracles
+validated PASS-correct / FAIL-wrong via `v_key_facts` before write:
+- Q16 L4 → L5 — debounce *window* → debounce-dict *bounding*: prunes when `len(_last_file_change) > 256`, keeps
+  entries newer than 3600s (`environment.py:237-240`).
+- Q17 L4 → L5 — system-defer branch → *precedence* subtlety: a HARD conflict still DISPATCHES when all
+  conflicting running tasks are lower priority than the candidate ("interrupt model will pause conflicting
+  tasks", `conflict.py:123-134`).
+HELD: Q21/Q22 CLIMB DUE at streak 5 but intentionally held — next rung (relative-date / delta arithmetic) needs
+the `v_datetime` R2 extension (backlog G3); promoting now would create an UNVERIFIABLE oracle. G3 taken as the
+next GREEN task to unblock them. Each climbed Q reset to `pass_streak 0` / `last_result pending`; JSON metadata
+bumped to 2026-06-23. Coherence: 100 recall / 100 didn't-need-to-ask / 50 appropriately-asked (the one control
+miss = known episodic-leak over-confidence on `ambiguous-service`, not a regression).
+
+[FEATURE] G3 — `v_datetime` R2 extension (`tests/verification.py`): added two dynamic check types so the
+long-held Q21/Q22 temporal anchors can climb past R1. **`date_offset`** (`days:N`) grades weekday+date of
+`now+N days`; **`time_delta`** (`minutes:N`) grades the AM/PM time at `now+N min` with a tighter arithmetic
+tolerance (−2..12 vs the read-the-clock −2..20) to catch a wrong delta. Both re-derive from the live clock at
+grade time (live-truth, never rot), inherit the no-noon/midnight-wrap assumption (deltas ≤90 min at the
+~08:00/20:00 drill times), and use word-boundary day matching (`3` ≠ `13`/`2026`). The self-test
+(`tests/test_verification.py`) gained a DYNAMIC datetime block (**30→36 cases**; `v_datetime` was previously
+uncovered because it's clock-dependent) asserting both R1 and both R2 checks PASS-correct/FAIL-wrong. Then
+climbed Q21/Q22 to R2 in BOTH sessions (morning +10d / +90min, evening −12d / +75min), every oracle validated
+PASS-correct/FAIL-wrong **before** write; streaks reset 0, JSON metadata bumped. Unblocks the 4 held anchors
+(**BACKLOG G3 done**). Verifier-side only — no backend change; the next scheduled drill validates Clara's R2
+reach end-to-end.
+
+[ENHANCEMENT] `hotkey_listener.py` — silence-guard + input-device selection. The session opened with F10
+producing empty transcripts (`you: ""`); diagnosed to the **mic delivering digital silence** (captured peak
+~3e-05) because the ASUS/Intelligo AI noise-cancel gates the default Realtek array — an OS/mic issue, NOT a
+code bug (the WAV reached Whisper fine; it was just silent). Hardened the tool to surface that instead of
+failing mutely: (1) `_stop_and_send` measures the captured peak and, below `SILENCE_PEAK=0.01` (sits between
+the ~3e-5 noise floor and ~0.1+ speech), prints a specific actionable warning and **refuses to send the dead
+WAV**; (2) `CLARA_MIC_DEVICE` env (int index or name substring) selects the input device, threaded into the
+`InputStream`; (3) `--list-devices` lists input devices with the default marked (reveals the OnePlus headset
+at [2] as a working alternative to the gated default). Self-checked: parse OK, `--list-devices` runs,
+device-resolution + threshold verified. Standalone script — no backend impact; de-risks the R4 physical-mic
+test.
+
+[UPDATE] The Drill — 06-23 EVENING (normal mode, post-busy-mode): **16/2/4**, verifier self-test **36/36**
+(the new G3 datetime fixtures ran live). **LIVE VALIDATION of the busy-mode G3 R2 climbs:** Q21
+`date_offset(-12d)` → "Thursday, 11 June 2026" PASS, Q22 `time_delta(+75min)` → "9:23 PM" PASS — Clara reaches
+R2 and the new `v_datetime` checks grade end-to-end through the full stack (closes the "didn't boot-test it"
+note on G3). Two FAILs, both real findings: (1) **Q13** = the Brief-48 Glint-detector bug, predicted —
+`fail_count` 1→2, kept verbatim as the regression probe; Layer-2 **calibration WIN** (classified `real` this
+run vs the 06-22e false-exoneration as `verifier_artifact`). (2) **Q16** = **FLAWED QUESTION, scope-fixed**:
+the numbering guard (`tool_executor.py:277`) acts on `read_file` ONLY; the oracle's `write_file` came from
+conflating the unrelated line-62 filesystem-map guard, so it false-signalled for 2 runs (06-22e UNVERIFIABLE,
+06-23e FAIL). Rewrote to the correct one-tool framing (read_file / absolute 1-indexed `{off+i+1}:` prefix /
+run-after-`record_read` because the ledger hashes raw bytes), oracle validated PASS-correct/FAIL-wrong before
+write; `fail_count` stays 0 (not Clara's fault); Clara's Layer-2 correctly called it `verifier_artifact`. Both
+Layer-2 classifications correct this run — strongest calibration showing since the 06-22e miss. Mode 100%.
+Analysis written into the report.
+
+## 2026-06-22
+
+[UPDATE] The Drill — 06-22 evening (analyzed 06-23 during busy-mode): **16/1/5**, verifier 30/30. The lone
+FAIL (Q13, "name the two forms of fabricated Glint") is **REAL but a ReAct-loop bug, not a reasoning miss**:
+the answer is *about* the Glint/Action format, so its prose ("…fabricated `Glint:` … a real `Action:` …")
+tripped the inline-fabrication detector (`agent.py:1652-1673`) → the Final Answer was truncated at the first
+`Glint:` and delivered incomplete (raw log `…20-00-29.log:2601` logs the stripper firing; `completion=944`
+tokens, most discarded). Root-caused + fix proposed in `briefs/BRIEF_48` (gate the detector when
+`Final Answer:` precedes the first glint token) — **NOT applied** (ReAct-core blast radius → brief-don't-build
+per busy-mode). Q13 → `fail_count 1` / `last_result fail`, **kept verbatim** as the regression probe (expect
+FAIL→PASS once the brief lands). Layer-2 mis-classified it `verifier_artifact` (false-exoneration) — a
+calibration watch-item. Analysis written into the report. Climb-due Q21/Q22 held pending the `v_datetime` R2
+extension (G3 — now unblocks 4 questions across both sessions).
+
+[UPDATE] Backfilled drill analyses for two CLEAN, SUPERSEDED runs (analysis-only, no question
+mutation/promotion — their states have since rotated): **06-22 morning** (16/0/6; superseded by 06-23m — note
+Q11 landed UNVERIFIABLE-partial there but PASSED 06-23m, a paraphrase edge not a regression) and **06-19
+evening** (18/0/4; superseded by 06-21e/06-22e). Both verifier 30/30, zero FAILs. Done to close the
+`report_analysis_status` gap for the recent window. The 21 PRE-checker-era reports (05-22 → 06-11) remain
+PENDING by design — see BACKLOG G-note (a triage decision for Alkama, not retro-analyzed).
+
 ## 2026-06-21
 
 [UPDATE] The Drill — 06-21 morning: clean **17/0/5** (effective 22/22), verifier 30/30. SAME anchor set as

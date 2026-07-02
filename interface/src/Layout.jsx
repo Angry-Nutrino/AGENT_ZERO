@@ -6,7 +6,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
   Terminal, Cpu, Send, Paperclip, X, Zap, Activity,
   Shield, User, Copy, Check, ChevronRight, Radio,
-  Layers, Clock, AlertCircle, Smartphone
+  Layers, Clock, AlertCircle, Smartphone, ThumbsUp, ThumbsDown
 } from "lucide-react";
 import useClara from "./hooks/useClara";
 
@@ -393,6 +393,7 @@ export default function Layout() {
     selectedFile, setSelectedFile,
     handleImageUpload, streamingContent, clearHistory, lastTokenUsage,
     claraIsSpeaking,
+    ambientFeed, sendAmbientFeedback,
   } = useClara();
 
   const chatEndRef   = useRef(null);
@@ -847,6 +848,39 @@ export default function Layout() {
               ) : (
                 tasks.slice(-12).map(t => (
                   <TaskCard key={t.task_id} task={t} onCancel={cancelTask} />
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* ── AMBIENT FEED (A2, Brief 40 Y1e) — passive novelty nudges + 👍/👎 calibration ── */}
+          <div className="shrink-0 border-b border-purple-500/10 px-3 pt-3 pb-2">
+            <p className="text-[9px] uppercase tracking-[0.2em] text-white/20 font-mono mb-2 flex items-center gap-1.5">
+              <Radio size={9} /> Ambient
+            </p>
+            <div className="space-y-1.5 max-h-44 overflow-y-auto scrollbar-thin">
+              {ambientFeed.length === 0 ? (
+                <p className="text-[10px] text-white/15 font-mono italic py-1">Nothing noticed yet</p>
+              ) : (
+                ambientFeed.map(n => (
+                  <div key={n.id} className="rounded-md bg-white/[0.02] border border-white/5 px-2.5 py-2">
+                    <p className="text-[11px] text-white/70 leading-snug">{n.remark}</p>
+                    <div className="flex items-center justify-between mt-1.5">
+                      <span className="text-[8px] uppercase tracking-wider text-purple-400/40 font-mono">
+                        {(n.category || "").replace(/_/g, " ")}{n.ts ? " · " + String(n.ts).slice(11, 16) : ""}
+                      </span>
+                      <div className="flex items-center gap-0.5">
+                        <button onClick={() => sendAmbientFeedback(n.id, "up")} title="Useful"
+                          className={`p-1 rounded transition-colors ${n.feedback === "up" ? "text-emerald-400" : "text-white/25 hover:text-emerald-400/70"}`}>
+                          <ThumbsUp size={11} />
+                        </button>
+                        <button onClick={() => sendAmbientFeedback(n.id, "down")} title="Not useful"
+                          className={`p-1 rounded transition-colors ${n.feedback === "down" ? "text-rose-400" : "text-white/25 hover:text-rose-400/70"}`}>
+                          <ThumbsDown size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 ))
               )}
             </div>

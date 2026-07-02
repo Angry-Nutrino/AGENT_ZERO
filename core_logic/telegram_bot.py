@@ -168,6 +168,14 @@ class TelegramBot:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
 
+        # Voice notes (2026-07-02, Alkama greenlit): registered ONLY when TELEGRAM_VOICE is armed —
+        # off = today's behavior (voice notes silently ignored). Transcription is LOCAL (the loaded
+        # faster-whisper via voice.transcribe_file; PyAV decodes Telegram's OGG/Opus natively — no
+        # ffmpeg binary, and the audio never leaves the machine).
+        if os.getenv("TELEGRAM_VOICE", "").strip().lower() in ("on", "1", "true", "yes"):
+            self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
+            slog.info("[Telegram] Voice-note handler ARMED (TELEGRAM_VOICE=on).")
+
         # Wire the notifier singleton to this bot instance
         notifier.configure(self._app.bot, self._allowed_chat_id)
 
@@ -211,7 +219,68 @@ class TelegramBot:
             return
 
         slog.info(f"   [Telegram] Received: {user_text[:80]}")
-        await self._mirror("user", user_text)   # live console mirror (source='telegram')
+        await self._process_text(update, context, chat_id, user_text)
+
+    async def _handle_voice(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Voice note → local Whisper STT → the SAME text pipeline (2026-07-02).
+        Downloads the OGG/Opus to a temp file, transcribes with the already-loaded model
+        (faster-whisper decodes ogg via PyAV — no ffmpeg), echoes the transcript back for
+        STT-verification, then routes it exactly like a typed message. Audio never leaves
+        the machine; the temp file is deleted in finally."""
+        chat_id = str(update.effective_chat.id)
+        if chat_id != self._allowed_chat_id:
+            slog.warning(f"   [Telegram] Rejected voice note from unauthorized chat: {chat_id}")
+            return
+
+        from .voice import get_voice
+        v = get_voice()
+        if v is None or getattr(v, "_whisper", None) is None:
+            await update.message.reply_text(
+                "Voice transcription isn't available right now (voice system not loaded).")
+            return
+
+        import tempfile
+        tmp_path = None
+        try:
+            tg_file = await context.bot.get_file(update.message.voice.file_id)
+            fd, tmp_path = tempfile.mkstemp(prefix="tg_voice_", suffix=".oga")
+            os.close(fd)
+            await tg_file.download_to_drive(tmp_path)
+            slog.info(f"   [Telegram] Voice note received ({update.message.voice.duration}s) — transcribing locally.")
+            text = await asyncio.to_thread(v.transcribe_file, tmp_path)
+        except Exception as e:
+            slog.error(f"   [Telegram] Voice download/STT error: {e}")
+            await update.message.reply_text("Couldn't process that voice note. Try again?")
+            return
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        if not text:
+            await update.message.reply_text(
+                "I couldn't make out any speech in that voice note.")
+            return
+
+        # Echo the transcript so Alkama can verify the STT before trusting the answer.
+        try:
+            await update.message.reply_text(f'\U0001F3A4 "{text}"')
+        except Exception:
+            pass
+        await self._mirror("user", f"\U0001F3A4 {text}")
+        await self._process_text(update, context, chat_id, text, mirrored=True)
+
+    async def _process_text(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+        chat_id: str, user_text: str, mirrored: bool = False
+    ) -> None:
+        """Shared tail of text + voice handling: mirror, typing indicator, full pipeline, reply."""
+        if not mirrored:
+            await self._mirror("user", user_text)   # live console mirror (source='telegram')
 
         # Telegram's "typing" indicator expires after ~5s; refresh it while a long
         # DELIBERATE run is in flight so the phone doesn't look dead (Brief 36 D-21).

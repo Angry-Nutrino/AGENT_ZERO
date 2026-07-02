@@ -56,8 +56,13 @@ NATIVE_TOOL_SCHEMAS = [
     {
         "name": "date_time",
         "_server": "native",
-        "description": "Get the current date and time. No arguments needed.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
+        "description": ("Get the current date and time (weekday, both clock formats, timezone, "
+                        "yesterday/tomorrow). For a relative-date question ('what's the date/weekday N days "
+                        "from now / N days ago'), pass offset_days=±N and it returns that target date+weekday "
+                        "COMPUTED — never hand-calculate a calendar date."),
+        "inputSchema": {"type": "object", "properties": {
+            "offset_days": {"type": "integer", "description": "Optional: days from today (future +, past −). Returns the computed target date + weekday."}
+        }, "required": []}
     },
     {
         "name": "vision_tool",
@@ -133,18 +138,39 @@ NATIVE_TOOL_SCHEMAS = [
         "name": "whatsapp_missed",
         "_server": "native",
         "description": (
-            "Report WhatsApp messages that were HELD and NOT shown — the ones Alkama missed because "
-            "the sender was not a priority contact (spam, unknown senders). Use for 'what did I miss "
-            "on WhatsApp', 'any whatsapp messages today', 'who messaged me on whatsapp'. Priority "
-            "senders (Shobha) go straight to the chat and are NOT here. Not for sending anything."
+            "Read HELD WhatsApp messages (non-priority senders Alkama didn't see; Shobha goes straight "
+            "to the chat and is NOT here). No query = a DIGEST of UNREAD ('what did I miss on WhatsApp', "
+            "'any whatsapp today'). Name a sender in `query` = that sender's messages VERBATIM ('what "
+            "did Yash say') — which marks them read (engage-to-read); they stay queryable forever. "
+            "Read-only: never sends anything."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Optional filter by sender name or text"},
-                "limit": {"type": "integer", "description": "Max messages to return (default 20)"}
+                "query": {"type": "string", "description": "Sender name or text. Absent = unread digest; present = that sender's messages verbatim (and marks them read)"},
+                "limit": {"type": "integer", "description": "Max messages to return (default 20)"},
+                "status": {"type": "string", "description": "'unread' | 'read' | 'all' — default unread for the digest, all for a sender drill-down"},
+                "mark_read": {"type": "boolean", "description": "Override engage-to-read: false = peek without marking; true = mark shown messages read"}
             },
             "required": []
+        }
+    },
+    {
+        "name": "ocr_pdf",
+        "_server": "native",
+        "description": (
+            "OCR a SCANNED / image-only PDF — rasterizes each page and transcribes the text via the vision "
+            "model. Use when a PDF has no selectable text (a scan or photo) OR when convert_to_markdown "
+            "returned little/no text for a PDF. For normal text PDFs and office files use convert_to_markdown "
+            "instead (faster, more accurate). Read-only — it transcribes, never edits."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Filesystem path to the PDF to OCR"},
+                "max_pages": {"type": "integer", "description": "Max pages to OCR (default 10, max 25)"}
+            },
+            "required": ["path"]
         }
     },
     {

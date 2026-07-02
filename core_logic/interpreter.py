@@ -25,15 +25,19 @@ TOOL_ARG_SCHEMAS = {
     # Core always-available native tools
     "web_search":        {"query": "string — search query"},
     "python_repl":       {"code": "string — python code to execute"},
-    "date_time":         {},
+    "date_time":         {"offset_days": "int — optional: days from today for a relative-date question (future +, past −); returns the COMPUTED target date+weekday"},
     "vision_tool":       {"path": "string — absolute path to image file",
                           "question": "string — what to ask about the image",
                           "paths": "list[string] — optional: multiple image paths"},
     "consult_archive":   {"query": "string — question for the archive"},
     "episodic_search":   {"query": "string — topic to find in past conversations (not the time-word)",
                           "k": "int — optional, how many results (default 5)"},
-    "whatsapp_missed":   {"query": "string — optional filter by sender/text",
-                          "limit": "int — optional, max messages (default 20)"},
+    "whatsapp_missed":   {"query": "string — optional. Absent = unread digest; a sender name = that sender's messages verbatim (and marks them read)",
+                          "limit": "int — optional, max messages (default 20)",
+                          "status": "string — optional: 'unread' | 'read' | 'all'",
+                          "mark_read": "bool — optional: false to peek without marking read"},
+    "ocr_pdf":           {"path": "string — filesystem path to the scanned/image-only PDF",
+                          "max_pages": "int — optional, max pages to OCR (default 10)"},
     "query_task_status": {"keyword": "string — keyword from task goal"},
     "ambient_recall":    {"date": "string — a specific day: '2026-06-11', 'June 11', 'yesterday' (preferred for a named day)",
                           "window": "string — hours to look back, e.g. '2', '24' (used only when no date given)",
@@ -144,9 +148,17 @@ Personal memory rules:
   "the job offer") — never "when" alone. Casual "do you remember X" that the
   context already answers stays tool=null (don't pay a tool call for it).
 - WhatsApp held-message recall: "what did I miss on WhatsApp", "any whatsapp
-  messages (today)", "who messaged me on whatsapp" → tool=whatsapp_missed,
-  requires_planning=false. It returns the HELD (non-priority) messages Alkama
-  didn't see. NOT for sending anything (read-only).
+  messages (today)", "who messaged me on whatsapp" → tool=whatsapp_missed (no
+  query = unread digest), requires_planning=false. A SPECIFIC sender — "what did
+  Yash say on whatsapp", "show me <name>'s messages" → tool=whatsapp_missed with
+  query=<sender> (returns their messages verbatim and marks them read). "mark X
+  read" → whatsapp_missed query=<sender>. Read-only; NEVER for sending anything.
+- Relative-date questions (Brief 50): "what's the date / weekday N days from now",
+  "N days ago", "the date X days before/after today" → tool=date_time with
+  offset_days=±N (future +, past −), requires_planning=false. The tool returns the
+  COMPUTED target date + weekday — so Clara never hand-computes calendar arithmetic
+  (she reliably errs on month-boundary rollovers). A pure time-of-day delta ("what
+  time in 90 minutes") stays a normal answer; this is for CALENDAR dates/weekdays.
 - Do NOT use consult_archive for personal memory lookups.
   consult_archive searches indexed documentation (CLAUDE.md, ROADMAP.md,
   resume) — it does not contain conversation history.

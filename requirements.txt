@@ -40,3 +40,8 @@ accelerate
 torch
 torchvision
 torchaudio
+
+# --- OCR for scanned PDFs (Y2) ---
+# Rasterizes PDF pages -> Gemini vision OCR. Self-contained wheel: NO onnxruntime/magika,
+# so it does NOT shadow onnxruntime-gpu (the markitdown-ocr footgun this path avoids).
+pymupdf

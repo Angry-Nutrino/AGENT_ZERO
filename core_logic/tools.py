@@ -171,10 +171,14 @@ def web_search(query: str) -> dict:
     except Exception as e:
         return {"answer": f"Error doing web_search: {e}", "results": []}
     
-def get_time_date() -> str:
+def get_time_date(offset_days: int = 0) -> str:
     """Rich temporal grounding (upgraded 2026-06-12 — the old version returned a bare
     datetime repr). Gives Clara everything needed to resolve relative time: weekday,
-    both clock formats, timezone, part of day, and yesterday/tomorrow anchors."""
+    both clock formats, timezone, part of day, and yesterday/tomorrow anchors.
+
+    `offset_days` (Brief 50): when non-zero, appends a DETERMINISTICALLY-computed target line for
+    'N days from now / N days ago' questions — so Clara never hand-computes a calendar date/weekday
+    (she reliably errs on month-boundary rollovers; +10d failed 06-24m/06-25m). Sign: future +, past −."""
     now = datetime.now().astimezone()
     from datetime import timedelta
     yest, tom = now - timedelta(days=1), now + timedelta(days=1)
@@ -183,13 +187,23 @@ def get_time_date() -> str:
             else "afternoon" if hour < 17 else "evening" if hour < 21 else "night")
     tz = now.strftime("%z")
     tz_fmt = f"UTC{tz[:3]}:{tz[3:]}" if tz else "local"
-    return (
+    out = (
         f"Date: {now.strftime('%A, %d %B %Y')} ({now.strftime('%Y-%m-%d')})\n"
         f"Time: {now.strftime('%H:%M:%S')} (24h) / {now.strftime('%I:%M:%S %p').lstrip('0')} (12h) — {part}\n"
         f"Timezone: {tz_fmt} (IST)\n"
         f"Week {now.isocalendar()[1]} of {now.year}, day {now.timetuple().tm_yday} of the year\n"
         f"Yesterday was {yest.strftime('%A, %Y-%m-%d')}; tomorrow is {tom.strftime('%A, %Y-%m-%d')}"
     )
+    try:
+        n = int(offset_days)
+    except (TypeError, ValueError):
+        n = 0
+    if n:
+        tgt = now + timedelta(days=n)
+        rel = f"{abs(n)} day(s) {'from today' if n > 0 else 'ago'}"
+        out += (f"\n{rel.capitalize()}: {tgt.strftime('%A, %d %B %Y')} "
+                f"({tgt.strftime('%Y-%m-%d')})  (computed -- do not recompute by hand)")
+    return out
 
 def consult_archive(query: str) -> str:
     global RAG_ENGINE
@@ -313,6 +327,74 @@ def analyze_images_grok(
     return analyze_image_grok(client, path=paths[0] if paths else "", question=question, paths=paths[1:] if len(paths) > 1 else None)
 
 
+_OCR_PROMPT = (
+    "Transcribe ALL text visible in this image VERBATIM, preserving reading order and line breaks. "
+    "Output only the transcribed text — no commentary, no description. If there is no text, output '(no text)'."
+)
+
+
+def ocr_pdf(path: str, max_pages: int = 10, question: str = "") -> str:
+    """
+    OCR a SCANNED / image-only PDF (Brief 36 F.6 / Y2): rasterize each page and transcribe it via the
+    Gemini vision tool. FALLBACK ONLY — for PDFs with a real text layer, convert_to_markdown (markitdown)
+    is faster and more accurate; this exists for scans markitdown returns empty/garbage on. If the PDF
+    already has a substantial text layer, the text is extracted directly (cheap) instead of OCR'd.
+    Read-only; never raises (returns an error string). Page count is bounded by max_pages.
+    """
+    try:
+        import fitz  # PyMuPDF — self-contained wheel, no onnxruntime/magika (avoids the markitdown footgun)
+    except Exception:
+        return "Error: PyMuPDF (fitz) is not installed — cannot OCR PDFs."
+    p = pathlib.Path(str(path).strip().strip('"').strip("'"))
+    if not p.exists():
+        return f"Error: PDF not found at path: {path}"
+    try:
+        max_pages = max(1, min(int(max_pages or 10), 25))
+    except (TypeError, ValueError):
+        max_pages = 10
+    try:
+        doc = fitz.open(str(p))
+    except Exception as e:
+        return f"Error: could not open PDF: {e}"
+    try:
+        n_pages = doc.page_count
+        if n_pages == 0:
+            return "Error: PDF has no pages."
+        # If the PDF already has a real text layer, skip OCR — cheaper and more accurate.
+        existing = "".join(doc[i].get_text() for i in range(min(n_pages, max_pages)))
+        if len(existing.strip()) >= 100:
+            return (f"[PDF has a text layer — extracted directly, no OCR needed ({n_pages} page(s))]\n"
+                    + existing.strip())
+        # Scanned / image-only → rasterize + OCR each page via Gemini.
+        import tempfile
+        out = []
+        pages_to_do = min(n_pages, max_pages)
+        for i in range(pages_to_do):
+            try:
+                pix = doc[i].get_pixmap(dpi=200)
+                fd, tmp = tempfile.mkstemp(prefix=f"ocr_pg{i + 1}_", suffix=".png")
+                os.close(fd)
+                try:
+                    pix.save(tmp)
+                    text = analyze_image_grok(None, path=tmp, question=question or _OCR_PROMPT)
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+            except Exception as e:
+                text = f"(page {i + 1} OCR error: {e})"
+            out.append(f"--- Page {i + 1} ---\n{str(text).strip()}")
+        note = "" if n_pages <= max_pages else f"\n\n[Note: OCR'd the first {max_pages} of {n_pages} pages.]"
+        return "\n\n".join(out) + note
+    except Exception as e:
+        # Honor the "never raises" contract: get_text()/page_count can raise on an encrypted or
+        # corrupt PDF (a realistic weird-scan input) — return an error string, don't propagate.
+        return f"Error: OCR failed while reading the PDF: {e}"
+    finally:
+        doc.close()
+
+
 # ── Ambient Recall (BRIEF_39 A1) ────────────────────────────────────────────
 
 def ambient_recall(window: str = "24", query: str = "", date: str = "") -> str:
@@ -360,42 +442,79 @@ def set_agent_ref(agent) -> None:
     _agent_ref = agent
 
 
-def whatsapp_missed(query: str = "", limit: int = 20) -> str:
+def whatsapp_missed(query: str = "", limit: int = 20, status: str = "", mark_read=None) -> str:
     """
-    Report the WhatsApp messages that were HELD — the ones Alkama did NOT see because the sender
-    was not on the priority roster (Brief 45). Priority senders (Shobha) are surfaced straight into
-    the chat, so they are never 'missed' and are NOT in this archive by design. Optional `query`
-    filters by sender or text. For "what did I miss on WhatsApp", "any whatsapp today", "who messaged
-    me on whatsapp".
+    Read-only retrieval over the HELD WhatsApp archive (non-priority senders; Shobha is surfaced
+    straight into the chat and is never held). TWO behaviours, by whether you name a sender:
+      • No `query` → a DIGEST of UNREAD held messages ("what did I miss on WhatsApp"): grouped by
+        sender, counts + a short preview. Marks NOTHING read (a glance is not engagement).
+      • A sender/text in `query` → that sender's messages VERBATIM (the exact-fetch drill-down,
+        "what did Yash say"). This IS engagement, so the shown messages flip unread→read
+        (engage-to-read). They are never removed — ask again any time (they return under status='all').
+    `status`: 'unread' | 'read' | 'all' (default: unread for the digest, all for a drill-down so a
+    re-ask still returns already-read messages). `mark_read`: override the auto engage-to-read
+    (True = mark shown messages read even on a digest; False = peek without marking). Read is a LABEL,
+    never a delete. Brief 49.
     """
     try:
-        from .conversations import read_whatsapp_held
+        from .conversations import read_whatsapp_held, mark_whatsapp_read
     except ImportError:
-        from conversations import read_whatsapp_held
+        from conversations import read_whatsapp_held, mark_whatsapp_read
     try:
         limit = max(1, min(int(limit or 20), 100))
     except (TypeError, ValueError):
         limit = 20
 
-    rows = read_whatsapp_held(limit=limit)
-    if not rows:
-        return ("No held WhatsApp messages — nothing waiting. (Priority senders like Shobha come "
-                "straight to the chat, so they're never held here.)")
+    q = (query or "").lower().strip()
+    drilldown = bool(q)
+    # status default depends on intent: a drill-down wants ALL of that sender's messages (so a re-ask
+    # after engage-to-read still returns them); the digest wants only what's NEW (unread).
+    st = (status or "").lower().strip()
+    if st not in ("unread", "read", "all"):
+        st = "all" if drilldown else "unread"
+    status_filter = None if st == "all" else st
 
-    if query and query.strip():
-        q = query.lower().strip()
+    rows = read_whatsapp_held(limit=0, status=status_filter)   # whole filtered archive, not the tail
+    if drilldown:
         rows = [r for r in rows
                 if q in str(r.get("sender", "")).lower() or q in str(r.get("text", "")).lower()]
-        if not rows:
+    rows = rows[-limit:]
+
+    if not rows:
+        if drilldown:
             return f"No held WhatsApp messages match {query!r}."
+        return ("Nothing new on WhatsApp — you're caught up. (Priority senders like Shobha come straight "
+                "to the chat; ask for any sender by name to see their earlier messages, read or not.)")
+
+    # engage-to-read: a drill-down marks EXACTLY the shown rows read (precise, by id), unless overridden.
+    do_mark = mark_read if mark_read is not None else drilldown
+    marked = 0
+    if do_mark:
+        ids = [r.get("id") for r in rows if r.get("id") and r.get("status") != "read"]
+        if ids:
+            marked = mark_whatsapp_read(ids=ids)
 
     from collections import OrderedDict
     by_sender = OrderedDict()
     for r in rows:
         by_sender.setdefault(str(r.get("sender", "unknown")), []).append(r)
 
-    lines = [f"{len(rows)} held WhatsApp message(s) you haven't seen "
-             f"(from {len(by_sender)} sender(s); priority senders go straight to the chat):"]
+    if drilldown:
+        # VERBATIM: every matched message, full text, no truncation.
+        head = f"{len(rows)} WhatsApp message(s) from {len(by_sender)} sender(s)"
+        head += " (now marked read)" if marked else ""
+        lines = [head + ":"]
+        for sender, msgs in by_sender.items():
+            lines.append(f"\n**{sender}** ({len(msgs)}):")
+            for m in msgs:
+                ts = str(m.get("ts", ""))[:16].replace("T", " ") or "undated"
+                body = " ".join(str(m.get("text", "")).split())
+                lines.append(f"  [{ts}] {body}")
+        return "\n".join(lines)
+
+    # DIGEST: unread overview, grouped, short preview, last 5 per sender.
+    lines = [f"{len(rows)} unread held WhatsApp message(s) from {len(by_sender)} sender(s) "
+             f"(priority senders go straight to the chat). Ask for a sender by name to read theirs:"]
     for sender, msgs in by_sender.items():
         lines.append(f"\n**{sender}** ({len(msgs)}):")
         for m in msgs[-5:]:
