@@ -13,8 +13,18 @@
 body {
   background-color: var(--bg-void);
   color: #e2e8f0;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  /* JetBrains Mono was referenced but never actually shipped/loaded — prefer fonts that
+     exist on the machine (Cascadia ships with Win11) so rendering is deterministic. */
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', 'Fira Code', Consolas, ui-monospace, monospace;
   -webkit-font-smoothing: antialiased;
+}
+
+/* chat scroll region: we manage following-the-bottom ourselves — the browser's native
+   scroll anchoring fights that during token streaming (micro-jumps); gutter stays stable
+   so the scrollbar appearing/disappearing can't shift the layout. */
+.chat-scroll {
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
 }
 
 /* ── message arrival spring ──────────────────────────────────────────────── */
@@ -95,10 +105,15 @@ body {
 
 /* ── prose tweaks ─────────────────────────────────────────────────────────── */
 .prose {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', 'Fira Code', Consolas, ui-monospace, monospace;
 }
 .prose pre { overflow-x: auto; }
 .prose code::before, .prose code::after { content: none !important; }
+/* List markers must render INSIDE the bubble — outside-positioned markers hang past the
+   bubble's edge (the half-in-half-out numeric-answer bug). Defense-in-depth alongside the
+   bare-number sanitizer in Layout.jsx. */
+.prose ol, .prose ul { list-style-position: inside; padding-left: 0.4em; }
+.prose li > p { display: inline; }  /* keep "1. text" on one line with inside markers */
 
 /* table: horizontal scroll wrapper (injected via custom component) */
 .prose-table-wrap { overflow-x: auto; }

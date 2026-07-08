@@ -149,6 +149,28 @@ def _detect_fabricated_glint(raw_content: str):
 _ACTION_LINE_RE = re.compile(r'(?m)^[ \t>#*`\-]*Action\s*:', re.IGNORECASE)
 
 
+def _date_completeness_ok(raw_result: str, formatted: str) -> bool:
+    """G15 (2026-07-06, from the 05e Q21 real FAIL): when date_time computed a target date
+    (the '(computed' offset line), the formatted response must PRESERVE that date — format_llm
+    once condensed 'Wednesday, 10 June 2026 (2026-06-10) (computed...)' to just 'Wednesday.',
+    dropping the demanded half of the ask. Accepts the ISO form or a day-number+month form.
+    True = formatted is acceptable; no computed line = always True (never over-triggers on
+    plain date/time chatter)."""
+    m = re.search(r"^(.*\(computed.*)$", str(raw_result or ""), re.MULTILINE)
+    if not m:
+        return True
+    iso = re.search(r"(\d{4})-(\d{2})-(\d{2})", m.group(1))
+    if not iso:
+        return True
+    if iso.group(0) in formatted:
+        return True
+    import calendar
+    day = int(iso.group(3))
+    month = calendar.month_name[int(iso.group(2))]
+    f = formatted.lower()
+    return bool(re.search(rf"\b0?{day}(st|nd|rd|th)?\b", f)) and month[:3].lower() in f
+
+
 def _has_line_start_action(raw_content: str) -> bool:
     """True only when a LINE begins with an Action token (a real tool-call attempt), not a prose mention."""
     return bool(_ACTION_LINE_RE.search(raw_content))
@@ -1131,6 +1153,15 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             # 3. Route
             mode = route(interpreted)
             slog.info(f">> [Router] Mode: {mode}")
+            # UI mode event (2026-07-02): a FIRST-CLASS routing announcement. The old frontend
+            # inferred the mode by sniffing thought text for the words FAST/DELIBERATE — which no
+            # emission actually contained, so the chip only moved on prose accidents. Structured
+            # event instead; the escalation counterpart lives in _run_fast's failure branch.
+            if source == "user" and on_step_update:
+                try:
+                    await on_step_update("", type="mode", extra={"mode": mode})
+                except Exception:
+                    pass
 
             # Fix 1: DELIBERATE mandatory tool injection.
             # Cosine search targets the query's goal, not the operation — it misses
@@ -1448,6 +1479,16 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                                      "returning raw tool output for numeric fidelity.")
                         response = raw
 
+            # G15 (2026-07-06): the same fidelity principle for date_time COMPLETENESS — the
+            # 05e Q21 FAIL: format_llm condensed a complete computed-offset result to just
+            # "Wednesday.", dropping the demanded date. If the tool computed a target date,
+            # the formatted response must preserve it; else return the raw output.
+            if tool_name == "date_time" and tool_result:
+                if not _date_completeness_ok(tool_result, response):
+                    slog.warning("[FAST] format_llm dropped the computed target date — "
+                                 "returning raw date_time output for completeness (G15).")
+                    response = str(tool_result).strip()
+
             slog.info(f">> [FAST] Response:\n{response}")
             if on_step_update:
                 await on_step_update(response, type="stream", turn_id=0)
@@ -1461,6 +1502,13 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             slog.warning(f">> [FAST] Failed ({e}). Escalating to DELIBERATE.")
             if on_step_update:
                 await on_step_update("Thinking more carefully...", type="status")
+                # UI mode event (2026-07-02): make the FAST→DELIBERATE escalation a first-class
+                # observable — the chip renders "FAST → DELIBERATE" instead of silently lying.
+                try:
+                    await on_step_update("", type="mode",
+                                         extra={"mode": "DELIBERATE", "escalated_from": "FAST"})
+                except Exception:
+                    pass
 
             # Build failure context for DELIBERATE — tell it what was attempted,
             # what result was obtained (if any), and why it failed.

@@ -402,6 +402,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def handle_message(user_text: str, image_data, file_data, message_id: str, via_voice: bool = False):
         try:
+            # Upload ceiling (2026-07-03, UI-audit deferred item): base64 beyond ~11MB (≈8MB raw)
+            # risks the WS transport cap and stalls the pipeline decoding it. The client enforces
+            # 8MB with a friendly notice; this is the server-side belt.
+            _MAX_B64 = 11 * 1024 * 1024
+            _file_blob = (file_data or {}).get("data") if isinstance(file_data, dict) else file_data
+            for _blob, _label in ((image_data, "image"), (_file_blob, "file")):
+                if isinstance(_blob, str) and len(_blob) > _MAX_B64:
+                    slog.warning(f"[WS] Rejected oversized {_label} upload ({len(_blob) // 1048576}MB base64) for {message_id}.")
+                    await _broadcast({
+                        "type": "final_answer",
+                        "content": f"That {_label} is too large for me to take — the upload limit is 8MB.",
+                        "message_id": message_id,
+                        "source": "interface",
+                    })
+                    return
+
             # Brief 43.4 — voice cancel-filter: a spoken request ending in "leave it / never mind"
             # is REJECTED before process_request (never hits the LLM); Clara just acks. Text queries
             # are not filtered (this is the omnipresent-voice "false request" case). Deterministic.
@@ -702,9 +718,16 @@ async def voice_query_endpoint(req: VoiceQueryRequest):
 @app.get("/ambient_feed")
 async def ambient_feed_endpoint(limit: int = 50):
     """Recent ambient nudges for the interface feed (Brief 40 Y1e — passive, novelty-gated). The UI loads
-    this on connect so the feed is populated even for nudges surfaced while it was closed. Local-only."""
+    this on connect so the feed is populated even for nudges surfaced while it was closed. Local-only.
+    TTL (2026-07-08, Alkama's 07-04 rule "a nudge from yesterday should not load at all"): only entries
+    from the last AMBIENT_FEED_TTL_H hours (default 12) are served — a nudge is context-sensitive to its
+    moment; the full history stays in the ledger for calibration, it just doesn't LOAD."""
+    from datetime import datetime, timedelta
     from core_logic.ambient_loop import read_ledger
-    return {"feed": read_ledger(limit=max(1, min(int(limit or 50), 200)))}
+    rows = read_ledger(limit=max(1, min(int(limit or 50), 200)))
+    ttl_h = float(os.getenv("AMBIENT_FEED_TTL_H", "12"))
+    cutoff = (datetime.now() - timedelta(hours=ttl_h)).isoformat(timespec="seconds")
+    return {"feed": [r for r in rows if str(r.get("ts", "")) >= cutoff]}
 
 
 class AmbientFeedback(BaseModel):

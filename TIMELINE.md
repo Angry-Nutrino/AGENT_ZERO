@@ -1,6 +1,385 @@
 # CLARA Project Timeline
 
+## 2026-07-08
+
+[FEATURE] partner A signed /analyze path BUILT + offline-proven; pilot walkthrough LOCKED (Fri 07-10,
+5-6 AM IST) [`core_logic/admissibility.py`]. the governance partner delivered the exact signing spec: Ed25519 over the
+canonical JSON (sort_keys + compact separators) of {agent_id, command, timestamp, ts_unix}; headers
+X-Signature (base64) + X-Timestamp-Unix; body excludes ts_unix; replay is server-side (no nonce).
+`_partner_a_sign` + endpoint switch (PARTNER_A_ENDPOINT=simulate|analyze, default simulate — the enforced
+path is opt-in). Proven OFFLINE without touching /analyze: the delivered private key DERIVES the
+registered public key, and a signature over the spec's exact payload shape VERIFIES against that public
+key — the first enforced call is deliberately saved for the joint session (simulate-records review →
+first signed /analyze → ledger/replay/evidence inspection). Module self-test green.
+
+[UPDATE] Day's remaining decisions landed: **ambient chattiness = A, stay live** (Alkama; all five
+classes, current cooldowns, votes accumulate as tuning data; in-panel 12h expiry timer added to
+useClara.js — the backend TTL only applied at load time, the sweep ages unvoted cards out of an
+always-open session too, same-reference no-op guarded). **R19 CLOSED — Telegram voice notes work**
+(Alkama live-tested from his phone: "working just fine"). Jesse thread at a natural rest (his substrate
+answer logged; optional short close drafted).
+
+[UPDATE] Three DW1 decisions landed (Alkama, afternoon session):
+(1) **A2 screenshots: DEFERRED entirely** — A2 ships text-only; the locked capture design (trigger-only,
+forward-burst, frames-deleted) stays on paper; the vision-backend choice reopens only when live-nudge
+experience demonstrates text-only blindness (then: Gemini paid tier with floors, never free tier, never
+a local VLM on 4GB). (2) **Rotation cadence: CLIMB_AT 3→5** (`tests/test_harness.py`) — 5 consecutive
+daily passes per climb flag: ~5-day stable regression window, weekly-ish batches, real mastery evidence.
+Rotation remains explicit-trigger (pre-auth offered, not confirmed). Note: the 13 flagged evening
+questions sit at streak 5 already — the next "do the rotation" executes them. (3) **Ambient chattiness:
+pending Alkama** (he asked for the feedback/TTL mechanics first; A2 stays in the current live posture
+meanwhile).
+
+[FIX] Evidence-fabrication class closed THREE ways (from a live incident caught by Alkama)
+[`core_logic/interpreter.py`, `core_logic/system_prompt.py`, `tests/questions_morning.json`]. The
+incident: asked "are you observing improvements — do you have proof?", Clara (routed CHAT, conf 0.98,
+ZERO tools) COMPOSED a citation — named bench_2026-07-07.log as "the harness transcript", claimed
+"search for python_repl, zero format-cycling errors" (bench logs are latency/token tables — structurally
+cannot contain error records), invented "a previous log where malformed-JSON retries took out 3 queries"
+and "ran 20 queries" (63 data rows). The THESIS was true (the named failure_patterns exist in
+self_knowledge; those classes genuinely stopped recurring) — the EVIDENCE was fabricated, because CHAT
+has no tools and Rules 18/19 live in DELIBERATE. Fixes: (1) interpreter EVIDENCE-DEMAND rule —
+proof/verify/check-the-log/show-me → requires_planning=true, always (evidence = tools); (2) PERSONA
+"CITATIONS ARE EARNED, NOT COMPOSED" — naming a file's specific contents requires having read it this
+session; asked for proof, an honest "can't verify from here" beats composed evidence (scoped to checkable
+specifics, not knowledge-hedging); (3) new mQ23 L5 evidence-honesty drill question (oracle validated)
+testing the loop end-to-end daily. LIVE-VALIDATED after restart: the same question shape now routes
+DELIBERATE, reads benchmarks/ + the June session logs, and the answer OPENS with an unprompted
+self-correction of the original fabrication ("I did not verify it before stating it") + the true schema.
+
+[FIX] Ambient: machine-sleep gap-break (the live "21.0h straight" false nudge) + feed TTL
+[`core_logic/salience.py` `_inject_gap_breaks`, `api.py` /ambient_feed, ambient test suites rewritten].
+The nudge Alkama saw claimed a 21-hour session: he closed the lid while ACTIVE on 07-06 22:20 (no idle
+event ever fired), A0 recorded 478 min of total silence, and the session walk stitched evening+morning
+together. The store DISPROVED the original design assumption ("records on change only"): A0 heartbeats
+every few minutes while awake (max observed awake-gap 22 min) — so total silence >= AMBIENT_GAP_BREAK_MIN
+(45) reliably means asleep/off. `_inject_gap_breaks` converts such gaps into synthetic idle spans feeding
+BOTH detectors' existing idle logic: sessions break at wake, unobserved time credits no app, an unobserved
+user is never nudged. Suites REWRITTEN to the corrected world-model (heartbeat timelines) + the exact 21h
+regression + post-wake-duration + currently-unobserved cases — all green (long_session, off_rhythm,
+salience, ambient_loop). Feed TTL: /ambient_feed serves only the last AMBIENT_FEED_TTL_H (12) hours —
+Alkama's 07-04 rule ("a nudge from yesterday should not load at all") enforced structurally; the
+fabricated 21h ledger entry scrubbed. Backend restarted with all fixes; feed verified clean.
+
+[FIX] Stack launcher — THREE stacked bugs found and fixed live (the WSL trap was only the first)
+[repo root; `start_clara.sh` guard message updated]. Typing `bash start_clara.sh` in PowerShell resolves
+`bash` to the WSL launcher (WindowsApps stub — confirmed via `where.exe bash`), and the Windows venv can't
+run under WSL, so the .sh's WSL guard correctly rejected it — but the error's "or PowerShell" advice was a
+dead end without a wrapper. The .ps1 wrappers invoke GIT BASH explicitly (probe the three standard install
+paths, clear error if Git for Windows is absent) so `.\start_clara.ps1` / `.\stop_clara.ps1` just work;
+the guard message now names the exact fix. Fixing the wrapper EXPOSED two latent .sh bugs that had been
+masked by always launching from a fully-provisioned Git Bash session: (2) **`source activate` PATH
+corruption** — the Windows venv's activate writes "E:\...\Scripts:..." into PATH; bash splits on ":" so
+the drive letter becomes a bogus entry and command lookup goes NONDETERMINISTIC (nohup "not found" on some
+lines, found on others, varying per launch context — reproduced: `command -v python` returned the mangled
+"\ML_PROJECTS\..." path). Fixed per the project's own rule: NO activate, absolute
+`jarvis_v2/Scripts/python.exe`, plus a defensive nohup shim. (3) **`cmd /c` MSYS path-mangling** — Git
+Bash converts the `/c` arg to `C:\`, so cmd sat at an interactive prompt and vite NEVER launched
+(frontend.log was a bare cmd banner); fixed by invoking npm's sh-shim directly. End state validated: full
+clean restart through `.\start_clara.ps1` — backend /soul 200, frontend 200 on :5173 (Vite ready 1.3s),
+WhatsApp watcher + hotkey up, zero launch errors in any log. Stack LEFT RUNNING (owner's intent).
+
+[FEATURE] partner A adapter LIVE — CLARA's first two GOVERNED CALLS succeeded (the the governance partner pilot's core
+milestones) [`core_logic/admissibility.py`]. `_partner_a_evaluate` added to the gate's adapter registry
+(BRIEF_54 §7.1 contract: x-api-key auth, POST /api/v2/simulate, command-as-JSON-string; privacy floor
+holds — the envelope carries hashes/metadata only, the real path never leaves the machine; bounded timeout
+PARTNER_A_TIMEOUT_S=6 keeps the hot path sane; any transport failure raises → the gate's fail-open/closed
+setting decides). Live results: (1) health-check read_url → **ALLOW, risk=low, score 0.2**; (2) the benign
+sandboxed write_file envelope (dry_run+sandbox, the governance partner's confirmed first-test payload) → **REVIEW,
+risk=medium, score 0.62** — partner A risk-DIFFERENTIATES the two action classes, which is the pilot's
+proof point. Both returned action_hash; `ledger_hash=None` on simulate — question queued for the joint
+audit-trail inspection. Module self-test green. NOT armed: ADMISSIBILITY_ADAPTER stays local
+(noop/policy) — switching the live gate to the remote adapter is an arming call (latency + external
+dependency in the dispatch path) and waits for Alkama.
+
+[UPDATE] Drills 07-07 morning + evening — both CLEAN; the code-build ladder's FIRST question PASSED and
+was PROMOTED to L2. Morning 22/22 (17 PASS/5 UNVERIFIABLE all manually confirmed; first live run of the
+BRIEF_53 engine — no UNVERIFIABLE spike — and of the workspace sweep — correctly silent). Coherence: the
+`ambiguous-service` control "failed" (50% appropriately-asked) but ground-truthing showed a FIXTURE FLAW,
+not a Clara failure: she filesystem-searched for the claimed Go services, found none, and honestly disputed
+the false premise (Rule-19 beating a falsifiable fixture; ~61k tokens burned on the search). Fixture
+scope-fixed: "in a project I'm building elsewhere" (unfalsifiable premise, ambiguity preserved, scorer
+untouched, 24/24). Evening 23/23 (18 PASS/5 UNVERIFIABLE confirmed — eQ4's quote is real but spans 3
+source lines, the documented multi-line verbatim gap; claimed lines exact). **Q23 L1 rubric review
+(first-ever): PASS on all five axes** — clean guard-then-parse, honest claims; nits: unreachable
+IndexError arm, no str-coercion (L2's territory). **Promoted to L2** (`parse_bench_file` whole-file
+aggregation) with full oracle discipline: acceptance validated against a reference then byte-exact-restored
+out of HER file, and verified to FAIL the L1-only component. G15 note: eQ21 passed FORMATTED — the
+condensation is intermittent (2/3 evenings); guard stays.
+
+[UPDATE] partner A pilot UNBLOCKED — third registration attempt SUCCEEDED (the governance partner fixed the onboarding
+flow): `agent_275182dd30750045` with both pilot capabilities assigned at creation; Ed25519 keypair +
+capability-snapshot hash delivered and stored in `core_logic/.env` (gitignored-verified). Key transited
+chat → rotate after pilot (existing policy). Next: the `partner_a` adapter (BRIEF_54 §7.1) + first governed
+health-check.
+
+## 2026-07-07
+
+[FEATURE] BRIEF_56 — the Code-Build Ladder (generation axis) + drill write containment (BRIEF_55 resolved)
+[`tests/test_harness.py`, `tests/verification.py`, `tests/questions_evening.json`, `drill_workspace/`,
+`briefs/BRIEF_56_CodeBuild_Ladder.md`]. Alkama's two morning calls, both built same-day: (1) **BRIEF_55
+redirected** — drill traffic MAY write files (denial would strangle the new axis); containment instead:
+`drill_workspace/` sanctioned area (gitignored, README'd), harness **Phase 0.5** git-status baseline +
+**Phase 3.5 sweep** (new untracked strays outside safe prefixes → deleted + flagged in a report section —
+the 07-01 deadlines.md class; tracked-file modifications during a run → loud flag, NEVER auto-reverted;
+both wrapped, sweep can never fail a run; helpers live-tested both directions). Gate stays shadow — no
+enforcement armed. (2) **The code-build ladder** — the drill's first GENERATION question: eQ23 (L1) asks
+Clara to build `drill_workspace/clara_components/logstats.py::parse_bench_line` (TOTAL_MS from a bench
+line, never-raise contract) and prove it runs. One persistent component evolved level-by-level (L2
+robustness → L3 aggregation class → L4 CLI → L5 propose-as-native-tool = arming step on Alkama's desk);
+with memory_mode=none she re-reads her own code cold each level — component ownership, tested. New
+verifier `v_code_build`: subprocess-isolated acceptance snippet (30s timeout), PASS = EXECUTION ONLY,
+anything else UNVERIFIABLE (never FAIL — environment ≠ her error); **QUALITY is Claude's 5-axis rubric**
+(correctness/spec-fidelity/quality/self-consistency/honesty, in the brief so grading can't drift) — out of
+the verifier's league by design (Alkama). Oracle discipline extended: acceptance validated against a
+reference implementation THEN the reference deleted (empty workspace = her first build is really hers);
+rule recorded that level-N acceptance must FAIL level-N−1's component. Cadence: ONE build question,
+evening only (my evaluation quality is the binding constraint); second parallel component in the morning
+session only after component 1 graduates. Verifier suite 48→**51/51**; harness compiles; first live fire
+tonight 20:00. End goal on record: "make clara be able to write og codes for herself and build components."
+
+[FIX] Brief 53 CONFIRMED + IMPLEMENTED — key_facts silent false-PASS structurally closed
+[`tests/verification.py`, `tests/test_verification.py`]. Alkama's morning verdict: Option 3 + the light
+prompt line. `v_key_facts` Tier-2 now tracks each ambiguous fact's ROUTE: a judge-true on
+**present-but-hedged** (token in the text, judge rules on tone) stays PASS — the safe branch unchanged;
+a judge-true on **missing-but-substantive** (token absent, "possible paraphrase") is NEVER auto-credited —
+it routes to UNVERIFIABLE with an explicit "judge accepted a PARAPHRASE … spot-check" evidence string.
+Monotone-safe: the change can downgrade an auto-PASS to manual review, it cannot manufacture a false-FAIL
+(FAIL still requires hard-missing facts at majority, same threshold as before). The judge prompt gained the
+setup-vs-delivery line ("being ABOUT the fact is not asserting it" — the exact conflation that minted the
+06-25e Q13 PASS on a truncated answer naming neither required form). Self-test 46→48 fixtures: the
+missing-route flip (the old PASS expectation inverted BY DESIGN), hedged-route-stays-PASS, and the Q13
+truncated shape which can now never PASS via any judge verdict — 48/48. WATCH for the next few crons: a
+small rise in key_facts UNVERIFIABLEs is expected and is the feature working (each one = a spot-check that
+was previously a silent auto-PASS); yesterday's G7 oracle broadening keeps the volume low (more paraphrases
+now satisfy Tier 1 deterministically).
+
+## 2026-07-06
+
+[FEATURE] off_rhythm — the second A2 signal-set marker (agreed 2026-07-04, built)
+[`core_logic/salience.py` `detect_off_rhythm`, `core_logic/ambient_loop.py`, `tests/test_off_rhythm.py`].
+The drift anchor: "mostly Instagram for the last 15 minutes — not your usual rhythm for this hour." Built
+to the design recovered VERBATIM from the 07-04 session transcript (not from memory). Three gates:
+(1) WINDOW-DOMINANCE — one app must hold ≥60% of the ENGAGED held-span over the last 15 min (env
+OFF_RHYTHM_WINDOW_MIN / OFF_RHYTHM_DOMINANCE); a 10-second switch can never fire (Alkama's explicit
+worry); idle stretches credit no app. (2) HOUR-DEVIANCE — recognition `1 − days_seen(proc,hour)/
+days_observed` feeds the gate's existing off_rhythm novelty branch (rhythm_dev); with actionability 0.6,
+SURFACE needs dev ≥ 0.75 (app seen at this hour on <25% of days — lunch-hour Brave scores 0.5 → HOLD);
+NO/immature baseline → total silence (an unmatured system must not accuse drift). (3) STILL-DRIFTING —
+at fire-time the current foreground must still be the deviant app and the user not idle; self-correction
+is invisible ("no nagging the self-corrected" — his confirmed requirement). Any screenshot/enrichment is
+strictly downstream of a committed fire (no fire → no camera; capture pipeline stays parked pending the
+vision-backend decision). Wired through the identical tick() gate→dedup→ledger→emit path with a 2h class
+cooldown; composer template + a gentle "anchor, never scold, no questions" LLM register.
+Tests 15/15 (drift fires dev=1.0; 10-second switch never; snapped-back suppressed; habit app HOLDs at
+0.06; idle spans uncredited; currently-idle silent; no-baseline silent; sparse-A0 foreground persistence;
+half-familiar HOLDs at 0.30). salience + ambient_loop + long_session self-tests all green.
+
+[UPDATE] G7 closed — over-strict key_facts watch resolved as a LATENT class, defused oracle-side
+[`tests/questions_morning.json` Q16, `tests/questions_evening.json` Q02/Q03/Q06/Q20]. The watch (from the
+06-04 Q20 false-FAIL: an oracle demanding a term the QUESTION itself supplies) never recurred in a graded
+run — but the audit showed why it's still live: for 2-fact oracles `v_key_facts` FAILs on ONE unasserted
+fact (threshold `(2+1)//2 = 1`), so a correct answer that doesn't echo a question-supplied term is one
+formatter mood away from a false FAIL. A mechanical scan found 5 current questions carrying
+question-supplied must_include terms; each group was broadened with SUBSTANCE synonyms (e.g. eQ06
+"0.35" → ["0.35","event loop","blocking","cpu-bound"] — the asked "why" now satisfies the oracle without
+the echo). Monotone change (any-of groups only gain paths — regression impossible); validated: tonight's
+real answers all PASS under the new oracles, a synthetic correct-but-non-echo answer flips FAIL-risk →
+PASS, suite 46/46. Question text untouched (no-reword rule).
+
+[UPDATE] Drill 2026-07-06 evening — 22/22 CLEAN; the G15 guard FIRED live and saved Q21; G16's first
+scheduled pass. Scorecard 18 PASS / 0 FAIL / 4 UNVERIFIABLE (all four manually judged PASS: Q17's
+`_reformatted` condition verbatim-exact at agent.py:1929; Q5/Q8/Q15 knowledge sound). The run's one real
+event: format_llm condensed the Q21 date_time block AGAIN (2/2 consecutive evenings — persistent formatter
+behavior on this class, not a one-off) and `_date_completeness_ok` shipped the raw block instead — log
+20:08:54 "[FAST] format_llm dropped the computed target date — returning raw date_time output for
+completeness (G15)"; verifier PASS (−25d → Thursday 2026-06-11). WATCH: cost is polish (raw block instead
+of a sentence) — if it grates in real use, next step is retry-once-then-raw, never guard removal. G16:
+the run existing at all = api_is_usable() passed pre-flight on the topped-up key (402 casualty → guarded
+clean run same-day). Layer 2 gold-seed MATCHED (05e mismatch was a one-off). Ladder: 13 questions
+CLIMB-DUE (streak ≥3 since the 07-03 batch) — NOT climbed (explicit-trigger rule); queued for Alkama's
+next rotation call. eQ21 fail_count 1→0; all 22 last_result=pass. Verifier self-test 41/41 (pre-extension
+engine; the 46-fixture claimed-line engine rides tomorrow morning).
+
+[UPDATE] G4 — Layer-1 verbatim_quote now verifies a CLAIMED line number (+ quoted-span extractor gap)
+[`tests/verification.py`, `tests/test_verification.py`]. Closed the documented v1 gap ("Verbatim PASS
+confirms the quote is real, not that the answer is correct"): when an answer claims a location for its
+quote ("line 42" / "file.py:42"), `v_verbatim_quote` now locates the quote's real line(s) at grade time and
+requires a claim within ±3 (absorbs same-day edit drift between the cron run and grading). Real quote +
+wrong claimed line → **UNVERIFIABLE with an explicit location-mismatch evidence string** ("possible
+fabricated line number", routes to manual judgment) — NEVER FAIL, per the trust-safe contract; no claimed
+line → behavior unchanged (strictly additive). While fixturing this, found+fixed a second real gap: the
+candidate extractor handled backtick/bold spans but NOT plain '"..."' (or «»/curly) quoted spans
+mid-sentence — a correct quote in Clara's common 'Line 4: "…"' format could never confirm (a missed-PASS
+class; eQ17's «…» style included). Both directions live-checked (mismatch evidence surfaces; correct claim
+PASSes with "claimed line confirmed"). Self-test suite extended 41→46 fixtures (right line / drift-tolerant
+/ fabricated line / fabricated file:line / a time like "08:10" is NOT a line claim) — **46/46**; the
+Phase-1.4 pre-flight guards it every cron.
+
+[FIX] G14 — coherence-drill filesystem leak: investigated, mitigated, durable fix briefed (BRIEF_55)
+[`tests/coherence_dialogues.json`, `briefs/BRIEF_55_TestMode_Tool_Sandbox.md`]. Full mechanism from the
+07-01 08:00 session log: dialogue `manager-her` turn 2 ("She also wants the API spec by Friday.") was read
+by the Interpreter as a REAL request (requires_planning=true) → DELIBERATE → tool_search → `write_file` →
+real `deadlines.md` at repo root with fictional content ("requested by Priya"). Clara behaved correctly —
+the fixture was indistinguishable from a real ask; `memory_mode=ephemeral` isolates memory but tool calls
+still EXECUTE (the 06-07 fixture-pollution class, re-expressed via the filesystem). Mitigation applied:
+turn 2 rephrased informational ("She also mentioned the API spec is due Friday — just so you have the
+context." — Priya/Friday facts intact, scored probe untouched, JSON valid, scorer self-test 24/24); all
+other setup turns audited declarative-clean. `deadlines.md` deleted (content preserved verbatim in the log
++ brief); its .gitignore line KEPT as defense until the class is closed. Durable class-fix = BRIEF_55:
+recommended Option A — thread `memory_mode` into the tool envelope and let the ADMISSIBILITY GATE enforce
+one rule (test-mode + write-class → DENY with an explanatory tool result); would be the gate's first live
+enforcement case. Pipeline-contract change → briefed, not built.
+
+[ENHANCEMENT] A2 remark composer — per-class CHARACTER + anti-fabrication backstop
+[`core_logic/ambient_loop.py`]. From Alkama's 07-04 calibration ("nudges should have character — 'What are
+you doing so late, night owl?'"): `_llm_remark` now carries a per-class register (`_REMARK_CHARACTER`) —
+odd_hours gets the playful night-owl tease with ONE rhetorical question explicitly allowed (his target
+example is a question; the blanket no-questions rule is now per-class), long_session = warm stretch/water
+care without nagging, new_app = curious, battery = dry + urgent. Live sampling immediately caught the cost
+of temp-1.1 polish: **fabricated facts** ("Two new Obsidian notes appeared on your desktop", "You checked
+the battery at 1:15 PM", "~2.7h" → "Three hours"). Fixed twice over: the prompt now forbids
+added/rounded facts, and `_remark_fidelity_ok` is a deterministic backstop (same principle as `_run_fast`'s
+numeric guard) — every template number must survive verbatim into the polish and the polish may not
+introduce new clock-times; any violation → the deterministic template ships. Re-sampled all four classes
+post-fix: register kept, zero fabrication ("VS Code at 4 AM — what are you doing up at this hour, night
+owl?"). Self-test green; guard cases 5/5.
+
+[FIX] G16 — harness API-VALIDITY pre-flight (the 402 guard) [`tests/test_harness.py`]. The 06-morning cron
+(fired LATE at 11:06 — laptop asleep at 08:00, R15 class) produced an ALL-ERROR report: **DeepSeek 402
+"Insufficient Balance" on every call** — reachability passed (Brief 41 checks the host, not the account) and
+22 questions "ran" as exception fallbacks, polluting 14 fail_counts. Response chain: run classified INFRA in
+its analysis (Clara's record untouched); the 14 fail_counts RESTORED from the 05m ladder snapshot; **Telegram
+alert sent autonomously at 11:35** (the notifier's designed purpose — system tells its owner it's out of
+fuel) → **Alkama topped up ~12:00; the remote-alert loop worked end-to-end**. G16: `api_is_usable()` — one
+minimal completion after the reachability check; 402/401 → clean skip + Telegram, no spawn, no report, no
+pollution; transients deliberately proceed. LIVE-validated against the real outage (detected the actual 402),
+then re-validated after top-up (usable=True).
+
+[FIX] G15 — date_time COMPLETENESS guard in `_run_fast` [`core_logic/agent.py`,
+`tests/test_date_completeness.py`]. From the 05e Q21 real FAIL: format_llm condensed the complete computed
+block to "Wednesday.", dropping the demanded date. New module-level `_date_completeness_ok(raw, formatted)`
+— when date_time's output carries a "(computed" target line, the formatted response must preserve the target
+date (ISO or day+month form) or the raw output ships (mirrors the numeric-fidelity guard beside it).
+Regression test 8/8 incl. the exact failure case, legit-rephrase no-over-trigger, and the
+completeness-not-correctness boundary. Live-fire rides tonight's cron (eQ21 fail_count=1 reruns).
+
+[FEATURE] long_session — the first A2 signal-set enrichment (agreed 2026-07-04, built)
+[`core_logic/salience.py` `detect_long_session`, `core_logic/ambient_loop.py`, `tests/test_long_session.py`].
+WINDOW-evaluated over the A0 timeline (NOT per-record — **A0 records active_window on CHANGE only, so a 3h
+unbroken session is ONE record**; foreground persists between records; the ONLY session-breaker is a
+session_rhythm idle stretch ≥ break-tolerance). Fires at 150 min continuous (env-tunable
+LONG_SESSION_TRIGGER_MIN / LONG_SESSION_BREAK_MIN); novelty = min(1, duration/trigger) → crosses the 0.45
+gate exactly at trigger with actionability 0.5; the existing 2h class cooldown ≈ once-per-2h re-fires on the
+same unbroken session (accepted semantics); currently-idle users are never nudged; nudge names the dominant
+app by held-span; composer branch added ("You've been at it ~2.7h straight — mostly VS Code…" + the LLM
+polish rides on top). Tests 11/11: the sparse single-record trap, tea-pause tolerance (6min no-reset), 20-min
+gap reset, midnight span, dominant-app math, currently-away suppression, gate-SURFACE at exactly 0.5. Boot
+validated (A2 loop starts clean; live FAST query post-top-up: "5040." ✓).
+
+## 2026-07-05
+
+[UPDATE] The Drill — FIVE reports closed (03e · 04m · 04e · 05m · 05e) — **THE ROTATION VERDICT: the ladder
+HELD.** All three first runs of the 29 climbed questions (04m 17/0/5 · 04e 18/0/4 · 05m 17/0/5) were CLEAN —
+every L3 chain, L4 doc-vs-code, L5 verbatim+honesty and R3 datetime rung answered at full depth (substance
+spot-checked, not just scorecard-trusted: release_task lock rationale exact; ArbitrationResult verbatim +
+honest "reorder never returned"; BOTH _atomic_search guardrail notes quoted in full; the Brief-51/52 helper
+names self-referentially recalled; +45d double-month-cross → Tuesday 2026-08-18 exact). Zero oracle defects —
+the validate-before-write rotation discipline paid off completely. 03e closed the OLD evening set's book at a
+10-run streak. Minor prose slip WATCHed (04e Q04 "Deep-Crawl" — a mangled "DC", naming confabulation inside
+a perfect answer). **05-evening then produced the rotation era's FIRST FAIL — real, and instructive:** Q21
+(−25d) delivered just "Wednesday." — correct weekday, demanded date dropped. Mechanism (session log):
+Brief 50 worked (tool called with offset_days=-25, returned the full computed block); **format_llm condensed
+the complete block to one word** — the fidelity class (65536→65636 family) as COMPLETENESS loss on
+date_time, uncovered by the python_repl-scoped numeric guard → **BACKLOG G15** (extend the guard).
+fail_count→1, question verbatim. Layer-2 had a bad night on that run (fallback error + a trace-contradicted
+mechanism claim + gold-seed ❌, 2nd ever) — advisory-only rule reaffirmed; WATCH. Net: **13 of 14 sessions
+clean since 06-27e**, the one FAIL fully mechanized, guard extension queued.
+
+## 2026-07-03
+
+[UPDATE] The Drill — catch-up (07-01e 18/0/4 · 07-02m 17/0/5 · 07-02e 18/0/4 · 07-03m 17/0/5) + the
+**BATCH ROTATION** (explicit trigger). All four runs CLEAN: **nine consecutive sessions with zero real
+Clara failures** (since 06-27e) and **four consecutive with zero verifier artifacts**; verifier self-test
+41/41 on every run; all four Layer-2 gold seeds ✅ MATCH; coherence steady (recall 100%, didn't-need-to-ask
+100%). Residual process notes only: Q13's recurring in-turn glint fabrication (guard catches it, ~0 cost),
+Q17's occasional LangChain-remap format glint (1-turn leak), and 07-02e Q13 answered from ARCHIVE CONTEXT
+instead of reading agent.py (right facts, wrong source — Clara self-flagged it; Rule-18-adjacent WATCH).
+**Rotation: 29 questions promoted in one validated batch** (14 morning + 15 evening — the climb-due backlog
+accrued across the clean streak). Every climb = same area, one rung up (L2→L3 chains, L3→L4 doc-vs-code /
+cross-file, L4→L5 verbatim+honesty / failure-of-failure-path; datetime R2→R3 [±45d/−25d double-boundary,
+135/200-min composite deltas]; fresh L5 absence targets; eQ13 now asks for the Brief-51/52 helper names
+themselves). **Every oracle validated against live source BEFORE writing** (script-enforced, all-or-nothing):
+search counts re-derived (asyncio.Lock 5/4, threading.Lock 6/5, asyncio.gather 4/4), verbatim targets
+grepped, key_facts terms confirmed in source, absence targets confirmed 0 — and the guard EARNED ITS KEEP:
+the first candidate (shutil.rmtree) turned out to be PRESENT (3 hits — my own self-tests from this week);
+the validation ABORTED the write and the target was swapped to multiprocessing.Pool (confirmed absent).
+Backups: `questions_*.json.bak-rotation-2026-07-03`. **Accepted bet, stated explicitly:** tonight's 20:00
+cron is the first live validator of 15 climbed evening questions — first-run volatility is expected and is
+the ladder working, not a regression; judge tomorrow's drill against the NEW rungs.
+
+[FEATURE] A2 ambient remarks — humanized composer + LLM polish + vote-dismiss (Alkama: remarks "very very
+generic"; "once I give a thumbs up it should disappear"). `core_logic/ambient_loop.py`: `_template_remark`
+rewritten (friendly app names via `_PROC_NAMES` map, 12-hour time — he never does 24h conversions — and
+day-aware phrasing "on Saturday"/"yesterday"); NEW `_llm_remark` — one cheap non-reasoning DeepSeek call
+rewrites the template into a natural personal remark (validated live: "You opened Brave at 10 PM on Friday,
+breaking your usual evening routine."), fallback = template on ANY failure, kill switch `A2_REMARK_LLM=off`
+(default on), 10s bound, runs in the async delivery path (`_deliver`) so the loop never blocks; entries
+carry `remark_seed` (the deterministic template) as the dedup key — LLM text varies per call and can never
+be the comparator (`_recent_duplicate` compares seed-or-remark, so pre-07-03 rows still dedupe). UI
+(`useClara.js`): a 👍/👎 vote = ACKNOWLEDGE — flashes 450ms then the card leaves the feed; the `/ambient_feed`
+seed filters out already-voted nudges so they never resurrect on reload (the vote persists in the ledger for
+calibration). Validated: module replay clean, template unit-checks (humanized/12h/day-aware), live DeepSeek
+polish smoke, frontend build green. Backend/vite stopped after — tonight's cron boots the new code.
+
+[ENHANCEMENT] Interface round 2 — the four audit-deferred items + thought-stream readability + ambient-feed
+truth (Alkama: "implement these… make the whole thing more presentable and readable"). (1) **Code-split:**
+`react-syntax-highlighter` (≈70% of the 1.03MB bundle) is now `React.lazy` — **initial page load 1,030KB →
+392KB (−62%)**; the highlighter chunk loads on the first code block with a styled `<pre>` fallback. (2)
+**Query-card cap 30** (`openCard` slice; voice path unified through it) — the Neural panel's DOM no longer
+grows unboundedly. (3) **Upload ceiling 8MB** — client-side friendly rejection chip (picker + paste paths,
+auto-clears) + server-side belt in `api.py handle_message` (~11MB base64 guard → honest final_answer instead
+of a WS-transport stall). (4) **Per-card mode badges** — the router's `mode` events now stamp their card
+(`FAST`/`CHAT`/`DELIBERATE`, escalation arrow), so the Query Log reads as routing history; header chip stays
+global-latest. (5) **Thought-stream readability redesign** (the "hover highlights barely or not at all"
+complaint): numbered steps (01/02…), System-vs-Clara distinction (sys tag, italic), base contrast raised from
+~40%→80% opacity at 11px, per-row hover that genuinely lights up (CSS-only — memo/jitter-safe), live-step
+tag, roomier rhythm, card body max-h 52→72. Verified on screen (expanded card shows the new layout; badge
+renders). (6) **Ambient twin-nudge fix** — Alkama's screenshot showed duplicate "brave.exe at 22:00" nudges;
+the ledger proved they were from Jun 25 + Jun 27 (two DAYS apart) rendered with time-only labels. Fixes:
+`ambientWhen()` date-aware labels ("Jun 27 · 22:02" when not today — verified on screen); `ambient_loop.py`
+`_recent_duplicate()` suppresses an IDENTICAL (class, remark) nudge within 72h at the source (validated
+against the real ledger: dup-within → True, outside-window/different-remark → False); entries now also carry
+`category` (consumer alias — `/ambient_feed` returns raw ledger rows and the UI reads `category`, which
+pre-07-03 rows never had → blank labels). Builds green ×2; live visual validation via Chrome (DELIBERATE
+round-trip, expanded card, ambient dates). Files: `interface/src/{hooks/useClara.js,Layout.jsx}`, `api.py`,
+`core_logic/ambient_loop.py`, `interface/UI_AUDIT_2026-07.md` (statuses flipped).
+
 ## 2026-07-02
+
+[REFACTOR] Interface hardening + polish — full emission→render audit (Alkama: "everything should be
+elegant like a work done by an artist"; catalog in `interface/UI_AUDIT_2026-07.md`, 85 cases). His two
+recorded bugs ROOT-CAUSED + fixed + re-verified live: (1) **"answer half outside the bubble"** = a bare
+numeric answer ("479001600.") is valid Markdown for an EMPTY ORDERED-LIST ITEM — the number becomes a list
+MARKER rendered outside the content box; every FAST compute triggers it. Fixed with a bare-number sanitizer +
+`list-style-position: inside` backstop (reproduced on screen before, verified gone after). (2) **thought-
+stream jitter** = scrollIntoView firing per token + per-token full-tree re-renders + the neural panel
+auto-scrolling to the BOTTOM when new cards prepend at the TOP. Fixed: stick-to-bottom chat scrolling,
+rAF-batched stream flushes (one render/frame), React.memo on all three card/bubble components, hover-guarded
+panel scrolling, per-card thought-following. **Deeper fixes the audit found:** per-message stream buffers
+(a GLOBAL buffer interleaved concurrent queries' tokens into one garbled bubble; any final_answer cleared
+every stream); a **double-socket reconnect bug** (stale retry timer → two live sockets → every broadcast
+handled twice → duplicate answers; observed live) fixed with a single-socket invariant + dedupe belt;
+/history seeding raced + order-corrupted local state (live-flag merge fix + CLEAR-resurrection fix via
+clara_cleared_at); localStorage quota death from persisted base64 images (bounded, stripped); send-while-
+disconnected silently dropped messages that LOOKED sent; 12-min stale sweep unsticks dead cards; dangling-
+fence + IME + link-target + overflow-wrap + quote-clamp + fonts + title. **[FEATURE] within it:** structured
+`mode` WS events from the router (agent.py) — the mode chip was TEXT-SNIFFING thought prose for words no
+emission contained; now it shows real routing, and a FAST→DELIBERATE escalation renders as a pulsing
+"FAST → DELIBERATE" arc (previously invisible). Validated: 2× `npm run build` green, agent.py parsed, live
+Chrome session — CHAT/DELIBERATE/FAST round-trips, both bugs reproduced-then-gone, console clean after
+fixing the two extra defects it surfaced (duplicate archive keys, unnamed form field). Files:
+`interface/src/{hooks/useClara.js,Layout.jsx,index.css}`, `interface/index.html`, `core_logic/agent.py`.
 
 [FEATURE] Telegram voice notes — local Whisper STT into the full pipeline (Alkama greenlit: "Build this").
 `core_logic/telegram_bot.py`: new `_handle_voice` handler, registered ONLY when `TELEGRAM_VOICE=on` (armed

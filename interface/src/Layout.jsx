@@ -1,8 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
   Terminal, Cpu, Send, Paperclip, X, Zap, Activity,
   Shield, User, Copy, Check, ChevronRight, Radio,
@@ -21,6 +19,28 @@ function useCopy(timeout = 1500) {
   }, [timeout]);
   return [copied, copy];
 }
+
+// ─── Lazy syntax highlighter — react-syntax-highlighter (prism + refractor) was ~70% of the
+// 1.03MB main bundle, paid on every load before a single code block existed. Split into its
+// own chunk, fetched on the first code block; the fallback renders the code as a plain <pre>
+// for the (local, instant) load beat, so nothing ever flashes empty.
+const LazyHighlighter = React.lazy(async () => {
+  const [{ Prism }, { oneDark }] = await Promise.all([
+    import("react-syntax-highlighter"),
+    import("react-syntax-highlighter/dist/esm/styles/prism"),
+  ]);
+  return { default: (props) => <Prism style={oneDark} {...props} /> };
+});
+
+const codeBlockStyle = {
+  background: "rgba(0,0,0,0.72)",
+  border: "1px solid rgba(16,185,129,0.12)",
+  borderRadius: "10px",
+  fontSize: "12px",
+  margin: 0,
+  padding: "14px 16px",
+  fontFamily: "'JetBrains Mono','Cascadia Code','Fira Code',monospace",
+};
 
 // ─── Syntax-highlighted code block with copy button ─────────────────────────
 function CodeBlock({ language, children }) {
@@ -41,30 +61,46 @@ function CodeBlock({ language, children }) {
           {copied ? "COPIED" : "COPY"}
         </button>
       </div>
-      <SyntaxHighlighter
-        language={language || "text"}
-        style={oneDark}
-        PreTag="div"
-        customStyle={{
-          background: "rgba(0,0,0,0.72)",
-          border: "1px solid rgba(16,185,129,0.12)",
-          borderRadius: "10px",
-          fontSize: "12px",
-          margin: 0,
-          padding: "14px 16px",
-          fontFamily: "'JetBrains Mono','Fira Code',monospace",
-        }}
-      >
-        {children}
-      </SyntaxHighlighter>
+      <Suspense fallback={
+        <pre style={{ ...codeBlockStyle, overflowX: "auto", whiteSpace: "pre",
+                      color: "#d4d4d8", fontSize: "12px" }}>{children}</pre>
+      }>
+        <LazyHighlighter
+          language={language || "text"}
+          PreTag="div"
+          customStyle={codeBlockStyle}
+        >
+          {children}
+        </LazyHighlighter>
+      </Suspense>
     </div>
   );
 }
+
+// ─── Streaming-markdown guard: a dangling ``` fence mid-stream swallows everything
+// after it into one giant code block (layout blowout until the closing fence arrives).
+// Close it virtually for the in-flight render only — the final message re-renders clean.
+const closeDanglingFence = (text) => {
+  const fences = (text.match(/```/g) || []).length;
+  return fences % 2 === 1 ? text + "\n```" : text;
+};
+
+// ─── Bare-number answers ("479001600.") are valid Markdown for an EMPTY ordered-list item —
+// the number becomes a list MARKER rendered outside the content box, i.e. hanging half out of
+// the bubble (the recording bug, reproduced live 2026-07-02). Escape the dot so it renders as
+// the plain sentence it is. Every FAST numeric compute ends exactly like this.
+const sanitizeMarkdown = (t) =>
+  /^\s*[\d,]+\.\s*$/.test(t || "") ? t.replace(".", "\\.") : t;
 
 // ─── Shared markdown component overrides ─────────────────────────────────────
 const markdownComponents = {
   // passthrough — CodeBlock renders the outer container
   pre: ({ children }) => <>{children}</>,
+
+  // external links must not navigate the SPA away
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  ),
 
   code({ className, children }) {
     const match = /language-(\w+)/.exec(className || "");
@@ -93,9 +129,40 @@ const markdownComponents = {
   ),
 };
 
+// ─── Ambient timestamp: bare "22:02" made a nudge from LAST WEEK look like it fired two
+// minutes ago (the twin-nudge confusion, 2026-07-03) — show the day when it isn't today.
+const ambientWhen = (ts) => {
+  const s = String(ts);
+  const time = s.slice(11, 16);
+  const today = new Date().toISOString().slice(0, 10);
+  if (s.slice(0, 10) === today) return time;
+  const d = new Date(s);
+  return isNaN(d) ? time
+    : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} · ${time}`;
+};
+
+// ─── Mode palette (header chip + per-card badges share it) ───────────────────
+const MODE_STYLES = {
+  FAST:       { color: "text-amber-400 border-amber-500/30 bg-amber-500/10",      pulse: false },
+  CHAT:       { color: "text-blue-400 border-blue-500/30 bg-blue-500/10",         pulse: false },
+  DELIBERATE: { color: "text-emerald-400 border-emerald-500/40 bg-emerald-500/10", pulse: true  },
+};
+
 // ─── Per-query thought card ───────────────────────────────────────────────────
-function QueryCard({ card, onToggle }) {
+// Memoized: during token streaming the whole tree re-renders per frame — cards whose
+// props didn't change must not pay for it (this was half of the observed panel jitter).
+const QueryCard = React.memo(function QueryCard({ card, onToggle }) {
   const isActive = !card.isComplete && !card.isCancelled && !card.isFailed;
+  const bodyRef = React.useRef(null);
+
+  // New thoughts land at the bottom of the card's OWN scroll area — follow them there
+  // (only while active + only if the reader isn't hovering inside the card body).
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !isActive) return;
+    if (el.matches(":hover")) return;
+    el.scrollTop = el.scrollHeight;
+  }, [card.thoughts.length, isActive]);
 
   const stateLabel = card.isCancelled ? "CANCELLED"
     : card.isFailed   ? "FAILED"
@@ -136,6 +203,13 @@ function QueryCard({ card, onToggle }) {
             <span className={`text-[8px] font-bold font-mono tracking-widest ${stateColor}`}>
               {stateLabel}
             </span>
+            {/* per-card routing badge — this card's OWN mode, kept as history */}
+            {card.mode && (
+              <span className={`text-[8px] font-bold font-mono tracking-wider px-1 py-px rounded border
+                ${MODE_STYLES[card.mode]?.color || "text-white/30 border-white/10"}`}>
+                {card.escalatedFrom ? `${card.escalatedFrom}→${card.mode}` : card.mode}
+              </span>
+            )}
             {card.thoughts.length > 0 && (
               <span className="text-[8px] font-mono text-white/15">
                 {card.thoughts.length} step{card.thoughts.length !== 1 ? "s" : ""}
@@ -149,24 +223,55 @@ function QueryCard({ card, onToggle }) {
         />
       </div>
 
-      {/* body — expandable */}
+      {/* body — expandable. Readability redesign (2026-07-03): the old rows were 10px text at
+          ~40% opacity with no hover response — unreadable for anyone actually studying the
+          stream. Now: numbered steps, System-vs-Clara distinction, real base contrast, a
+          per-row hover that genuinely lights up (CSS-only — memo/jitter safe), roomier rhythm. */}
       {card.isExpanded && (
-        <div className="border-t border-white/5 px-3 pt-2 pb-3 space-y-2 max-h-52 overflow-y-auto scrollbar-thin">
+        <div ref={bodyRef} className="border-t border-white/5 px-2.5 pt-2 pb-2.5 space-y-1 max-h-72 overflow-y-auto scrollbar-thin">
           {card.thoughts.length === 0 ? (
-            <p className="text-[10px] text-white/20 font-mono italic py-1">
+            <p className="text-[10px] text-white/25 font-mono italic py-1">
               {isActive ? "Awaiting thoughts…" : "No thoughts recorded."}
             </p>
           ) : (
             card.thoughts.map((t, i) => {
               const isLast = i === card.thoughts.length - 1;
+              const isSystem = t.source === "System";
+              const live = isLast && isActive;
               return (
-                <div key={i} className={`border-l-2 pl-2.5 py-0.5 ${
-                  isLast && isActive ? "border-emerald-500/60" : "border-white/8"
-                }`}>
-                  <span className="block text-[8px] font-mono text-white/20 mb-0.5">{t.time}</span>
-                  <span className={`text-[10px] font-mono leading-relaxed whitespace-pre-wrap ${
-                    isLast && isActive ? "text-emerald-100/70" : "text-gray-500/60"
-                  }`}>{t.text}</span>
+                <div
+                  key={i}
+                  className={`group/th rounded-md border-l-2 pl-2.5 pr-2 py-1.5 transition-colors duration-150
+                    hover:bg-white/4
+                    ${live ? "border-emerald-400/70 bg-emerald-500/4"
+                           : "border-white/10 hover:border-emerald-500/40"}`}
+                >
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className={`text-[8px] font-bold font-mono tabular-nums ${
+                      live ? "text-emerald-400/80" : "text-white/30 group-hover/th:text-emerald-400/60"
+                    } transition-colors duration-150`}>
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span className="text-[8px] font-mono text-white/25">{t.time}</span>
+                    {isSystem && (
+                      <span className="text-[7px] font-mono uppercase tracking-widest px-1 rounded
+                        bg-white/5 text-white/35 border border-white/8">sys</span>
+                    )}
+                    {live && (
+                      <span className="text-[7px] font-mono uppercase tracking-widest text-emerald-400/70 animate-pulse">
+                        live
+                      </span>
+                    )}
+                  </div>
+                  <span className={`block text-[11px] font-mono leading-relaxed whitespace-pre-wrap wrap-break-word
+                    transition-colors duration-150
+                    ${isSystem
+                      ? "text-white/45 italic group-hover/th:text-white/70"
+                      : live
+                      ? "text-emerald-50/95"
+                      : "text-gray-300/80 group-hover/th:text-gray-100"}`}>
+                    {t.text}
+                  </span>
                 </div>
               );
             })
@@ -175,10 +280,10 @@ function QueryCard({ card, onToggle }) {
       )}
     </div>
   );
-}
+});
 
 // ─── Task board card ─────────────────────────────────────────────────────────
-function TaskCard({ task, exiting, onCancel }) {
+const TaskCard = React.memo(function TaskCard({ task, exiting, onCancel }) {
   const isBackground = task.goal.startsWith("[BACKGROUND]") || task.goal.startsWith("[ENVIRONMENT]");
   const cleanGoal = task.goal
     .replace(/^\[BACKGROUND\]\s*/, "")
@@ -244,10 +349,13 @@ function TaskCard({ task, exiting, onCancel }) {
       </div>
     </div>
   );
-}
+});
 
 // ─── Message bubble ──────────────────────────────────────────────────────────
-function MessageBubble({ msg, index, messages, onQuote }) {
+// Memoized; receives replyText (a string) instead of the whole messages array so a token
+// flush or hover elsewhere never re-renders settled bubbles (markdown re-parse is the
+// expensive part). The old onQuote prop was dead code — quoting works via global mouseup.
+const MessageBubble = React.memo(function MessageBubble({ msg, replyText }) {
   const [hovered, setHovered] = useState(false);
   const [copied, copy] = useCopy();
   const isClara = msg.sender === "Clara";
@@ -256,9 +364,12 @@ function MessageBubble({ msg, index, messages, onQuote }) {
   const isIncoming = msg.source === "whatsapp";
   const onLeft = isClara || isIncoming;
 
-  const replyTarget = isClara && msg.messageId
-    ? messages.find(m => m.sender === "User" && m.messageId === msg.messageId)
-    : null;
+  // "[Sender] text" → sender in the header line, clean text in the body.
+  let bodyText = msg.text, incomingSender = null;
+  if (isIncoming) {
+    const m = /^\[([^\]]{1,40})\]\s*/.exec(msg.text || "");
+    if (m) { incomingSender = m[1]; bodyText = msg.text.slice(m[0].length); }
+  }
 
   return (
     <div
@@ -266,7 +377,7 @@ function MessageBubble({ msg, index, messages, onQuote }) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div className={`relative max-w-[80%] group`}>
+      <div className={`relative max-w-[80%] min-w-0 group`}>
         {/* hover actions */}
         <div className={`
           absolute -top-7 ${onLeft ? "left-0" : "right-0"}
@@ -304,7 +415,7 @@ function MessageBubble({ msg, index, messages, onQuote }) {
           {/* incoming-channel header — makes a third-party WhatsApp message unmistakable */}
           {isIncoming && (
             <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wide text-amber-400/80 -mb-1">
-              <Smartphone size={11} /> Incoming · WhatsApp
+              <Smartphone size={11} /> Incoming · WhatsApp{incomingSender ? ` · ${incomingSender}` : ""}
             </div>
           )}
 
@@ -318,33 +429,33 @@ function MessageBubble({ msg, index, messages, onQuote }) {
           )}
 
           {/* reply attribution */}
-          {replyTarget && (
+          {replyText && (
             <div className="flex items-start gap-2 pb-2 mb-1 border-b border-emerald-500/10">
               <div className="w-0.5 h-full bg-emerald-500/40 rounded-full shrink-0 self-stretch min-h-3" />
               <span className="text-[10px] text-emerald-400/50 font-mono leading-relaxed italic truncate">
-                {replyTarget.text.slice(0, 60)}{replyTarget.text.length > 60 ? "…" : ""}
+                {replyText.slice(0, 60)}{replyText.length > 60 ? "…" : ""}
               </span>
             </div>
           )}
 
-          {/* content */}
+          {/* content — wrap-anywhere so an unbroken path/URL/hash can never punch out of the bubble */}
           {isClara ? (
-            <div className="prose prose-invert prose-sm max-w-none leading-relaxed
+            <div className="prose prose-invert prose-sm max-w-none leading-relaxed min-w-0 wrap-break-word
               prose-a:text-emerald-400 prose-strong:text-emerald-100 prose-headings:text-white
               prose-p:text-emerald-50/90 prose-li:text-emerald-50/80
               prose-hr:border-white/8 prose-blockquote:not-italic">
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {msg.text}
+                {sanitizeMarkdown(bodyText)}
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="whitespace-pre-wrap leading-relaxed text-sm">{msg.text}</p>
+            <p className="whitespace-pre-wrap leading-relaxed text-sm min-w-0 wrap-break-word">{bodyText}</p>
           )}
         </div>
       </div>
     </div>
   );
-}
+});
 
 // ─── Vitals bar ──────────────────────────────────────────────────────────────
 function VitalBar({ label, value, icon: Icon, color = "emerald", warn = 85 }) {
@@ -385,20 +496,24 @@ export default function Layout() {
   const [isFocused, setIsFocused]             = useState(false);
   const [soul, setSoul]                       = useState(null);
   const [quotePopup, setQuotePopup]           = useState(null);
-  const [currentMode, setCurrentMode]         = useState(null); // FAST/CHAT/DELIBERATE
 
   const {
     messages, queryCards, systemLogs, tasks, input, setInput,
     sendMessage, cancelTask, toggleCard, status, selectedImage, setSelectedImage,
     selectedFile, setSelectedFile,
-    handleImageUpload, streamingContent, clearHistory, lastTokenUsage,
+    handleImageUpload, streams, mode, clearHistory, lastTokenUsage,
     claraIsSpeaking,
     ambientFeed, sendAmbientFeedback,
+    uploadError, rejectUpload, maxUploadBytes,
   } = useClara();
 
-  const chatEndRef   = useRef(null);
-  const neuralEndRef = useRef(null);
-  const textareaRef  = useRef(null);
+  const chatEndRef    = useRef(null);
+  const chatScrollRef = useRef(null);
+  const chatStickRef  = useRef(true);   // stick-to-bottom unless the reader scrolled up
+  const neuralListRef = useRef(null);
+  const neuralHovRef  = useRef(false);  // never yank the panel while the reader's pointer is in it
+  const textareaRef   = useRef(null);
+  const streamKeys    = Object.keys(streams).filter(k => streams[k]);
 
   // soul vitals polling
   useEffect(() => {
@@ -412,15 +527,25 @@ export default function Layout() {
     return () => clearInterval(id);
   }, []);
 
-  // auto-scroll chat
+  // Smart chat auto-scroll — the old unconditional scrollIntoView fired on EVERY token flush
+  // and fought the reader (the observed streaming jitter). Follow the bottom only when the
+  // reader is already there; discrete messages get a smooth glide, stream flushes an instant snap.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingContent]);
+    if (chatStickRef.current) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+  useEffect(() => {
+    if (streamKeys.length && chatStickRef.current) {
+      const el = chatScrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;   // rAF-paced already; no smooth-scroll pileup
+    }
+  }, [streams]);
 
-  // auto-scroll neural
+  // Neural panel: new cards PREPEND (newest on top) — the old code scrolled to the BOTTOM on
+  // every thought, dragging the reader away from the live card. Scroll to top on a NEW card
+  // only, and never while the pointer is inside the panel.
   useEffect(() => {
-    neuralEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [queryCards]);
+    if (!neuralHovRef.current && neuralListRef.current) neuralListRef.current.scrollTop = 0;
+  }, [queryCards.length]);
 
   // auto-expand textarea
   useEffect(() => {
@@ -430,18 +555,13 @@ export default function Layout() {
     }
   }, [input]);
 
-  // detect mode from the most recent active card's latest thought
-  useEffect(() => {
-    const activeCard = queryCards.find(c => !c.isComplete && !c.isCancelled && !c.isFailed);
-    const last = activeCard?.thoughts[activeCard.thoughts.length - 1];
-    if (!last) return;
-    if (last.text?.includes("FAST")) setCurrentMode("FAST");
-    else if (last.text?.includes("DELIBERATE")) setCurrentMode("DELIBERATE");
-    else if (last.text?.includes("CHAT")) setCurrentMode("CHAT");
-  }, [queryCards]);
+  // (Mode now arrives as a structured "mode" WS event from the router — the old effect here
+  // text-sniffed thought prose for the words FAST/DELIBERATE, which no emission contained.)
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // isComposing guard: Enter during IME composition (Hindi/Japanese/…) must commit the
+    // composition, not fire the send.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       sendMessage();
     }
@@ -455,11 +575,7 @@ export default function Layout() {
     textareaRef.current?.focus();
   };
 
-  const modeChip = {
-    FAST:       { color: "text-amber-400 border-amber-500/30 bg-amber-500/10",      pulse: false },
-    CHAT:       { color: "text-blue-400 border-blue-500/30 bg-blue-500/10",         pulse: false },
-    DELIBERATE: { color: "text-emerald-400 border-emerald-500/40 bg-emerald-500/10", pulse: true  },
-  };
+  const modeChip = MODE_STYLES;
 
   // parse vitals percentages
   const ramPct  = soul ? parseFloat(soul.vitals?.memory_usage)  || 0 : 0;
@@ -600,13 +716,14 @@ export default function Layout() {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* mode chip */}
-            {currentMode && status !== "idle" && status !== "disconnected" && (
+            {/* mode chip — structured router events; an escalation renders its whole arc.
+                Visible only while work is actually in flight. */}
+            {mode?.mode && (status === "thinking" || status === "typing") && (
               <span className={`text-[9px] font-bold font-mono px-2 py-0.5 rounded border tracking-widest
-                ${modeChip[currentMode]?.color || "text-white/30 border-white/10"}
-                ${modeChip[currentMode]?.pulse ? "animate-pulse" : ""}
+                ${modeChip[mode.mode]?.color || "text-white/30 border-white/10"}
+                ${(modeChip[mode.mode]?.pulse || mode.escalatedFrom) ? "animate-pulse" : ""}
               `}>
-                {currentMode}
+                {mode.escalatedFrom ? `${mode.escalatedFrom} → ${mode.mode}` : mode.mode}
               </span>
             )}
 
@@ -651,8 +768,15 @@ export default function Layout() {
         )}
 
         {/* messages */}
-        <div className="relative z-10 flex-1 overflow-y-auto px-5 py-6 space-y-5 scroll-smooth pb-36 scrollbar-thin">
-          {messages.length === 0 && !streamingContent ? (
+        <div
+          ref={chatScrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            chatStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          }}
+          className="chat-scroll relative z-10 flex-1 overflow-y-auto px-5 py-6 space-y-5 pb-44 scrollbar-thin"
+        >
+          {messages.length === 0 && streamKeys.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-3 select-none">
               <div className="relative flex items-center justify-center">
                 {/* outer slow pulse ring */}
@@ -668,41 +792,51 @@ export default function Layout() {
             </div>
           ) : (
             messages.map((msg, i) => (
-              <div key={i} data-msg-index={i}>
+              // messageId alone is NOT unique in the archive (mirrors/tests can share one) —
+              // suffix the index; the list is append-only after mount so this stays stable.
+              <div key={`${msg.messageId || "m"}-${i}`} data-msg-index={i}>
                 <MessageBubble
                   msg={msg}
-                  index={i}
-                  messages={messages}
-                  onQuote={(text, sender) => handleQuote(text, sender)}
+                  replyText={
+                    msg.sender === "Clara" && msg.messageId
+                      ? (messages.find(m => m.sender === "User" && m.messageId === msg.messageId)?.text || null)
+                      : null
+                  }
                 />
               </div>
             ))
           )}
 
-          {/* streaming bubble */}
-          {streamingContent && (
+          {/* pre-stream breathing — a query is processing but no tokens have arrived yet */}
+          {status === "thinking" && streamKeys.length === 0 && (
             <div className="flex justify-start msg-enter">
-              <div className="max-w-[80%] p-4 rounded-2xl bg-linear-to-br from-emerald-950/60
-                to-black/60 border border-emerald-500/20 shadow-[0_0_20px_rgba(16,185,129,0.08)]">
-                {streamingContent ? (
-                  <div className="prose prose-invert prose-sm max-w-none leading-relaxed
-                    prose-a:text-emerald-400 prose-strong:text-emerald-100 prose-p:text-emerald-50/90
-                    prose-headings:text-white prose-li:text-emerald-50/80">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {streamingContent}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <div className="flex gap-1 items-center py-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite]" />
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite_0.2s]" />
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite_0.4s]" />
-                  </div>
-                )}
-                <span className="inline-block w-1.5 h-3.5 bg-emerald-400 animate-pulse ml-0.5 align-middle" />
+              <div className="p-4 rounded-2xl bg-linear-to-br from-emerald-950/60 to-black/60
+                border border-emerald-500/20 shadow-[0_0_20px_rgba(16,185,129,0.08)]">
+                <div className="flex gap-1 items-center py-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite_0.2s]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-[breathe_1.2s_ease-in-out_infinite_0.4s]" />
+                </div>
               </div>
             </div>
           )}
+
+          {/* live streams — ONE bubble per in-flight message (concurrent queries no longer share) */}
+          {streamKeys.map(mid => (
+            <div key={mid} className="flex justify-start msg-enter">
+              <div className="max-w-[80%] min-w-0 p-4 rounded-2xl bg-linear-to-br from-emerald-950/60
+                to-black/60 border border-emerald-500/20 shadow-[0_0_20px_rgba(16,185,129,0.08)]">
+                <div className="prose prose-invert prose-sm max-w-none leading-relaxed min-w-0 wrap-break-word
+                  prose-a:text-emerald-400 prose-strong:text-emerald-100 prose-p:text-emerald-50/90
+                  prose-headings:text-white prose-li:text-emerald-50/80">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {sanitizeMarkdown(closeDanglingFence(streams[mid]))}
+                  </ReactMarkdown>
+                </div>
+                <span className="inline-block w-1.5 h-3.5 bg-emerald-400 animate-pulse ml-0.5 align-middle" />
+              </div>
+            </div>
+          ))}
           <div ref={chatEndRef} />
         </div>
 
@@ -734,6 +868,15 @@ export default function Layout() {
                   </div>
                 ))
               }
+            </div>
+          )}
+
+          {/* upload rejection notice (auto-clears) */}
+          {uploadError && (
+            <div className="mb-2 ml-1 flex items-center gap-2 bg-red-950/60 border border-red-500/30
+              rounded-xl px-2.5 py-1.5 w-fit max-w-md msg-enter">
+              <AlertCircle size={12} className="text-red-400 shrink-0" />
+              <span className="text-[10px] text-red-300/90 font-mono">{uploadError}</span>
             </div>
           )}
 
@@ -784,6 +927,7 @@ export default function Layout() {
 
             <textarea
               ref={textareaRef}
+              name="message"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -794,6 +938,10 @@ export default function Layout() {
                   if (item.type.startsWith("image/")) {
                     e.preventDefault();
                     const file = item.getAsFile();
+                    if (file && file.size > maxUploadBytes) {
+                      rejectUpload(`Pasted image is ${(file.size / 1048576).toFixed(1)}MB — the limit is 8MB.`);
+                      break;
+                    }
                     const reader = new FileReader();
                     reader.onload = ev => setSelectedImage(ev.target.result);
                     reader.readAsDataURL(file);
@@ -863,11 +1011,11 @@ export default function Layout() {
                 <p className="text-[10px] text-white/15 font-mono italic py-1">Nothing noticed yet</p>
               ) : (
                 ambientFeed.map(n => (
-                  <div key={n.id} className="rounded-md bg-white/[0.02] border border-white/5 px-2.5 py-2">
+                  <div key={n.id} className="rounded-md bg-white/2 border border-white/5 px-2.5 py-2">
                     <p className="text-[11px] text-white/70 leading-snug">{n.remark}</p>
                     <div className="flex items-center justify-between mt-1.5">
                       <span className="text-[8px] uppercase tracking-wider text-purple-400/40 font-mono">
-                        {(n.category || "").replace(/_/g, " ")}{n.ts ? " · " + String(n.ts).slice(11, 16) : ""}
+                        {(n.category || "").replace(/_/g, " ")}{n.ts ? " · " + ambientWhen(n.ts) : ""}
                       </span>
                       <div className="flex items-center gap-0.5">
                         <button onClick={() => sendAmbientFeedback(n.id, "up")} title="Useful"
@@ -887,7 +1035,12 @@ export default function Layout() {
           </div>
 
           {/* ── BOTTOM: QUERY CARDS ── */}
-          <div className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin min-h-0">
+          <div
+            ref={neuralListRef}
+            onMouseEnter={() => { neuralHovRef.current = true; }}
+            onMouseLeave={() => { neuralHovRef.current = false; }}
+            className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin min-h-0"
+          >
             <p className="text-[9px] uppercase tracking-[0.2em] text-white/20 font-mono mb-2 flex items-center gap-1.5 sticky top-0 bg-[#060606] py-1">
               <AlertCircle size={9} /> Query Log
             </p>
@@ -935,7 +1088,7 @@ export default function Layout() {
                 )}
               </div>
             )}
-            <div ref={neuralEndRef} className="h-2" />
+            <div className="h-2" />
           </div>
         </div>
       </aside>
@@ -948,7 +1101,11 @@ export default function Layout() {
             bg-emerald-600/95 text-white border border-emerald-400/40
             hover:bg-emerald-500 hover:shadow-[0_0_16px_rgba(16,185,129,0.5)]
             transition-all duration-150"
-          style={{ left: quotePopup.x, top: quotePopup.y }}
+          style={{
+            // clamp inside the viewport — a selection at the very top used to push it offscreen
+            left: Math.min(Math.max(quotePopup.x, 60), window.innerWidth - 60),
+            top: Math.max(quotePopup.y, 34),
+          }}
           onMouseDown={e => {
             e.preventDefault();
             handleQuote(quotePopup.text, quotePopup.sender);

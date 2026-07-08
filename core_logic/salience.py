@@ -20,6 +20,7 @@ Decided parameters (Alkama, 2026-06-19):
 Pure, dependency-light, fully self-tested: `python core_logic/salience.py`. The MiniLM relevance is
 injected (an `encode` fn) so the engine tests without the model — the backend passes the real encoder.
 """
+import os
 import time
 import math
 
@@ -103,7 +104,8 @@ _ACTIONABILITY = {
 # late-night browse) must yield ONE nudge, not one per sample. The 2026-06-24 shadow pass showed ~12
 # near-identical odd_hours candidates for a single 23:2x session; without a cooldown, any threshold that
 # fires would spam. Budget already supports cooldowns — the ambient gate just needs to use them.
-_AMBIENT_COOLDOWNS = {"battery_low": 3600, "odd_hours": 7200, "new_app_seen": 10800, "long_session": 7200}
+_AMBIENT_COOLDOWNS = {"battery_low": 3600, "odd_hours": 7200, "new_app_seen": 10800, "long_session": 7200,
+                      "off_rhythm": 7200}
 
 # ── Observation classifier (Y1b, Brief 40): raw A0 record -> a candidate obs {class, ...} or None ─
 # Deterministic, NO LLM. Decides WHAT KIND of moment a record is (which sets actionability + which
@@ -151,6 +153,213 @@ def classify(record, baseline=None, now=None):
         return {**base, "class": cls, "process": proc, "title": title, "text": title or proc}
 
     return None                                      # session_rhythm / unknown: no candidate in Step 1
+
+
+def _iso_to_epoch(ts):
+    """'2026-07-06T14:30:00' -> epoch seconds, or None. Local, dependency-free (ambient_loop has
+    its own parser but importing it here would be circular — salience must stay pure)."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(ts)[:19]).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _inject_gap_breaks(events, now, gap_s):
+    """Machine-sleep guard (2026-07-08, the '21.0h straight' bug): A0 heartbeats every few
+    minutes while the machine is AWAKE (empirically ≤ ~22 min even in a single unchanged
+    window), so a TOTAL-silence stretch ≥ gap_s means the machine was asleep/off — the lid
+    closed while active, so no idle event ever fired, and the old walk let a session span the
+    night. Inject a synthetic idle span over every such gap (and an OPEN idle if the silence
+    reaches `now`): both detectors' existing idle logic then does the right thing — sessions
+    break, unobserved time credits no app, a currently-unobserved user is never nudged."""
+    out = []
+    prev = None
+    for ev in sorted(events, key=lambda e: e[0]):
+        ts = ev[0]
+        if prev is not None and (ts - prev) >= gap_s:
+            out.append((prev, "idle_start", None))
+            out.append((ts, "idle_end", None))
+        out.append(ev)
+        prev = ts
+    if prev is not None and (now - prev) >= gap_s:
+        out.append((prev, "idle_start", None))   # open idle — silence continues to 'now'
+    return out
+
+
+def detect_long_session(observations, now=None, break_tolerance_s=None, trigger_s=None):
+    """long_session marker (agreed 2026-07-04; built 07-06): 'you've been heads-down for N hours
+    straight — break?'. WINDOW-evaluated over the A0 timeline (like off_rhythm's design), NOT
+    per-record — classify() stays stateless.
+
+    Algorithm (fixed on paper with Alkama):
+    - A session = continuous foreground engagement. **A0 records active_window only on CHANGE**,
+      so a 3h unbroken VS Code stretch is ONE record — foreground PERSISTS between records; gaps
+      between activity records are NOT breaks. The ONLY session-breaker is a session_rhythm idle
+      stretch reaching break_tolerance (default 15 min — the sensor's 5-min idle events below
+      tolerance, a tea pause, do not break).
+    - FIRE when the current session reaches trigger (default 150 min) AND the user is not
+      currently idle-beyond-tolerance. Novelty = min(1, duration/trigger) → with actionability
+      0.5 the score crosses the 0.45 gate exactly at trigger. The 2h class cooldown makes
+      re-fires ~once per further 2h of the SAME unbroken session (accepted v1 semantics —
+      a second nudge after 4.5h straight is good anchoring).
+    Knobs env-tunable: LONG_SESSION_BREAK_MIN / LONG_SESSION_TRIGGER_MIN.
+    Returns an obs dict (class long_session) or None."""
+    now = now or time.time()
+    break_tolerance_s = break_tolerance_s or int(os.getenv("LONG_SESSION_BREAK_MIN", "15")) * 60
+    trigger_s = trigger_s or int(os.getenv("LONG_SESSION_TRIGGER_MIN", "150")) * 60
+
+    events = []
+    for o in observations or []:
+        ts = _iso_to_epoch(o.get("ts"))
+        if ts is None or ts > now:
+            continue
+        s = o.get("sensor")
+        p = o.get("payload") or {}
+        if s == "active_window" and p.get("process"):
+            events.append((ts, "activity", str(p["process"]).lower()))
+        elif s == "session_rhythm":
+            state = str(p.get("state") or p.get("event") or "").lower()
+            if "idle" in state:
+                events.append((ts, "idle_start", None))
+            elif "active" in state:
+                events.append((ts, "idle_end", None))
+    if not events:
+        return None
+    gap_break_s = int(os.getenv("AMBIENT_GAP_BREAK_MIN", "45")) * 60
+    events = _inject_gap_breaks(events, now, gap_break_s)
+
+    session_start = None
+    idle_since = None
+    for ts, kind, proc in events:
+        if kind == "activity":
+            if session_start is None:
+                session_start = ts
+            idle_since = None                      # a foreground change proves engagement
+        elif kind == "idle_start":
+            idle_since = ts
+        elif kind == "idle_end":
+            if idle_since is not None and (ts - idle_since) >= break_tolerance_s:
+                session_start = ts                 # the long gap ended the old session
+            idle_since = None
+    if session_start is None:
+        return None
+    if idle_since is not None and (now - idle_since) >= break_tolerance_s:
+        return None                                # currently away — nobody to nudge
+    duration = now - session_start
+    if duration < trigger_s:
+        return None
+
+    # dominant foreground app of the session (span = record → next record / now)
+    spans = {}
+    acts = [(ts, proc) for ts, kind, proc in events if kind == "activity" and ts >= session_start]
+    for i, (ts, proc) in enumerate(acts):
+        end = acts[i + 1][0] if i + 1 < len(acts) else now
+        spans[proc] = spans.get(proc, 0.0) + max(0.0, end - ts)
+    dominant = max(spans, key=spans.get) if spans else ""
+
+    from datetime import datetime
+    return {
+        "class": "long_session",
+        "ts": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
+        "hour": time.localtime(now).tm_hour,
+        "sensor": "session_rhythm",
+        "process": dominant,
+        "duration_s": int(duration),
+        "rhythm_dev": _clamp01(duration / trigger_s),   # novelty: 1.0 at trigger, grows past it
+        "text": f"{duration / 3600:.1f}h continuous, mostly {dominant or 'one thing'}",
+    }
+
+
+def detect_off_rhythm(observations, baseline, now=None, window_s=None, dominance=None):
+    """off_rhythm marker (agreed 2026-07-04; built 07-06): 'you've been mostly in X for the last
+    15 minutes when this hour is normally something else' — the drift anchor. WINDOW-evaluated
+    like detect_long_session; three gates fixed on paper with Alkama:
+    - WINDOW-DOMINANCE: over the last window (default 15 min), ONE app must hold >= dominance
+      (default 0.6) of the engaged held-span. A 10-second switch can never fire (his explicit
+      worry); idle stretches credit no app.
+    - HOUR-DEVIANCE: the dominant app must be off-baseline for THIS hour — recognition
+      `1 - days_seen(proc,hour)/days_observed` becomes rhythm_dev, so lunch-hour Brave scores ~0
+      and the gate (0.6 actionability) only SURFACEs at rhythm_dev >= 0.75, i.e. an app seen at
+      this hour on <25% of observed days (mirrors ODD_HOUR_DAY_FRAC). NO baseline -> None: an
+      immature system must not accuse drift.
+    - STILL-DRIFTING: at fire-time the CURRENT foreground must still be the deviant app, and the
+      user must not be idle — self-correction is invisible ('no nagging the self-corrected').
+      Any capture/enrichment is strictly downstream of a committed fire (no fire -> no camera).
+    Knobs env-tunable: OFF_RHYTHM_WINDOW_MIN / OFF_RHYTHM_DOMINANCE.
+    Returns an obs dict (class off_rhythm, novelty via rhythm_dev) or None."""
+    now = now or time.time()
+    window_s = window_s or int(os.getenv("OFF_RHYTHM_WINDOW_MIN", "15")) * 60
+    dominance = dominance if dominance is not None else float(os.getenv("OFF_RHYTHM_DOMINANCE", "0.6"))
+    days_obs = (baseline or {}).get("days_observed") or 0
+    if not days_obs:
+        return None
+
+    events = []
+    for o in observations or []:
+        ts = _iso_to_epoch(o.get("ts"))
+        if ts is None or ts > now:
+            continue
+        s = o.get("sensor")
+        p = o.get("payload") or {}
+        if s == "active_window" and p.get("process"):
+            events.append((ts, "activity", str(p["process"]).lower()))
+        elif s == "session_rhythm":
+            state = str(p.get("state") or p.get("event") or "").lower()
+            if "idle" in state:
+                events.append((ts, "idle_start", None))
+            elif "active" in state:
+                events.append((ts, "idle_end", None))
+    if not events:
+        return None
+    events = _inject_gap_breaks(events, now, int(os.getenv("AMBIENT_GAP_BREAK_MIN", "45")) * 60)
+
+    # Walk the FULL timeline so foreground/idle state carries INTO the window (A0 records on
+    # change only — the window's opening state is set by the last event before it).
+    win_start = now - window_s
+    spans, current, idle = {}, None, False
+    mark = win_start                                # left edge of the un-credited stretch
+    def credit(upto):
+        nonlocal mark
+        if upto > mark:
+            if current and not idle:
+                spans[current] = spans.get(current, 0.0) + (upto - mark)
+            mark = upto
+    for ts, kind, proc in events:
+        if ts > win_start:
+            credit(min(ts, now))
+        if kind == "activity":
+            current, idle = proc, False
+        elif kind == "idle_start":
+            idle = True
+        elif kind == "idle_end":
+            idle = False
+    credit(now)
+
+    if idle or not current or not spans:
+        return None                                 # away right now — nobody to anchor
+    dom_proc = max(spans, key=spans.get)
+    if spans[dom_proc] < dominance * window_s:
+        return None                                 # no single app dominated — no drift story
+    if dom_proc != current:
+        return None                                 # still-drifting guard: he already snapped back
+
+    hour = time.localtime(now).tm_hour
+    seen = (baseline or {}).get("proc_hour_days", {}).get(f"{dom_proc}|{hour}", 0)
+    rhythm_dev = _clamp01(1.0 - seen / days_obs)
+
+    from datetime import datetime
+    return {
+        "class": "off_rhythm",
+        "ts": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
+        "hour": hour,
+        "sensor": "active_window",
+        "process": dom_proc,
+        "window_min": int(window_s / 60),
+        "dominance_frac": round(spans[dom_proc] / window_s, 2),
+        "rhythm_dev": rhythm_dev,                   # novelty: the gate's off_rhythm branch reads this
+        "text": f"mostly {dom_proc} for the last {int(window_s / 60)} min — unusual for this hour",
+    }
 
 
 class AmbientGate:

@@ -133,7 +133,75 @@ def _policy_evaluate(envelope, local_ctx):
     return (default if default in (ALLOW, REVIEW, DENY) else ALLOW), "policy: default"
 
 
-_ADAPTERS = {"noop": _noop_evaluate, "policy": _policy_evaluate}
+def _partner_a_sign(payload: dict) -> str:
+    """Ed25519 signature over the CANONICAL JSON of the payload (sort_keys + compact separators —
+    the governance partner's exact spec), base64-encoded. The private key is the base64 32-byte seed delivered at
+    agent registration (PARTNER_A_AGENT_KEY)."""
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    seed = base64.b64decode(os.getenv("PARTNER_A_AGENT_KEY", ""))
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    sig = Ed25519PrivateKey.from_private_bytes(seed).sign(canonical)
+    return base64.b64encode(sig).decode()
+
+
+def _partner_a_evaluate(envelope, local_ctx):
+    """The remote pilot adapter (BRIEF_54 §7.1 contract, live creds 2026-07-08). Sends the ABSTRACT
+    envelope only — the privacy floor holds: local_ctx (real path) never leaves this function's caller;
+    partner A receives hashes and metadata. Auth = x-api-key (dev tier, per their OpenAPI — Ed25519
+    signing is the later hardening pass per the governance partner). Any transport/shape failure RAISES — the gate's
+    fail-open/closed setting decides what that means; a bounded timeout keeps the hot path sane."""
+    import requests as _rq
+    key = os.getenv("PARTNER_A_API_KEY", "").strip()
+    agent = os.getenv("PARTNER_A_AGENT_ID", "").strip()
+    if not key or not agent:
+        raise RuntimeError("partner_a adapter unconfigured (PARTNER_A_API_KEY / PARTNER_A_AGENT_ID)")
+    base = os.getenv("PARTNER_A_BASE_URL", "https://partner_asca.com").rstrip("/")
+    tool = envelope.get("tool", "")
+    if "read_url" in tool or envelope.get("target_type") == "url":
+        command = {"type": "read_url", "target": str((local_ctx or {}).get("target", ""))}
+    else:
+        command = {
+            "type": "write_file",
+            "path": envelope.get("target_path_hash", ""),   # hash, never the real path
+            "content_ref": envelope.get("target_path_hash", ""),
+            "operation": envelope.get("intent", "mutate_state"),
+            "dry_run": True, "sandbox": True,
+            "reason": f"CLARA governed action: {tool}",
+            "environment": envelope.get("execution_mode", "sandbox/eval"),
+        }
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    endpoint = os.getenv("PARTNER_A_ENDPOINT", "simulate").strip().lower()
+    cmd_json = json.dumps(command)
+    headers = {"x-api-key": key, "Content-Type": "application/json"}
+    if endpoint == "analyze":
+        # Signed ENFORCED path (spec from the governance partner 2026-07-08, verbatim in the pilot record): sign the
+        # canonical JSON of {agent_id, command, timestamp, ts_unix} with the registered Ed25519 agent
+        # key; send X-Signature (base64) + X-Timestamp-Unix headers; body EXCLUDES ts_unix. Replay
+        # protection is server-side (agent_id + command + X-Timestamp-Unix) — no nonce.
+        ts_unix = str(int(_time.time()))
+        ts_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = {"agent_id": agent, "command": cmd_json, "timestamp": ts_iso}
+        headers["X-Signature"] = _partner_a_sign({**body, "ts_unix": ts_unix})
+        headers["X-Timestamp-Unix"] = ts_unix
+        url = f"{base}/analyze"
+    else:
+        body = {"agent_id": agent, "command": cmd_json, "timestamp": str(int(_time.time()))}
+        url = f"{base}/api/v2/simulate"
+    r = _rq.post(url, headers=headers, json=body,
+                 timeout=float(os.getenv("PARTNER_A_TIMEOUT_S", "6")))
+    r.raise_for_status()
+    data = r.json() if r.content else {}
+    decision = str(data.get("decision", "")).upper()
+    if decision not in (ALLOW, REVIEW, DENY):
+        raise RuntimeError(f"partner_a returned unmappable decision {data.get('decision')!r}")
+    return decision, (f"partner_a: risk={data.get('risk')} score={data.get('risk_score')} "
+                      f"action_hash={str(data.get('action_hash'))[:16]} "
+                      f"ledger_hash={str(data.get('ledger_hash'))[:16]}")
+
+
+_ADAPTERS = {"noop": _noop_evaluate, "policy": _policy_evaluate, "partner_a": _partner_a_evaluate}
 
 
 def _adapter():

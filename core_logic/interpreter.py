@@ -86,6 +86,13 @@ Routing guidance:
   rather than directly transcribed from the query → requires_planning=true, even if the path
   is clear. Generating content is always multi-step: compose first, then write.
   write_file where content IS the query (e.g. "write 'hello world' to file.txt") → requires_planning=false.
+- EVIDENCE DEMANDS → requires_planning=true. If Alkama asks for PROOF, evidence, verification,
+  or to substantiate a claim — "do you have proof", "verify that", "check the log/file/report",
+  "show me where", "back that up" — the answer requires actually READING the cited source with
+  tools. A conversational route (tool=null, no planning) cannot open files, and answering an
+  evidence demand from memory produces fabricated citations (2026-07-08: a chat-routed "do you
+  have proof?" invented bench-log contents). Even if the question FEELS conversational,
+  evidence = tools = requires_planning=true.
 
 web_search — use ONLY when the answer requires live or post-training data:
 - Current prices, rates, scores, weather, news, stock values

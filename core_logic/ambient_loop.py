@@ -59,6 +59,27 @@ def _write_ledger(data):
         pass
 
 
+def _recent_duplicate(cls, remark, now=None, window_h=72):
+    """True if an IDENTICAL (class, remark) nudge already sits in the ledger within window_h hours.
+    The per-session cooldown legitimately re-allows a class on a later day, but the exact same
+    sentence twice in three days is repetition, not information (observed: twin 'brave at 22:00'
+    nudges on 06-25 + 06-27). Never raises."""
+    try:
+        now = now or time.time()
+        for e in read_ledger(limit=25):
+            # Compare the deterministic SEED (pre-LLM template): the polished display text varies
+            # per call, so it can never be the dedup key. Rows older than 2026-07-03 lack the
+            # seed field — their remark IS the template.
+            if e.get("class") != cls or (e.get("remark_seed") or e.get("remark")) != remark:
+                continue
+            ep = _ts_to_epoch(e.get("ts"))
+            if ep and (now - ep) < window_h * 3600:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def record_ledger(entry):
     data = read_ledger(limit=0)
     data.append({**entry, "feedback": entry.get("feedback")})
@@ -89,19 +110,104 @@ def set_broadcast(fn):
     _broadcast_fn = fn
 
 
-def _live_sink(entry):
-    """A2_MODE=live delivery: record the nudge to the ledger AND broadcast it to any connected UI. No
-    sound/poke — it just appears in the passive feed. Records even with no UI connected (the UI loads the
-    ledger via /ambient_feed on connect)."""
+_llm_client = None
+
+
+# Per-class register for the remark polish (2026-07-06, from Alkama's 07-04 calibration: nudges should
+# have CHARACTER — his target example for odd_hours was literally a question, so the blanket no-questions
+# rule is relaxed per-class rather than globally).
+_REMARK_CHARACTER = {
+    "odd_hours": ("Playfully tease him about the hour — the register of \"What are you doing so late, "
+                  "night owl?\". One light rhetorical question is allowed for this one."),
+    "long_session": ("Warm and looking-out-for-him — nudge a stretch or water without nagging or "
+                     "guilt. No questions."),
+    "off_rhythm": ("Observational and gentle — an anchor back to his usual rhythm, never scolding, "
+                   "never guilt. State what you noticed, leave the choice to him. No questions."),
+    "new_app_seen": ("Curious and observant, like noticing a new book on a friend's desk. No questions."),
+    "battery_low": ("Dry and urgent, zero fluff — this is the one nudge that must be acted on now. "
+                    "No questions."),
+}
+
+
+async def _llm_remark(entry):
+    """One cheap non-reasoning call turns the template into a natural, personal remark — the
+    'Live swaps in the LLM composer' the template docstring always promised (built 2026-07-03,
+    Alkama: the template text is 'very very generic'). Returns None on ANY problem — the
+    deterministic template always stands as the fallback. Kill switch: A2_REMARK_LLM=off."""
+    global _llm_client
+    key = os.getenv("DEEPSEEK_API_KEY")
+    if not key:
+        return None
+    if _llm_client is None:
+        from openai import AsyncOpenAI
+        _llm_client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com")
+    character = _REMARK_CHARACTER.get(
+        entry.get("class"), "Natural and personal. No questions.")
+    prompt = (
+        "You are CLARA, Alkama's personal ambient AI. Rewrite this observation as ONE short, natural, "
+        "personal remark to him (max 22 words). Keep every concrete fact (app, number, time, day) "
+        "EXACTLY as given — never add a fact, action, time, or detail that is not in the observation, "
+        "and never round or restate a number. Rephrase only. "
+        "12-hour time only; no emojis; at most one question and only if the register allows it; "
+        "don't mention being an AI or 'observation'. "
+        f"Register: {character}\n"
+        f"Observation: {entry.get('remark')}"
+    )
+    r = await _llm_client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=1.1, max_tokens=60, stream=False,
+    )
+    text = " ".join((r.choices[0].message.content or "").strip().strip('"').split())
+    if not _remark_fidelity_ok(entry.get("remark"), text):
+        return None   # template stands — same numeric-fidelity principle as _run_fast's guard
+    return text[:180] or None
+
+
+def _remark_fidelity_ok(template, polished) -> bool:
+    """Deterministic backstop for the polish (2026-07-06): at temp 1.1 the model can invent facts
+    ('you checked the battery at 1:15 PM') or round numbers ('~2.7h' -> 'three hours'). Every number
+    in the template must survive verbatim into the polish, and the polish must not introduce a
+    clock-time that wasn't there. Fail -> the deterministic template ships instead."""
+    import re
+    t, p = str(template or ""), str(polished or "")
+    if not p:
+        return False
+    if any(n not in p for n in re.findall(r"\d+(?:\.\d+)?", t)):
+        return False
+    t_nums = set(re.findall(r"\d+(?:\.\d+)?", t))
+    return all(n in t_nums for n in re.findall(r"\d+(?:\.\d+)?", p))
+
+
+async def _deliver(entry):
+    """Async live delivery: optional LLM polish (bounded, fallback = template) → ledger → broadcast."""
+    if os.getenv("A2_REMARK_LLM", "on").strip().lower() in ("on", "1", "true", "yes"):
+        try:
+            polished = await asyncio.wait_for(_llm_remark(entry), timeout=10)
+            if polished:
+                entry["remark"] = polished
+        except Exception:
+            pass   # template remark stands
     record_ledger(entry)
     if _broadcast_fn is not None:
         try:
-            asyncio.create_task(_broadcast_fn({
+            await _broadcast_fn({
                 "type": "ambient_nudge", "id": entry.get("id"), "remark": entry.get("remark"),
                 "category": entry.get("class"), "score": entry.get("score"), "ts": entry.get("ts"),
-            }))
-        except RuntimeError:
-            pass   # no running loop (e.g. one-shot) — the ledger record still stands
+            })
+        except Exception:
+            pass
+
+
+def _live_sink(entry):
+    """A2_MODE=live delivery: record the nudge to the ledger AND broadcast it to any connected UI. No
+    sound/poke — it just appears in the passive feed. Records even with no UI connected (the UI loads the
+    ledger via /ambient_feed on connect). The async path adds the LLM remark polish; a sync context
+    (one-shot replay) records the deterministic template directly."""
+    try:
+        asyncio.get_running_loop().create_task(_deliver(entry))
+    except RuntimeError:
+        record_ledger(entry)   # no running loop (e.g. one-shot) — the ledger record still stands
 
 
 def a2_mode() -> str:
@@ -126,17 +232,75 @@ def _ts_to_epoch(ts):
 # as timing_ctx={"dnd": True}; no inference needed. (Removed work preserved in git history + TIMELINE.)
 
 
+_PROC_NAMES = {
+    "brave.exe": "Brave", "chrome.exe": "Chrome", "msedge.exe": "Edge", "firefox.exe": "Firefox",
+    "code.exe": "VS Code", "explorer.exe": "File Explorer", "searchhost.exe": "Windows Search",
+    "spotify.exe": "Spotify", "discord.exe": "Discord", "utweb.exe": "µTorrent",
+    "windowsterminal.exe": "Terminal", "notion.exe": "Notion", "notion calendar.exe": "Notion Calendar",
+    "telegram.exe": "Telegram", "whatsapp.exe": "WhatsApp", "shellhost.exe": "Windows Shell",
+}
+
+
+def _friendly_proc(p) -> str:
+    p = str(p or "").strip().lower()
+    if p in _PROC_NAMES:
+        return _PROC_NAMES[p]
+    if p.endswith(".exe"):
+        p = p[:-4]
+    return p.capitalize() if p else "something"
+
+
+def _friendly_hour(hh) -> str:
+    """22 → '10 PM' — Alkama never does 24h conversions in his head (drill Q22's whole premise)."""
+    if not isinstance(hh, int):
+        return "just now"
+    if hh == 0:
+        return "midnight"
+    if hh == 12:
+        return "noon"
+    return f"{hh - 12} PM" if hh > 12 else f"{hh} AM"
+
+
+def _friendly_day(ts) -> str:
+    """'' (today) / 'yesterday' / 'on Friday' (this week) / 'on Jun 27' (older)."""
+    try:
+        from datetime import datetime, date
+        d = datetime.fromisoformat(str(ts)[:19]).date()
+        delta = (date.today() - d).days
+        if delta <= 0:
+            return ""
+        if delta == 1:
+            return "yesterday"
+        if delta < 7:
+            return "on " + d.strftime("%A")
+        return "on " + d.strftime("%b %d").replace(" 0", " ")
+    except Exception:
+        return ""
+
+
 def _template_remark(obs) -> str:
-    """Deterministic shadow compose — what A2 WOULD say. Live swaps in the LLM composer."""
+    """Deterministic compose — humanized app names, 12-hour time, day-aware. This is both the
+    shadow text and the fallback when the live LLM polish (A2_REMARK_LLM) is off/unavailable.
+    (The old version leaked raw 'brave.exe' + '22:00' with no day — the 2026-07-03 complaint.)"""
     cls = obs.get("class")
-    hh = obs.get("hour")
-    hhmm = f"{hh:02d}:00" if isinstance(hh, int) else "now"
+    when = _friendly_hour(obs.get("hour"))
+    day = _friendly_day(obs.get("ts"))
+    day_sfx = f" {day}" if day else ""
+    proc = _friendly_proc(obs.get("process"))
     if cls == "battery_low":
         return f"Battery's at {obs.get('battery_pct')}% and unplugged — flagging it before it bites."
     if cls == "odd_hours":
-        return f"You're on {obs.get('process', 'something')} at {hhmm} — an unusual hour for you."
+        return f"{proc} at {when}{day_sfx} — that's an unusual hour for you."
     if cls == "new_app_seen":
-        return f"First time I've noticed {obs.get('process', 'that app')} around {hhmm}."
+        return f"First time I've seen {proc} — it showed up around {when}{day_sfx}."
+    if cls == "long_session":
+        hrs = (obs.get("duration_s") or 0) / 3600
+        return (f"You've been at it ~{hrs:.1f}h straight — mostly {proc}. "
+                f"Worth a stretch and some water.")
+    if cls == "off_rhythm":
+        mins = obs.get("window_min", 15)
+        return (f"Mostly {proc} for the last {mins} minutes — "
+                f"not your usual rhythm for {when}.")
     return "Noticed something worth a glance."
 
 
@@ -210,19 +374,92 @@ class AmbientLoop:
                 obs, baseline=baseline, discourse_vecs=discourse_vecs, encode=encode,
                 timing_ctx=timing_ctx, now=now)
             if decision == SURFACE:
+                remark = self.compose_fn(obs)
+                # Cross-day content dedup (2026-07-03): the per-session cooldown correctly allows
+                # "brave at 22:00" to re-surface on a LATER day — but an IDENTICAL remark within
+                # 72h is repetition, not information (the feed showed twin nudges from 06-25 and
+                # 06-27). Feed hygiene: suppress exact repeats inside the window.
+                if _recent_duplicate(obs["class"], remark, now=now):
+                    continue
                 entry = {
                     "id": uuid.uuid4().hex[:12],
                     "ts": rec.get("ts"),
                     "class": obs["class"],
+                    "category": obs["class"],   # consumer-facing alias — /ambient_feed returns raw
+                                                 # ledger rows, and the UI reads `category` (rows
+                                                 # recorded before 2026-07-03 lack it → blank label)
                     "score": detail.get("score"),
                     "novelty": detail.get("novelty"),
                     "actionability": detail.get("actionability"),
-                    "remark": self.compose_fn(obs),
+                    "remark": remark,
+                    "remark_seed": remark,      # deterministic dedup key — the display remark may be
+                                                 # LLM-polished (varies), the seed never does
                     "mode": mode,
                     "would_send": mode == "live",
                 }
                 self._emit(entry)
                 surfaced.append(entry)
+        # long_session (2026-07-06): WINDOW-evaluated over the FULL timeline (not per-record —
+        # a 3h unbroken session is ONE A0 record). Same gate path as every other class:
+        # evaluate → dedup-by-seed → emit; the 2h class cooldown + budget apply unchanged.
+        try:
+            from .salience import detect_long_session
+            ls = detect_long_session(observations, now=self.now_fn())
+            if ls is not None:
+                decision, detail = self.gate.evaluate(ls, baseline=baseline,
+                                                      discourse_vecs=discourse_vecs, encode=encode,
+                                                      timing_ctx=timing_ctx, now=self.now_fn())
+                if decision == SURFACE:
+                    remark = self.compose_fn(ls)
+                    if not _recent_duplicate(ls["class"], remark, now=self.now_fn()):
+                        entry = {
+                            "id": uuid.uuid4().hex[:12],
+                            "ts": ls.get("ts"),
+                            "class": ls["class"],
+                            "category": ls["class"],
+                            "score": detail.get("score"),
+                            "novelty": detail.get("novelty"),
+                            "actionability": detail.get("actionability"),
+                            "remark": remark,
+                            "remark_seed": remark,
+                            "mode": mode,
+                            "would_send": mode == "live",
+                        }
+                        self._emit(entry)
+                        surfaced.append(entry)
+        except Exception:
+            pass   # the marker must never break the loop
+        # off_rhythm (2026-07-06): same window-evaluated pattern. Three agreed gates live in the
+        # detector (15-min dominance, hour-deviance vs baseline, still-drifting suppression);
+        # the loop just routes it through the identical evaluate → dedup → emit path.
+        try:
+            from .salience import detect_off_rhythm
+            orr = detect_off_rhythm(observations, baseline, now=self.now_fn())
+            if orr is not None:
+                decision, detail = self.gate.evaluate(orr, baseline=baseline,
+                                                      discourse_vecs=discourse_vecs, encode=encode,
+                                                      timing_ctx=timing_ctx, now=self.now_fn())
+                if decision == SURFACE:
+                    remark = self.compose_fn(orr)
+                    if not _recent_duplicate(orr["class"], remark, now=self.now_fn()):
+                        entry = {
+                            "id": uuid.uuid4().hex[:12],
+                            "ts": orr.get("ts"),
+                            "class": orr["class"],
+                            "category": orr["class"],
+                            "score": detail.get("score"),
+                            "novelty": detail.get("novelty"),
+                            "actionability": detail.get("actionability"),
+                            "remark": remark,
+                            "remark_seed": remark,
+                            "mode": mode,
+                            "would_send": mode == "live",
+                        }
+                        self._emit(entry)
+                        surfaced.append(entry)
+        except Exception:
+            pass   # the marker must never break the loop
+
         if advance and new:
             self._cursor = new[-1].get("ts")
             self._save_cursor()

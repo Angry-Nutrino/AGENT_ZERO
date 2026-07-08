@@ -47,6 +47,10 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 - **G1 · Daily drill** *(RECURRING)* — cron runs the harness; I analyze + promote + write the report's
   `## Claude's Analysis` + TIMELINE. The GREEN backbone. Size **S–M**. Deps: none. Refs: CLAUDE.md "The Drill",
   `tests/report_analysis_status.py`, `tests/verification.py`.
+  **NEW sub-duty (BRIEF_56, 2026-07-07): eQ23 code-build rubric review** — every evening analysis grades
+  the build answer on the 5-axis rubric (brief §2), promotes the level on pass (write the next level's
+  question + validated acceptance; level-N oracle must FAIL level-N−1's component), diagnoses on fail.
+  Phase-1.7 streak flags are IGNORED for Q23. Refs: `briefs/BRIEF_56_CodeBuild_Ladder.md`.
 - **G2 · Hardening / code-review sweep** — review recent diffs for self-introduced bugs, report, fix the clear
   ones, queue judgment calls. Size **M**. Deps: none. Refs: `git diff`, /simplify + /code-review patterns.
 - ~~**G3 · `v_datetime` R2 extension**~~ — ✅ DONE 2026-06-23 (busy-mode). Added `date_offset` + `time_delta`
@@ -58,8 +62,11 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   (yaml.load/os.fork) correctly route to `absence_honesty`; `v_count` needs no count-check. No gap. ~~guard the
   key_facts false-PASS on speculated tokens~~ → **BRIEFED as BRIEF_53** (the missing-but-substantive →
   lenient `_llm_judge` path; delicate false-PASS↔false-FAIL tradeoff on a central primitive → see 🔴 R17).
-  **Remaining:** verify a claimed line/location for L4 quotes (the `value_or_line` extension). Size **S–M**.
-  Deps: none. Refs: `tests/verification.py`.
+  ~~**Remaining:** verify a claimed line/location for L4 quotes (the `value_or_line` extension)~~ —
+  ✅ DONE 2026-07-06 (busy-mode): claimed-line check in `v_verbatim_quote` (±3 drift tolerance;
+  real-quote-wrong-line → UNVERIFIABLE location-mismatch, never FAIL) + the '"..."'-span extractor gap
+  fixed (missed-PASS class); self-test 41→46, 46/46. See TIMELINE 07-06. **G4 fully closed.**
+  Refs: `tests/verification.py`.
 - **G5 · Dead F4/WS voice-path cleanup** — ✅ WS handlers DONE 2026-06-24 (`voice_start`/`voice_stop` removed
   from `api.py`; frontend sends neither). **Follow-up:** the now-orphaned `voice.py` `start_recording` /
   `stop_recording_async` (removing them needs verifying the persistent-mic/`_in_stream` logic — deferred, low
@@ -70,8 +77,11 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   Fully closed — the semantic-path follow-up is now covered too.
 - **G7 · Watch-items to close** — ~~Tier-2 LLM judge transient (retry/fallback)~~ ✅ DONE 2026-06-27
   (`diagnose_failure` retries the `"(request failed:"` signal 2× + classifies a persistent transient as
-  `infra`; `tests/test_diagnose_failure_retry.py`; TIMELINE 06-27). Remaining: any over-strict key_facts class
-  flagged in recent drills. Size **S** each. Deps: none. Refs: TIMELINE "WATCH".
+  `infra`; `tests/test_diagnose_failure_retry.py`; TIMELINE 06-27). ~~Remaining: any over-strict key_facts class
+  flagged in recent drills~~ — ✅ CLOSED 2026-07-06 (busy-mode): never recurred in a graded run, but the
+  audit found the class LATENT (2-fact oracles FAIL on one miss + 5 questions carried question-supplied
+  must_include terms) → all 5 oracles broadened with substance synonyms, validated both directions.
+  **G7 fully closed.** See TIMELINE 07-06.
 - **G8 · Refine the busy-mode skill after the first real run** — read the first `busy-mode-reports/` lifetime
   with Alkama; tighten wherever the "which & why" exposed the skill being under-specified. Size **S–M**.
   Deps: one completed busy-mode lifetime. Refs: `.claude/skills/busy-mode/SKILL.md`, `busy-mode-reports/`.
@@ -112,7 +122,22 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   blind-edit** (blast radius = the loop). Y5-adjacent (dynamic turn budget). Size **S–M**. Deps: none. Refs:
   TIMELINE 06-30e/07-01m WATCH, `core_logic/agent.py` run_task format-correction block, `reports/2026-06-30-evening.md` Q9.
 
-- **G14 · Coherence-drill FILESYSTEM leak (fixture wrote a real file)** — *(found 2026-07-02 during commit
+- ~~**G15 · Extend the FAST fidelity guard to date_time completeness**~~ — ✅ DONE 2026-07-06 (busy-mode; `_date_completeness_ok` + 8/8 regression test; see TIMELINE). Original: — *(found 2026-07-05e drill, the
+  rotation era's first FAIL)*. `date_time(offset_days=-25)` returned the complete correct block; format_llm
+  condensed it to just "Wednesday." — dropping the demanded date (real FAIL, weekday coincidentally right).
+  Same class as the numeric guard's origin (65536→65636) but COMPLETENESS on date_time, which the guard
+  doesn't cover (python_repl-scoped). Fix shape: if the raw date_time output contains the computed target
+  block, the formatted response must preserve the target date (else return raw) — mirrors `_run_fast`'s
+  numeric guard. Contained, self-testable. Size **S**. Deps: none. Refs: `core_logic/agent.py` _run_fast
+  guard, `reports/2026-07-05-evening.md` Q21 analysis, logs/session_2026-07-05_20-01-02.log.
+- ~~**G16 · Harness API-validity pre-flight**~~ — ✅ DONE 2026-07-06 (busy-mode, same-day as the 402
+  casualty it answers): `api_is_usable()` gates the run after reachability; 402/401 → clean skip + Telegram,
+  no fail_count pollution. Live-validated against the real outage. See TIMELINE 07-06.
+- ~~**G14 · Coherence-drill FILESYSTEM leak (fixture wrote a real file)**~~ — ✅ INVESTIGATED + MITIGATED
+  2026-07-06 (busy-mode): mechanism nailed (manager-her T2 read as a real ask → DELIBERATE write_file);
+  offending turn rephrased write-safe (probe intact, scorer 24/24); deadlines.md deleted (content preserved
+  in log/brief). **Durable class-fix briefed → BRIEF_55** (test-mode write-DENY via the admissibility gate —
+  see 🔴 below). Original: *(found 2026-07-02 during commit
   prep)*. `deadlines.md` appeared at repo root, created 2026-07-01 08:10 MID-CRON, containing "API spec due
   Friday (requested by **Priya**)" — Priya is the FICTIONAL coherence-drill manager. `memory_mode=ephemeral`
   isolates *memory*, but drill tool-calls still EXECUTE — a dialogue turn helpfully wrote a real file. Same
@@ -136,13 +161,25 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
     (recognition `1 − days_seen/days_observed` for apps, timing for odd_hours, trajectory for battery);
     `compute_baseline` extended with `proc_hour_days`/`hour_days`/`days_observed`. See TIMELINE 06-24.
   - ~~**Y1b · Observation classifier**~~ — ✅ DONE 2026-06-24. `classify(record, baseline)` →
-    battery_low / odd_hours / new_app_seen | None. (off_rhythm/long_session deferred — need session-duration
-    state A0 doesn't expose yet.) See TIMELINE 06-24.
-  - **Y1-tuning · salience calibration** *(NEW, surfaced by the Y1a/b empirical preview)* — over the real
-    14-day baseline, **0/1202 candidates clear the 0.45 threshold** (new_app_seen capped at act 0.25;
-    odd_hours lands ~0.39–0.43; no battery events). A2 is currently near-silent. Decide the chattiness in the
-    Y1c **shadow** phase: bump `odd_hours` actionability and/or lower the 0.45 threshold against real data.
-    Size **S**. Deps: Y1c shadow. *(Alkama's call — how JARVIS-talkative.)*
+    battery_low / odd_hours / new_app_seen | None. **long_session ✅ DONE 2026-07-06** (busy-mode;
+    `detect_long_session` window-walk in salience.py + tick() wiring, 11/11 test, boot-validated — see
+    TIMELINE 07-06). **off_rhythm ✅ DONE 2026-07-06**
+    (busy-mode, final task of lifetime 5; `detect_off_rhythm` 3-gate design — dominance/hour-deviance/
+    still-drifting — 15/15 tests; see TIMELINE 07-06). **Y1b signal set now: battery_low / odd_hours /
+    new_app_seen / long_session / off_rhythm.** Next A2 work = the screenshot enrichment pipeline
+    (designs locked; PARKED on the vision-backend decision — Alkama's call) + Y1-tuning from shadow data.
+    See TIMELINE 06-24.
+  - ~~**Y1-remark-character**~~ — ✅ DONE 2026-07-06 (busy-mode). Per-class register in `_llm_remark`
+    (odd_hours = playful night-owl tease per Alkama's 07-04 target, one question allowed; long_session =
+    warm no-nag; battery = dry+urgent) + **`_remark_fidelity_ok` deterministic backstop** — live sampling
+    caught temp-1.1 fabrication ("you checked the battery at 1:15 PM"); every template number must survive
+    verbatim and no new clock-times, else the template ships. See TIMELINE 07-06.
+  - **Y1-tuning · salience calibration** — LIVE-DATA PHASE (2026-07-08): 5 classes live, feed
+    trustworthy (21h bug fixed, TTL 12h), 👍/👎 votes accumulate on the ledger. Chattiness verdict pending
+    Alkama; current posture = live, ~2-4 nudges/day expected (long_session dominant). Tune from a week of
+    votes, not predictions. **Screenshots: DEFERRED entirely (Alkama 07-08)** — reopens only on
+    demonstrated text-only blindness. Size **S**. Deps: a week of vote data + Alkama.
+    *(Original 06-24 note: 0/1202 cleared 0.45 pre-retune; odd_hours actionability was raised 0.5→0.6.)*
   - ~~**Y1c · The loop (DORMANT + SHADOW)**~~ — ✅ DONE + WIRED + boot-validated 2026-06-24
     (`core_logic/ambient_loop.py`): `AmbientLoop` (cursor + baseline-refresh + classify→evaluate→compose,
     `A2_MODE` off/shadow/live, per-class cooldowns); `ambient_shadow_loop()` started from `api.py` lifespan
@@ -186,6 +223,10 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🔴 RED — queued only; needs-Alkama or arming-risk; NEVER auto-executed (brief, don't build live)
 
+- ~~**R18 · BRIEF_55 — test-mode tool sandbox**~~ — ✅ RESOLVED 2026-07-07: Alkama REDIRECTED (writes
+  allowed + contained, not denied). Built as BRIEF_56 §1: drill_workspace/ + harness Phase 0.5/3.5 sweep
+  (strays deleted+flagged; tracked-mods loudly flagged). Gate stays shadow. See TIMELINE 07-07.
+
 - ~~**R1 · Arm A2 live**~~ — ✅ effectively DONE 2026-06-24: the re-plan made A2 a PASSIVE interface feed (no
   push/sound), so "arming" carries no interrupt-risk — `A2_MODE=live` is set and nudges surface to the feed.
   The old arming-risk (a phone buzz) only returns if a muteable Telegram *push* is ever added (then a manual
@@ -201,11 +242,7 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   Windows/ASUS input gating.
 - **R5 · WhatsApp live validation** — confirm the live feel; set `PERSON_MAP` to Shobha's real sender string.
   *(needs Alkama)*.
-- **R19 · Telegram voice-note live validation** — ✅ BUILT + ARMED 2026-07-02 (`_handle_voice`, local Whisper
-  STT, transcript echo, same pipeline as text; TIMELINE 07-02). *(needs Alkama's phone)*: send Clara's bot
-  (1) a voice note → expect 🎤 transcript echo + a normal answer; (2) a plain text → confirm the refactored
-  `_process_text` path unchanged. Check STT quality on Hinglish/accented speech; if weak, consider
-  `initial_prompt` tuning or a language hint. Refs: `core_logic/telegram_bot.py` _handle_voice/_process_text.
+- ~~**R19 · Telegram voice phone test**~~ — ✅ PASSED 2026-07-08 (Alkama live-tested from his phone: voice note → Whisper → pipeline → reply, "working just fine").
 - **R6 · HF-cache wall** — ✅ RESOLVED 2026-06-23 (HF_HOME → repo-local `.hf_cache`; backend boots from any
   context). *Kept here struck as a record; remove next pass.*
 - **R7 · Telegram console-mirror live-validation** — confirm the live source-badged mirror. *(needs Alkama /
@@ -270,15 +307,9 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   the action detector + deliver a substantive no-valid-action turn. Q13 regressed on this one pathological
   self-referential probe (the glint cycle had masked it pre-Brief-51). Size **S–M**. Deps: Alkama confirm.
   Refs: `briefs/BRIEF_52…md`, `core_logic/agent.py` parse_actions/run_task, `tests/test_glint_detector.py`.
-- **R17 · BRIEF_53 — key_facts false-PASS guard (decision needed)** — *(briefed 2026-07-01 busy-mode, G4
-  axis b)*. The `key_facts` **missing-but-substantive → lenient `_llm_judge`** path silently PASSed a
-  truncated answer (Q13 06-25e — a false-PASS, the *dangerous* verifier error that hides a real failure).
-  Delicate: it's the false-PASS↔false-FAIL tradeoff on a **central primitive** (~half the questions), and the
-  trigger is largely closed by Brief 51/52, so it's **defense-in-depth, low urgency**. Brief lays out 4
-  options; **recommends Option 3** (downgrade a missing-branch judge-PASS to UNVERIFIABLE — cannot false-FAIL,
-  costs a few manual UNVERIFIABLEs) with Option 4 (document + monitor) as the do-nothing default. On confirm:
-  implement + both-direction self-tests + re-run. Size **S–M**. Deps: Alkama's pick. Refs:
-  `briefs/BRIEF_53_KeyFacts_FalsePASS_Guard.md`, `tests/verification.py` v_key_facts/_llm_judge.
+- ~~**R17 · BRIEF_53 — key_facts false-PASS guard**~~ — ✅ DECIDED + BUILT 2026-07-07 (Alkama:
+  Option 3 + prompt line). Missing-route judge-PASS → UNVERIFIABLE; 48/48 self-test. See
+  TIMELINE 07-07; brief updated. WATCH: small expected rise in key_facts UNVERIFIABLEs.
 - **R18 · BRIEF_54 — pre-execution admissibility gate** — ✅ **PHASE 0 DONE 2026-07-02** (Alkama greenlit
   "build the gate + noop ledger + local policy"). `core_logic/admissibility.py` (gate + abstract envelope +
   atomic ring ledger + `noop`/`policy` adapters), hooked at `tool_executor._execute_mcp` (the shared
