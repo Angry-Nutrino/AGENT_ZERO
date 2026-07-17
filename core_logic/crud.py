@@ -255,11 +255,18 @@ class crud:
         if include_self_knowledge:
             context += self._self_knowledge_block()
 
-        # Filesystem map — progressively discovered directory/file tree
+        # Filesystem map — progressively discovered directory/file tree.
+        # CAP the INJECTED serialization (2026-07-09 token-hygiene): the map grows UNBOUNDED as Clara
+        # explores, and it's re-sent every DELIBERATE turn — it had crept to ~2.3k tokens/request. The
+        # stored tree keeps growing (that's fine, it's her knowledge); only the injected view is bounded.
         fsmap = self.memory.get('filesystem_map', {})
         if fsmap:
-            context += "\n[FILE SYSTEM MAP]:\n"
-            context += self._serialize_filesystem_map(fsmap)
+            fs_text = self._serialize_filesystem_map(fsmap)
+            _FS_MAP_CHAR_CAP = 4000   # ~1000 tokens ceiling for the injected block
+            if len(fs_text) > _FS_MAP_CHAR_CAP:
+                fs_text = (fs_text[:_FS_MAP_CHAR_CAP].rsplit('\n', 1)[0]
+                           + f"\n  [... filesystem map truncated for context — {len(fs_text)} chars total]\n")
+            context += "\n[FILE SYSTEM MAP]:\n" + fs_text
 
         # Vault
         if long_term:

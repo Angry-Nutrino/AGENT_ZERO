@@ -147,6 +147,13 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   gitignored (fictional content must not be committed); do NOT delete until investigated. Size **S–M**.
   Deps: none. Refs: `deadlines.md`, `tests/coherence_dialogues.json` manager-her, `logs/session_2026-07-01_08-00-55.log`.
 
+- **G17 · Per-turn timeout on the ReAct `stream()` call** *(found 07-08e)* — Q11 hung ~22 min on a
+  frozen DeepSeek streaming call inside the DELIBERATE loop, then errored empty; the 600s request wrapper
+  did not cut it. Wrap each per-turn `stream()`/`chat()` in an `asyncio.wait_for` (a turn-level budget) so
+  an upstream hang fails fast to the escalation/timeout path instead of burning 22 min. The LLM-call
+  analogue of Jesse's per-tool-wait_for point. Size **S–M**. Deps: none. Refs: `core_logic/agent.py`
+  run_task loop, `reports/2026-07-08-evening.md` Q11, TIMELINE 07-08.
+
 ## 🟡 YELLOW — I build on `autonomous` (dormant, uncommitted); Alkama reviews the diff + commits
 
 *No sub-branches (`autonomous` vs `main` is the isolation). Gate = dormant-by-default flag + Alkama reviews the
@@ -222,6 +229,28 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 - **Y6 · Wave 4 — wake-word app** (designed). Size **XL** (multi-session). Deps: none hard. Refs: BRIEF_46.
 
 ## 🔴 RED — queued only; needs-Alkama or arming-risk; NEVER auto-executed (brief, don't build live)
+
+- **R20 · partner A Phase 1 — wire the partner_a adapter LIVE in SHADOW (audit real decisions)** — the
+  pilot (2026-07-10) proved the adapter + handshake; the agreed next step (Alkama⇄the governance partner) is to flip the
+  LIVE gate `ADMISSIBILITY_ADAPTER=noop→partner_a` while staying `MODE=shadow`, so CLARA calls partner A on
+  every mutating action and RECORDS the verdict to the local ledger WITHOUT blocking. Alkama reviews the
+  pattern; Phase 2 (enforce) comes later, deliberately. 🔴 = arming a live external dependency on the
+  tool-execution hot path → build carefully. **Deps/considerations (BRIEF_54 §7.3):** hot-path latency (a
+  network call per mutating action — make the gate call non-blocking/budgeted; timeout+fail-open exist);
+  partner A free-tier 1000-req/mo quota (scope to write/process classes or sample); sort the
+  write_file:sandbox-test capability grant (enforced /analyze currently DENYs it). Size **M**. Refs:
+  `briefs/BRIEF_54 §7.3`, `core_logic/admissibility.py` `_partner_a_evaluate`, `tool_executor.py` gate hook.
+  **⏩ PROGRESS 2026-07-14 (BRIEF_57):** the hot-path-latency dep is SOLVED in code — shadow now runs the
+  remote adapter **fire-and-forget** (daemon thread computes + ledgers under the same receipt; caller gets
+  an immediate non-enforced ALLOW), sync retained for enforce; `_ledger_lock` added for concurrent async
+  writes; self-test case (8) green. **⏩ 2026-07-14 GO-LIVE:** adapter FLIPPED `noop→partner_a` +
+  `PARTNER_A_ENDPOINT=analyze` (core_logic/.env; shadow, fail-open) — live on next backend restart. And the
+  **governance-audit sweep is BUILT** (`tests/governance_audit.py`, 25-action battery across all classes,
+  validated dry+policy with no network, report→`governance_audit_reports/` gitignored, `--live` for real
+  partner A calls). **Remaining:** (a) restart backend to activate; (b) **the governance partner: capability grant** so
+  verdicts aren't all-DENY (ask drafted); (c) key rotation; (d) run the battery `--live` post-grant.
+  **Deferred to enforce:** the synchronous-remote latency on the user-facing path (see BRIEF_57
+  `TODO(enforce)` — risk-tiered fast-path / verdict cache / tighter timeout).
 
 - ~~**R18 · BRIEF_55 — test-mode tool sandbox**~~ — ✅ RESOLVED 2026-07-07: Alkama REDIRECTED (writes
   allowed + contained, not denied). Built as BRIEF_56 §1: drill_workspace/ + harness Phase 0.5/3.5 sweep

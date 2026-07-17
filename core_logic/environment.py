@@ -46,6 +46,10 @@ IGNORED_PATTERNS: list = [
                          # file_change events in ONE harness run (2026-06-04) — each spawned an
                          # autonomous task and saturated the orchestrator until user requests
                          # (Q17-Q20) timed out at 180s. node_modules must never reach the watcher.
+    "drill_workspace",   # BRIEF_56 code-build workspace (Clara writes her own components here during
+                         # the drill). Watcher-triggered autonomous tasks touching these files caused a
+                         # concurrent-write race that BLOCKED her Q23 L2 write via the resource ledger
+                         # (2026-07-08e). The drill owns this dir; the watcher must never react to it.
     ".git",              # VCS metadata churn
 ]
 
