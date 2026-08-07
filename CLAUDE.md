@@ -159,6 +159,15 @@ Evening runs the L1-L5 scorecard alone. Wrapped so a coherence hiccup never fail
    sections silently stayed "Pending", so they were untrackable). The drill is NOT complete until this
    section is written. Verify with `python tests/report_analysis_status.py` — it must report that day's
    report as ANALYZED (it greps the section for the "Pending" placeholder and exits non-zero on any gap).
+   **That SAME gate now also enforces climb-due (2026-07-20):** it reads the live `pass_streak` fields
+   from both question sets and exits non-zero while ANY climbable question sits at/over `CLIMB_AT` (5)
+   consecutive passes owed a climb. Detection was always automatic (harness Phase 1.7), but actioning it
+   was skippable — so streaks silently piled to 12-13 (the "climb backlog"). **Actioning every CLIMB DUE
+   (promote one rung, reset the streak) OR recording an explicit deferral in the analysis is now a
+   mandatory, gated part of the drill: the backlog is not clear until this check exits 0.** Because it
+   reads the live question JSONs (not the report snapshot), a climb clears the gate the instant it's
+   actioned, and it catches climbs in the OTHER session's set too (e.g. an evening climb the morning
+   report never showed).
 
 **`verification` block (add to every new question — the reliable path, Brief 31):**
 - `{"type":"compute","code":"<one-liner that prints the answer>"}` — FAST math. Self-check it runs.
@@ -273,6 +282,20 @@ memorize_episode (background thread)
 FAST escalates to DELIBERATE on failure, injecting failure context as an assistant block.
 CHAT streams directly via `_run_chat()` — no ReAct loop, no tool calls.
 
+**Per-turn stream watchdog (BRIEF_59 / G17, 2026-08-02).** Each DELIBERATE turn opens a streaming
+DeepSeek call. The old bare `async for` had no inner bound, so an upstream freeze hung the whole request
+(07-08e Q11 hung ~22 min). `run_task` now bounds the two real stall points: `create()` is wrapped in
+`asyncio.wait_for(REACT_STREAM_CONNECT_TIMEOUT_S=30)`, and the stream is iterated by hand with each
+`__anext__()` wrapped in `asyncio.wait_for(REACT_STREAM_IDLE_TIMEOUT_S=30)` — an **idle** timer that resets
+on every chunk, so a slow-but-progressing (thinking-mode) turn never trips and only a true no-progress
+freeze does. On a stall: best-effort `_stream.close()`, an honest `user()` retry note appended to `llm`
+(Clara re-runs the turn), and a **consecutive**-stall cap (`REACT_STREAM_MAX_CONSEC_STALLS=2`) that returns
+an honest "upstream outage" message on the 2nd consecutive stall (fail-fast) and resets on any completed
+turn. This is the *inner* per-turn budget; Brief 37's `asyncio.wait_for(…, 600s)` remains the *outer*
+request backstop. Knobs are env-overridable (defined after `load_dotenv`). Test:
+`tests/test_react_stream_timeout.py` (synthetic-hang, no backend). `_run_chat`'s single stream has the same
+`async for` shape and is a noted follow-up (outer 600s wrapper only for now).
+
 ### Key Modules
 
 | Module | Path | Role |
@@ -320,6 +343,17 @@ if confidence >= 0.75 and uncertainty <= 0.30 and requires_planning == False:
 else:
     DELIBERATE
 ```
+
+### Computation always routes to a tool, never CHAT (2026-08-01)
+Any question that **computes** a value — arithmetic, a statistic, a date offset, a time offset, a count —
+routes to a tool (`python_repl` for math; `date_time` with `offset_days`/`offset_minutes` for date/time),
+`requires_planning=false` → FAST; a multi-STEP computation → DELIBERATE. `tool=null` → CHAT is for
+conversational/knowledge answers ONLY, and `CHAT_SYSTEM_PROMPT` explicitly forbids emitting a tool call
+there (CHAT has no tool execution). **Root cause of the 07-31e `<tool_call>` blob:** a time-delta was routed
+to CHAT, where the model hallucinated a tool-call it cannot run. `get_time_date` gained `offset_minutes`
+(deterministic target clock time, wraps across midnight) so time-deltas are FAST + deterministic, mirroring
+Brief-50's `offset_days`. `_run_fast` dispatch forwards both offsets; a `_run_chat` backstop suppresses any
+stray native tool-call block.
 
 ### FAST Failure Escalation
 When FAST fails, before calling run_task():
@@ -786,7 +820,8 @@ Requires: `pip install "python-telegram-bot>=21.0"`
 
 ### LLM Models in Use
 
-**Inference:** DeepSeek V4 Flash (`deepseek-chat`) via OpenAI-compatible API
+**Inference:** DeepSeek V4 Flash (`deepseek-v4-flash`, resolved from `core_logic/llm_config.py`
+`DEEPSEEK_MODEL`, env-overridable — G24, 2026-08-01) via OpenAI-compatible API
 (`base_url: https://api.deepseek.com`) for all LLM calls — Interpreter, FAST format_llm,
 CHAT stream, DELIBERATE ReAct loop, memory consolidation.
 
@@ -799,7 +834,9 @@ cache hit after the first request. Cache hit tokens tracked in `TokenUsage.cache
 via `prompt_cache_hit_tokens` field on usage object.
 
 Migration from xAI Grok SDK → DeepSeek OpenAI-compatible SDK (Brief 28, May 2026).
-All three paths (CHAT/FAST/DELIBERATE) use `deepseek-chat`. Async calls via `AsyncOpenAI`,
+All three paths (CHAT/FAST/DELIBERATE) use `DEEPSEEK_MODEL` (default `deepseek-v4-flash`; the
+`deepseek-chat` alias was retired 2026-07-25 and the name is now centralized in one source,
+`core_logic/llm_config.py` — G24, so the next rename is one line). Async calls via `AsyncOpenAI`,
 memory consolidation uses sync `OpenAI` client (runs in `asyncio.to_thread`).
 
 ### Action Format (DELIBERATE)

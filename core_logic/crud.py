@@ -184,9 +184,17 @@ class crud:
             user_embs = torch.stack([episodic_embeddings[i] for i in user_indices])
             cos_sims = torch.nn.functional.cosine_similarity(q_emb.unsqueeze(0), user_embs)
             top_k = min(2, len(user_indices))
-            top_local = cos_sims.topk(top_k).indices.tolist()
-            for local_idx in top_local:
-                selected_indices.add(user_indices[local_idx])
+            top_vals, top_idx = cos_sims.topk(top_k)
+            # Y3 (Topic-4 Phase-3, DORMANT behind SEMANTIC_RETRIEVAL_V2): relevance-gate the semantic hits.
+            # A fixed top-2 with NO floor injects the two least-irrelevant episodes as if relevant even on an
+            # off-topic query — noise in every request's context. When the flag is ON, drop hits below the
+            # cosine floor; when OFF (default), floor = -1.0 admits every top-k hit, i.e. byte-for-byte the
+            # prior always-top-2 behavior (cosine is bounded [-1, 1]).
+            _v2 = os.getenv("SEMANTIC_RETRIEVAL_V2", "").strip().lower() in ("on", "1", "true", "yes")
+            _floor = float(os.getenv("SEMANTIC_RETRIEVAL_FLOOR", "0.30")) if _v2 else -1.0
+            for _val, local_idx in zip(top_vals.tolist(), top_idx.tolist()):
+                if _val >= _floor:
+                    selected_indices.add(user_indices[local_idx])
 
         # 3. Build context string — opening with temporal grounding (2026-06-12):
         # Clara gets the clock on EVERY call. Placed here (not the system prompt) on
@@ -324,15 +332,22 @@ class crud:
         Split out of get_smart_context so the LLM paths can receive it while the Interpreter does not."""
         sk = self.memory.get('self_knowledge', {})
         sk_lines = []
+        # Defensive .get() on every field: this block runs on EVERY request's context, so a single
+        # malformed self_knowledge entry (wrong/missing key) must NEVER crash the whole request path.
+        # (2026-07-19: an entry with 'problem' instead of 'trigger' KeyError'd every request for a day.)
         for fact in sk.get('architecture_facts', []):
             if fact.get('status') == 'active':
-                sk_lines.append(f"  [ARCH] {fact['summary']} — {fact['detail']} [conf:{fact['confidence']}]")
+                sk_lines.append(f"  [ARCH] {fact.get('summary','')} — {fact.get('detail','')} "
+                                f"[conf:{fact.get('confidence','?')}]")
         for pat in sk.get('failure_patterns', []):
             if pat.get('status') == 'active':
-                sk_lines.append(f"  [FAIL] Trigger: {pat['trigger']} | Fix: {pat['correct_approach']}")
+                trig = pat.get('trigger') or pat.get('problem') or pat.get('summary') or ''
+                fix = pat.get('correct_approach') or pat.get('method') or ''
+                sk_lines.append(f"  [FAIL] Trigger: {trig} | Fix: {fix}")
         for rec in sk.get('recovery_methods', []):
             if rec.get('status') == 'active':
-                sk_lines.append(f"  [RECV] {rec['problem']} → {rec['method']}")
+                sk_lines.append(f"  [RECV] {rec.get('problem') or rec.get('trigger') or ''} → "
+                                f"{rec.get('method') or rec.get('correct_approach') or ''}")
         if not sk_lines:
             return ""
         return ("\n[SELF KNOWLEDGE — CLARA's operational learnings. CLAUDE.md takes precedence on all "

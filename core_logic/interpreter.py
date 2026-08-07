@@ -2,6 +2,7 @@ import json
 import os
 from openai import AsyncOpenAI
 from .session_logger import slog
+from .llm_config import DEEPSEEK_MODEL
 
 _DS_CLIENT: "AsyncOpenAI | None" = None
 
@@ -25,7 +26,7 @@ TOOL_ARG_SCHEMAS = {
     # Core always-available native tools
     "web_search":        {"query": "string — search query"},
     "python_repl":       {"code": "string — python code to execute"},
-    "date_time":         {"offset_days": "int — optional: days from today for a relative-date question (future +, past −); returns the COMPUTED target date+weekday"},
+    "date_time":         {"offset_days": "int — optional: days from today for a relative-date question (future +, past −); returns the COMPUTED target date+weekday", "offset_minutes": "int — optional: minutes from now for a relative-TIME question ('what time in N hours/minutes', future +, past −); returns the COMPUTED target clock time (12h+24h)"},
     "vision_tool":       {"path": "string — absolute path to image file",
                           "question": "string — what to ask about the image",
                           "paths": "list[string] — optional: multiple image paths"},
@@ -164,8 +165,21 @@ Personal memory rules:
   "N days ago", "the date X days before/after today" → tool=date_time with
   offset_days=±N (future +, past −), requires_planning=false. The tool returns the
   COMPUTED target date + weekday — so Clara never hand-computes calendar arithmetic
-  (she reliably errs on month-boundary rollovers). A pure time-of-day delta ("what
-  time in 90 minutes") stays a normal answer; this is for CALENDAR dates/weekdays.
+  (she reliably errs on month-boundary rollovers).
+- Relative-TIME questions (G25, 2026-08-01): "what time will it be in N hours/minutes",
+  "N minutes from now", "the time X hours before/after now" → tool=date_time with
+  offset_minutes=±N (future +, past −), requires_planning=false. The tool returns the
+  COMPUTED target clock time (12h+24h) — so Clara never hand-adds minutes. Convert hours
+  to minutes ("6 hours 53 minutes from now" → offset_minutes=413). Was previously routed
+  as a plain CHAT answer, which let a degraded turn emit a bogus tool-call (07-31e Q22).
+- COMPUTATION ALWAYS USES A TOOL, NEVER CHAT (2026-08-01): any question that asks to COMPUTE
+  or CALCULATE a value — arithmetic, a sum/product/prime-factor, a statistic, a date or time
+  offset, a count — routes to a tool with requires_planning=false: python_repl for
+  arithmetic/math, date_time for date/time offsets. tool=null (CHAT) is for conversational and
+  knowledge answers ONLY — never make CHAT hand-compute a value (it will guess, or emit a bogus
+  tool-call it cannot run, the 07-31e time-delta bug). A genuinely multi-STEP computation
+  (compute X, then compute Y from it) → requires_planning=true (DELIBERATE). Note: discussing or
+  explaining numbers is NOT computing them — "explain tail latency (p99)" stays CHAT.
 - Do NOT use consult_archive for personal memory lookups.
   consult_archive searches indexed documentation (CLAUDE.md, ROADMAP.md,
   resume) — it does not contain conversation history.
@@ -300,7 +314,7 @@ async def interpret(
         messages.append({"role": "user", "content": prompt})
         ds = _ds_client()
         _interp_response = await ds.chat.completions.create(
-            model="deepseek-chat",
+            model=DEEPSEEK_MODEL,
             messages=messages,
             stream=False,
         )

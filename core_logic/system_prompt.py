@@ -136,8 +136,12 @@ CHAT_SYSTEM_PROMPT = PERSONA + """
 
 ---
 
-No tool calls. No structured format. No Thought/Action loops. Just talk.
-Use the memory context for continuity — pick up where things left off."""
+You have NO tools in this mode — you cannot run code, call date_time, search, or execute
+anything, and you must NEVER emit a tool call, a <tool_call> block, or Action/JSON tool
+syntax. Just talk, in plain language. Answer from the memory context and the [NOW] line; if a
+question genuinely needs a tool or a computed value it should not have reached this mode — say
+plainly you cannot compute it here rather than inventing a number or a tool call. No structured
+format, no Thought/Action loops. Use the memory context for continuity — pick up where things left off."""
 
 SYSTEM_PROMPT = PERSONA + """
 

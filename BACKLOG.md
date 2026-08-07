@@ -44,6 +44,78 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
+- ~~**G26 · search_set partition/caveat false-fail**~~ — ✅ DONE 2026-08-01 (busy-mode). `_stated_total_conflict`
+  in `tests/verification.py` false-failed a correct enumeration when the answer PARTITIONED the count
+  ("8 executable + 8 comment" of 16) or carried a clarifying CAVEAT ("12 hits for the broader token") — it read
+  a sub-header/caveat as the grand total. 3+ instances; on 07-31m it false-failed a *perfect* answer. Fix:
+  parse "N total" (number-before-'total') + `_subset_sums_to` partition reconciliation. Self-test 51→54 (3
+  fixtures, both directions). Ref: TIMELINE 2026-08-01 [FIX]. **`tests/` gitignored — not in git diff.**
+
+- ~~**G25 · `<tool_call>` blob reached the user (Q22 07-31e)**~~ — ✅ DONE + BOOT-TESTED 2026-08-01
+  (busy-mode). F3: `offset_minutes` added to `get_time_date` (deterministic clock-time, midnight-wrap) +
+  interpreter schema/routing + FAST-dispatch wiring → time-deltas route FAST ("6h53m from now" → "12:50 PM"
+  live). F2b: `_run_chat` replaces a stray native `<tool_call>` block with an honest fallback. Ref: TIMELINE
+  2026-08-01 [FIX] G25. **TRACKED (core_logic/) — in git diff.** *(Diagnosis kept below for the record.)*
+  NOT a FAST issue and NOT infra. Log (`session_2026-07-31_20-01-03.log:7386-7402`) shows two
+  real defects: **(1) Interpreter misclassified** "what time will it be 6h53m from now? Give AM/PM" as
+  `tool=null` at **confidence 0.98** (should be `date_time` with `offset_minutes=413`) → routed to CHAT. It
+  handles "N days ago" (Q21 routed FAST correctly the same run) but misses relative-TIME ("N hours M minutes
+  from now"). **(2) CHAT leaked a native tool-call**: in `_run_chat` (no tool execution) the model emitted
+  `<tool_call>{"name":"date_time","arguments":{"offset_minutes":413}}</tool_call>` and CHAT streamed it
+  verbatim as the answer. **Refined root cause (2026-08-01):** `get_time_date` supports only `offset_days`, NOT
+  `offset_minutes` (tools.py:174), and the design is that the current time is READ from the `[NOW]` line each
+  turn (system_prompt.py:75-84) — so tool=null→CHAT is *correct routing* for a time-delta (CHAT computes
+  now+delta from [NOW]); the model's `<tool_call offset_minutes=413>` called a parameter that does not exist.
+  So the earlier "F1: route to date_time" was wrong. **Two fixes (backend → boot-test):** **F3 (root, the
+  right one)** — add `offset_minutes` to `get_time_date` (append a deterministically-computed target-TIME line,
+  mirroring the Brief-50 offset_days target-date line), add it to the interpreter date_time schema + a
+  relative-time routing rule → time-deltas route FAST to a DETERMINISTIC tool answer (no mental math, no CHAT
+  path for this class). **F2b (durable backstop)** — guard `_run_chat`: if the final response is a native
+  `<tool_call>` block, do NOT return the blob — strip + honest fallback (or escalate) so a stray CHAT tool-call
+  never ships garbage again. Size **S–M**. Deps: none (implement after the 08:00 cron; boot-test the time-delta
+  route + the guard). Ref: reports/2026-07-31-evening.md Q22, `core_logic/tools.py` get_time_date,
+  `core_logic/interpreter.py`, `core_logic/agent.py` `_run_chat`.
+
+- **G20 · code-build ladder in-loop post-write verification** — 2026-07-20 evening Q23 (Component-2 L2 `peak()`): Clara wrote correct-looking code but the write_file never landed (Action returned as response text, file left as the L1 version) → acceptance failed "peak() missing" AFTER the fact, wasting the rung. 2nd instance of a ladder write not landing. Fix: on a code-build-ladder task, after the write_file, read the file back + run acceptance WITHIN the same task so a non-landed/failed write is caught and retried in-loop, not silently failed post-run. Consider also enforcing that a ladder task must end on a Final Answer, not an unexecuted Action. Size M. Ref: reports/2026-07-20-evening.md Q23 analysis.
+  **Flow analysis 2026-08-01 (busy-mode):** `v_code_build` (verification.py:730) runs the acceptance snippet post-run and correctly FAILs a non-landed write ("peak() missing") — but it CANNOT distinguish "write didn't land" (Action-as-prose / parse issue, same class as Brief 51/52) from "wrong implementation"; both fail acceptance. So the fix does NOT belong in the verifier. Two options, both involved: **(a) agent-side** — after any `write_file`, read the file back to confirm the write landed (general robustness, but the agent doesn't know it's a code-build task or the acceptance); **(b) harness-side** — snapshot the target before the task, and if acceptance fails AND the file is byte-identical to the snapshot, classify it "write did not land — rung not attempted" (distinct from a real fail) and optionally re-fire once. (b) is the cleaner, code-build-scoped fix. No clean bounded spot → left queued with this analysis rather than a rushed half-fix; promote to a brief if picked up.
+
+- ~~**G21 · admissibility irreversibility from command semantics, not tool name**~~ ✅ DONE 2026-07-22.
+  New `_is_irreversible(tool, operation_class, raw)` folds `_DESTRUCTIVE_HINTS` into a first-class
+  `envelope["irreversible"]` in `build_envelope`; the governance vendor adapter reads it. 6/6 unit cases + one live
+  probe (destructive delete now DENY, was ESCALATE). Ref: TIMELINE 2026-07-22 [FIX] G21.
+  **Follow-up still open:** `gate()` builds `local_ctx = {"path": args.get("path")}` only, dropping the
+  command for process actions — the envelope path already carries it via build_envelope, but local_ctx
+  (what LOCAL adapters see as the raw path) is still command-less for processes. Thread it through if/when
+  the policy adapter needs to match on process commands. Size S.
+
+- **G23 · repair-event classifier (state-repair vs expression-repair)** — idea from the Michael Magee
+  thread 07-23: the human's clarification turn IS the label. Mine session logs for human turns that are
+  clarification requests, classify object/state repairs ("which file do you mean") vs expression repairs
+  ("what do you actually mean" — Magee's 6th category, semantic compression). Ratio over time = which
+  layer is failing. The coherence drill currently measures STATE only and would pass a phantom-contrast
+  response; this is the missing axis. Cheap: a classifier pass over logs, no backend change. Size S-M.
+  Ref: LINKEDIN_CONVOS.md Magee r5 07-23.
+
+- ~~**G24 · centralize the DeepSeek model name**~~ — ✅ DONE 2026-08-01 (busy-mode). New
+  `core_logic/llm_config.py` `DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")`; imported
+  into agent.py/interpreter.py/ambient_loop.py, all 7 literals → the constant. 4/4 ast.parse, env override
+  verified, behavior-preserving default. **TRACKED (core_logic/) — in git diff.** Boot-test deferred past the
+  08:00 cron. Ref: TIMELINE 2026-08-01 [REFACTOR] G24.
+
+- **G22 · classifier: package/npm install risk tier** — same run: `_classify_process_target` rates
+  `pip/npm install` as `dev_tool` → low risk → OPERATIONAL, so the engine allows them. Supply-chain risk
+  argues these should be `medium`+ (→ REVIEW). Design call for Alkama; likely raise. Size S.
+
+- ~~**G19 · self_knowledge-block self-test guard**~~ — ✅ DONE 2026-08-01 (busy-mode).
+  `tests/test_self_knowledge_block.py` — defensiveness regression (malformed entry doesn't raise, fallback
+  chain surfaces content) + live memory.json validation (builds; every active entry resolves non-empty). All
+  pass. Ref: TIMELINE 2026-08-01 [UPDATE] G19. **`tests/` gitignored.**
+
+- ~~**G18 · v_datetime long-form date extraction**~~ — ✅ DONE 2026-08-01 (busy-mode). Extracted a shared
+  `_day_present(day,text)` helper (`\b0?{day}(?:st|nd|rd|th)?\b`) tolerating leading-zero + ordinal forms,
+  word-boundaried; routed both date branches through it; self-test 54→59 (deterministic fixture). Ref:
+  TIMELINE 2026-08-01 [FIX] G18. **`tests/` gitignored.**
+
 - **G1 · Daily drill** *(RECURRING)* — cron runs the harness; I analyze + promote + write the report's
   `## Claude's Analysis` + TIMELINE. The GREEN backbone. Size **S–M**. Deps: none. Refs: CLAUDE.md "The Drill",
   `tests/report_analysis_status.py`, `tests/verification.py`.
@@ -147,12 +219,15 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   gitignored (fictional content must not be committed); do NOT delete until investigated. Size **S–M**.
   Deps: none. Refs: `deadlines.md`, `tests/coherence_dialogues.json` manager-her, `logs/session_2026-07-01_08-00-55.log`.
 
-- **G17 · Per-turn timeout on the ReAct `stream()` call** *(found 07-08e)* — Q11 hung ~22 min on a
-  frozen DeepSeek streaming call inside the DELIBERATE loop, then errored empty; the 600s request wrapper
-  did not cut it. Wrap each per-turn `stream()`/`chat()` in an `asyncio.wait_for` (a turn-level budget) so
-  an upstream hang fails fast to the escalation/timeout path instead of burning 22 min. The LLM-call
-  analogue of Jesse's per-tool-wait_for point. Size **S–M**. Deps: none. Refs: `core_logic/agent.py`
-  run_task loop, `reports/2026-07-08-evening.md` Q11, TIMELINE 07-08.
+- **G17 · Per-turn timeout on the ReAct `stream()` call** *(found 07-08e; reconfirmed 07-31 Q09/Q23)* —
+  **BRIEFED 2026-08-01 → `briefs/BRIEF_59_PerTurn_ReAct_Stream_Timeout.md`** (delicate core-loop change →
+  brief, not blind-build: the timeout branch can't be self-checked without a synthetic hang). Q11 hung
+  ~22 min on a frozen DeepSeek stream; 07-31 Q09/Q23 hit the harness 180s read-timeout. Brief proposes an
+  inner-coroutine `asyncio.wait_for` (default 120s, env-overridable) so a hung turn fails fast to the
+  empty-turn path; includes proposed code + a synthetic-hang test plan + open questions (discard-vs-keep
+  partial, timeout value, turn-count semantics, stream cancellation). **Awaiting Alkama's confirm.** Size
+  **S–M**. Refs: `core_logic/agent.py` run_task ~1701-1745, `reports/2026-07-08-evening.md` Q11,
+  `reports/2026-07-31-*.md` Q09/Q23. **`briefs/` gitignored — not in git diff.**
 
 ## 🟡 YELLOW — I build on `autonomous` (dormant, uncommitted); Alkama reviews the diff + commits
 
@@ -214,8 +289,12 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   short-circuit to direct extraction; scans OCR ≤10 pages. Validated: `tests/test_ocr_pdf.py` (4 cases) +
   live Gemini smoke + backend boot (10 native tools, was 9; no errors). See TIMELINE 06-27. `pymupdf` added
   to `requirements.txt`. **Uncommitted on `autonomous`** — Alkama reviews the diff + commits.
-- **Y3 · Stronger semantic retrieval** (Topic 4 Phase 3) — relevance-gated top-k + query-expansion before
-  embedding. Size **M–L**. Deps: none. Refs: `core_logic/crud.py` get_smart_context, ROADMAP Topic 4.
+- **Y3 · Stronger semantic retrieval** (Topic 4 Phase 3) — **relevance-gate HALF DONE 2026-08-01 (busy-mode,
+  DORMANT)**: cosine floor on the top-k semantic hits behind `SEMANTIC_RETRIEVAL_V2` (default OFF = unchanged;
+  ON drops hits below `SEMANTIC_RETRIEVAL_FLOOR`=0.30). Boot-tested both states. TRACKED, uncommitted, ships
+  OFF until Alkama flips it. **Still open:** query-expansion before embedding (the other half). Size **M**
+  (was M–L). Deps: none. Refs: `core_logic/crud.py:182` get_smart_context, ROADMAP Topic 4, TIMELINE
+  2026-08-01 [FEATURE] Y3.
 - ~~**Y4 · A3 screenshot sensor** (ambient vision)~~ — ✅ **DONE 2026-06-28 (DORMANT)** (Alkama greenlit).
   Built as a separate backend module `core_logic/screen_sensor.py` (NOT in `ambient.py` — that module forbids
   API keys + screenshots), OFF by default behind `A3_SCREEN_SENSOR`; screen → Gemini one-line description,

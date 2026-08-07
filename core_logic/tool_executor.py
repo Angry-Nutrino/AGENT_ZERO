@@ -236,6 +236,27 @@ NATIVE_TOOLS = frozenset({
 })
 
 
+def _demo_pack():
+    """The optional demo toolpack manifest (module named by the DEMO_TOOLPACK env var), or None.
+    Re-reads the env each call so tests can toggle it; importlib caches the module so repeat calls
+    are cheap. Deal-specific packs live OUTSIDE the tracked tree — core stays generic and never
+    names a prospect. A tool only reaches the dispatch below if the registry registered it, which
+    only happens when the same env var is set."""
+    pack = os.getenv("DEMO_TOOLPACK", "").strip()
+    if not pack:
+        return None
+    try:
+        import importlib
+        return importlib.import_module(pack)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_demo_tool(tool_name: str) -> bool:
+    p = _demo_pack()
+    return bool(p) and tool_name in getattr(p, "TOOL_NAMES", frozenset())
+
+
 async def _execute_mcp(server: str, tool_name: str, args: dict, mcp_client, task_id: str = None) -> str:
     """Single MCP dispatch path shared by execute_fast and execute_deliberate
     (previously ~60 duplicated lines — Brief 36 C-17). Owns, in order:
@@ -351,7 +372,8 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
             return await asyncio.to_thread(run_python_code, args.get("code", ""))
 
         elif tool_name == "date_time":
-            return await asyncio.to_thread(get_time_date, int(args.get("offset_days", 0) or 0))  # Brief 50
+            return await asyncio.to_thread(get_time_date, int(args.get("offset_days", 0) or 0),
+                                           int(args.get("offset_minutes", 0) or 0))  # Brief 50 + G25 time-delta
 
         elif tool_name == "consult_archive":
             return await asyncio.to_thread(consult_archive, args.get("query", ""))
@@ -396,6 +418,9 @@ async def execute_fast(tool_name: str, args: dict, registry, mcp_client, task_id
         elif tool_name == "tool_search":
             # tool_search in FAST is an edge case — route to DELIBERATE
             return "Error: tool_search requires DELIBERATE mode. Escalating."
+
+        elif _is_demo_tool(tool_name):
+            return await asyncio.to_thread(_demo_pack().dispatch, tool_name, args)
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:
@@ -508,6 +533,10 @@ async def execute_deliberate(
             from .tools import ocr_pdf as _ocr
             (pth,) = _extract_param(query, "path")
             return await asyncio.to_thread(_ocr, pth or query.strip(), 10, "")
+
+        elif _is_demo_tool(tool_name):
+            p = _demo_pack()
+            return await asyncio.to_thread(p.dispatch, tool_name, p.args_from_query(tool_name, query))
 
         # ── MCP tools ─────────────────────────────────────────────────────────
         elif registry is not None:

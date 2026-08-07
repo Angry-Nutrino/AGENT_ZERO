@@ -66,7 +66,7 @@ async def _broadcast(payload: dict) -> None:
     if not active_connections:
         return
     dead = set()
-    for ws in active_connections:
+    for ws in list(active_connections):  # snapshot — a disconnect mid-await mutates the set and raises RuntimeError on live iteration
         try:
             await ws.send_json(payload)
         except Exception:
@@ -575,7 +575,7 @@ async def get_soul():
 
     try:
         ram_percent = psutil.virtual_memory().percent
-        cpu_percent = psutil.cpu_percent(interval=0.1)
+        cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 0.1)  # off-loop: 100ms blocking sample must not stall the event loop
         cpu_name = platform.processor()
         if "Intel" in cpu_name: cpu_name = "Intel Core i5"
         if "AMD" in cpu_name: cpu_name = "AMD Ryzen 4800H"

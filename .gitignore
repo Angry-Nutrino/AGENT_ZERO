@@ -101,8 +101,13 @@ core_logic/admissibility_ledger.json
 core_logic/.partner_a_key
 deadlines.md
 AGENT_ZERO_PRIVATE/
+redacted-prospect_demo/
 My_Schedule/
 drill_workspace/
 
 # Governance audit sweep reports (BRIEF_57 / R20) — private deal artifacts
 governance_audit_reports/
+
+# Work logs that name design partners and private business context — never publish.
+busy-mode-reports/
+partner_a_pilot_call.py

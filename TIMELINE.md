@@ -1,5 +1,431 @@
 # CLARA Project Timeline
 
+## 2026-08-06
+
+[UPDATE] **Admissibility classifier — package installs reclassified `low` -> `medium` (partner A shared
+taxonomy).** `core_logic/admissibility.py`. `pip/npm/yarn/pnpm/poetry/conda/apt/brew install` (and
+uninstall) previously fell through to the `dev_tool` -> `low` mapping, because the classifier saw the
+binary (`pip`, `npm`) and not the operation. That is too generous: an install resolves and executes
+arbitrary third-party setup code (`setup.py` / postinstall) from a remote index, so it is a supply-chain
+surface. New `_PKG_INSTALL_HINTS` is checked in `_risk_class` BEFORE the dev_tool mapping (and after
+`_DESTRUCTIVE_HINTS`, so `git reset --hard` still returns `high`). Verified against the agreed shape:
+`git reset --hard` -> high, all install forms -> medium, and the controls unchanged (`git status`/
+`python x.py` -> low, `curl | sh` -> critical, `shutdown` -> high). Module self-test passes. This closes
+the last classifier gap in the partner A process-family taxonomy; partner's final confirmation battery
+is next. Shadow-mode, so no live enforcement change. Classifier output for the partner emitted to
+`AGENT_ZERO_PRIVATE/partner_a_classifier_output_2026-08-06.json` (gitignored).
+
+## 2026-08-05
+
+[FIX] **`search_set` count-check false-FAIL #3 — line-number/newline weld (`tests/verification.py`
+`_stated_total_conflict`).** The 08-05e Q11 (`asyncio.gather`) FAIL was a **verifier artifact**, not a Clara
+error: her answer was flawless (4/4 matches, correctly separating the 3 real calls from the 1 comment mention,
+and correctly CORRECTING the question's false premise that only one call passes `return_exceptions=True` —
+there are two). Root cause: the count-noun rule's `\s+` **spanned a newline**, welding the trailing line number
+of one line to the first word of the next (`"core_logic/agent.py:1999\nresults = await asyncio.gather(...)"`
+→ parsed as `"1999 results"` = a claimed grand total of 1999). Blast radius was wide because **line numbers are
+the verifier's own recall currency** — `search_set` questions mandate a file+line list, so every correct answer
+is full of them, and any line number sitting above a code line starting with a count-like word
+(`results`/`matches`/`hits`/`times`…) was exposed. Fix: (1) count claims are now **same-line only**
+(`[ \t]+`, not `\s+`) for the count-noun and `N total` rules; (2) new `_is_line_ref` guard drops any candidate
+immediately preceded by `:` (a `file:line` ref is never a total). Self-test **59 → 62** (+3 fixtures: the
+newline weld, inline `file:line` refs, and a boundary case asserting a same-line WRONG count still FAILs, so
+the genuine Brief-43.4 catch is not weakened). Third variant of this class (07-30e partition sub-header,
+07-31m clarifying caveat, now the line-number weld).
+
+[UPDATE] **Drill — 3-report backlog cleared (08-04m, 08-05 m/e); 3 climbs actioned; gate CLEAR.** 08-04m
+**17/0/6** and 08-05m **18/0/5** both clean. 08-05e graded 17/**1**/5 but the lone FAIL was the Q11 verifier
+artifact above → corrected to PASS, `fail_count` NOT incremented → true **18/0/5**. **Calibration WIN:** Clara
+self-diagnosed Q11 as `verifier_artifact` (not `real`) — the correct call, and exactly what the D1-D6
+false-self-blame fix targets; a clean counter-point to the standing 07-31m watch-item. **3 CLIMBS:** morning
+**Q06** L3→L5 (enumerate `asyncio.Lock(` AND contrast the `threading.Lock` `_vault_lock` + why the primitives
+are not interchangeable — the vault guards a background `to_thread` consolidation, which an `asyncio.Lock`
+cannot); evening **Q12** L4→L6 (persistence failure-analysis: why a permanently-dropped `os.replace` still
+self-heals via the full-dict write, plus `_load_memory`'s timestamped backup before defaults); evening **Q23**
+code_build component 2 L2→L3 (`RateWindow.first_exceeding(k)`; acceptance **validated against a reference
+implementation before saving** and re-asserts L1 `count` + L2 `peak` so an earlier-rung regression fails).
+All key_facts terms grep-validated in `core_logic/`. `report_analysis_status.py` exits 0 (0 reports + 0 climbs).
+**Watch-item:** Q11's premise is factually wrong ("the single call" — there are two); flagged for a scope-fix
+on its next rotation. Also 08-04m Q09's key_facts synonym group is too literal (the LLM judge had to accept a
+paraphrase) — widen it if it recurs.
+
+## 2026-08-02
+
+[UPDATE] **Drill — the two 08-01 reports analyzed + 12 MORNING climbs actioned; gate CLEAR.** Both 08-01
+runs were CLEAN on the session's own changes, which is the real validation: **morning 17/0/6** (Q06
+asyncio.Lock — the exact question the `search_set` bug used to false-fail — now PASSES 5/5), **evening
+18/0/5** run at 20:24 on the full change set (the 12 evening climbs + the computation-routing enhancement) —
+**all 12 evening climbs HELD** (incl. the two L6 rungs), and **Q22, the time-delta that produced the
+`<tool_call>` blob on 07-31e, now PASSES** via FAST `date_time offset_minutes`. **12 MORNING climbs actioned**
+(Q05/07/08/11/12/14/16/17/20/21/22/23), each promoted one rung with a grep-validated oracle — 4 added deeper
+facts (Q05 zero-vector/384 alignment placeholder, Q07 `_load_non_terminal` restart re-hydration, Q08
+digit-preserved detection compare, Q16 the node_modules npm-install 12,640-event incident); the rest climbed
+by question-difficulty on their already-proven oracle; Q21→R4 (+400d, year crossing), Q22→R4 (698 min). The
+validator aborts on any un-found term (none). Streaks reset, gate CLEAR. **Climb-validation: bet ACCEPTED,
+not smoke-tested** — the evening set held 12/12 with identical methodology and the oracles are grep-validated,
+so the 08:00 cron is the validator (explicit decision per busy-mode Section 5). Verifier self-test 59/59.
+
+## 2026-08-04
+<!-- The two [FEATURE] entries below were completed 2026-08-04 (initially mis-dated under 08-02 during the session; corrected). -->
+
+[FEATURE] **BRIEF_59 (G17) implemented — per-turn ReAct stream watchdog (Option B: inter-chunk idle +
+connect-bounded).** `core_logic/agent.py` `run_task`. The DELIBERATE loop consumed each turn's DeepSeek
+stream with a bare `async for`, so an upstream freeze had no inner bound (07-08e Q11 hung ~22 min; 07-31
+Q09/Q23 hit the harness 180s read-timeout). Fix bounds the two real stall points: (1) `create()` wrapped in
+`asyncio.wait_for(REACT_STREAM_CONNECT_TIMEOUT_S=30)`; (2) the stream iterated by hand with each
+`__anext__()` wrapped in `asyncio.wait_for(REACT_STREAM_IDLE_TIMEOUT_S=30)` — an **idle** timer that resets on
+every chunk (a slow-but-progressing / thinking-mode turn never trips; reasoning tokens keep chunks flowing),
+so it fires only on a true no-progress freeze. On a stall: best-effort `_stream.close()`, then an honest
+**`user()`** retry note ("infrastructure stall, not a reasoning error — produce your response again") appended
+to `llm` so Clara re-runs the turn; **consecutive** stalls capped at `REACT_STREAM_MAX_CONSEC_STALLS=2` →
+2nd consecutive returns an honest "upstream outage" message immediately (fail-fast, ~60s, vs limping all 8
+turns), counter resets on any completed turn. Chose Option B over a single whole-turn `wait_for` (Option A)
+because the guard then matches the actual failure signal (no progress) rather than conflating a long turn
+with a frozen one — tight (30s) yet never false-tripping. Deliberately NOT routed through the off-format
+handler (that would misdiagnose a freeze as a malformed turn). Knobs are env-overridable (defined after
+`load_dotenv`). New test `tests/test_react_stream_timeout.py` (synthetic-hang, 3/3, no backend/network):
+inter-chunk stall→bounded→outage, connect stall→bounded→outage, single stall→retry-note-appended→next-turn
+answer returned (counter reset). Follow-up noted in brief: `_run_chat`'s single stream has the same shape
+(covered today only by the outer 600s wrapper) — a future pass can reuse the idle-timeout there.
+
+[FEATURE] **Generic demo-toolpack seam (`DEMO_TOOLPACK`), off by default.** `tool_registry.py` +
+`tool_executor.py`. An optional env var `DEMO_TOOLPACK` names an importable manifest module exposing
+`SCHEMAS` / `TOOL_NAMES` / `dispatch(name, args)` / `args_from_query(name, query)`. When set,
+`register_native_tools` registers that module's `SCHEMAS`, and the executor dispatches any tool whose
+name is in the pack's `TOOL_NAMES` via the pack's `dispatch()` (FAST) / `args_from_query()`+`dispatch()`
+(DELIBERATE) — a generic seam with zero tool-specific names in tracked core. Unset (default) = completely
+inert: the registry registers nothing extra and the executor branch is never reached, so live behavior is
+unchanged. Purpose: let self-contained, purpose-built demo tool packs live OUTSIDE the tracked tree and
+plug in behind one env var, without touching core each time. Verified inert-when-unset (registry gating
+test) and correct-when-set (FAST/DELIBERATE dispatch tests). `NATIVE_TOOLS` was only ever a docstring
+reference, so demo tools not being in it is fine — dispatch is the explicit if/elif chain plus the seam.
+
+[UPDATE] **Drill — 4-report backlog cleared (08-02 m/e + 08-03 m/e), all CLEAN; 2 climbs actioned; gate CLEAR.**
+(No 08-04 reports — the machine was off, crons didn't fire; the backlog was the four accumulated runs.) Every
+run **PASS 18 · FAIL 0 · UNVERIFIABLE 5**, verifier self-test 59/59 all four — no confirmed FAILs. Spot-checked
+the mechanically-graded PASSes against source (Q06 `asyncio.Lock(`=5/4files with correct false-zero self-scan;
+`os.replace`=16/6; `start_search` terminal marker + PARTIAL-on-exhaust; numeric-fidelity guard python_repl-only
+vs the G15 date guard) — all correct. **One real note, INFRA not Clara:** 08-02-morning **Q19** returned an
+outage non-answer (frozen upstream stream) — exactly the class **BRIEF_59** (shipped today) now bounds; no
+Clara regression. **2 CLIMBS actioned** (both at pass_streak 5): **Q04** L3→L4 (two-number recall → doc-vs-code
+agreement: does CLAUDE.md's Conversation-Hold description match crud's cap-10 + inject-6? verified both sources
+agree), **Q09** L5→L6 (os.fork absence-honesty → meta self-diagnosis of the Rule-19 negative-claim guardrail +
+start_search false-zero recovery). Streaks reset; `report_analysis_status.py` exits 0 (0 reports + 0 climbs).
+
+[FIX] **Session date-labeling corrected.** BRIEF_59 + the demo-toolpack seam were completed 2026-08-04 but were
+initially logged under a 2026-08-02 header during the session; split into the correct 08-04 section above.
+
+## 2026-08-01
+
+[UPDATE] **Drill catch-up (busy-mode): 4 pending reports analyzed — 07-30 m/e + 07-31 m/e.** All FAILs
+anchored to independent `core_logic/` grep. **Two real FAILs, both self-diagnosed correctly:** (a) 07-30m
+Q06 (`asyncio.Lock(` enum) — unescaped `(` regex metachar → "0" headline for a 5-match pattern; self-corrected
+to a *flawless* answer by 07-31m ("5 total across 4 files"). (b) 07-31e Q22 (clock AM/PM) — emitted a raw
+`<tool_call>{...}</tool_call>` blob instead of a time, on a run where Q23 + the Self-Assessment also hit 180s
+HTTP timeouts (backend degraded). **Two verifier FALSE-FAILs (corrected to PASS, fail_count NOT incremented):**
+07-30e Q12 (`os.replace`, partitioned 8+8=16 enum) and 07-31m Q06 (correct "5 total across 4 files"
+false-failed on the "12 hits" clarifying caveat). **Infra:** 07-31 both sessions hit repeated 180s timeouts
+(Q09m, Q23e) — the standing **G17** per-turn-timeout item, not Clara regressions. **Calibration watch:** the
+07-31m Layer-2 gold-seed self-test mismatched (Clara labelled an infra non-answer `real/memory_confabulation`)
+— a residual false-self-blame on the probe, consistent with the standing calibration note.
+
+[FIX] **`search_set` partition/caveat false-fail hardened — `tests/verification.py` `_stated_total_conflict`.**
+The count-check read a partition sub-header ("8 occurrences" of 8+8=16) or a clarifying-caveat number
+("12 hits for the broader token") as the answer's grand total and FALSE-failed a correct, well-covered
+enumeration — 3+ instances, and on 07-31m it false-failed a *perfect* answer. Fix: (1) parse "N total"
+(number-before-'total') so the correct "5 total across 4 files" phrasing registers as the claimed total;
+(2) new `_subset_sums_to` partition reconciliation — if the claimed sub-counts add to the true total, trust
+line-coverage instead of false-failing. Preserves the genuine catch (a lone wrong "4" for 5 still FAILs; a
+single wrong total with good coverage still FAILs). Self-test **51 → 54** (added 3 regression fixtures:
+07-31m 'N total'+caveat, 07-30e partition, bounded-reconciliation FAIL guard). Morning Q06 now self-heals on
+the next cron. **`tests/` is gitignored — machinery, not in `git diff`.**
+
+[UPDATE] **G19 — self_knowledge-block guard test (`tests/test_self_knowledge_block.py`).** Locks the
+2026-07-19 crash class (a malformed SK entry — 'problem' where the code read 'trigger' — KeyError'd
+`_self_knowledge_block`, which runs on every request's context, crashing the request path for ~24h). Test
+exercises the REAL block via `crud.__new__` (no __init__ side effects): a synthetic malformed memory must
+NOT raise and the fallback chain must surface content; empty → ''; the LIVE memory.json must build and every
+active failure_patterns/recovery_methods entry must resolve to non-empty content (so a bad entry is caught
+at test time, not in production). All checks pass. **`tests/` gitignored — machinery.**
+
+[REFACTOR] **G24 — centralized the DeepSeek model name (recurring-outage footgun).** The string was
+hardcoded in 7 call sites (agent.py ×5, interpreter.py, ambient_loop.py) and this exact class broke every
+LLM call TWICE (Grok→DeepSeek, then the 2026-07-25 `deepseek-chat`→`deepseek-v4-flash` rename). New
+`core_logic/llm_config.py`: `DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")` — single
+source, env-overridable, default preserves current behavior. Imported into the 3 files; all 7 literals →
+the constant (the line-55 comment left as history). Validated: 4/4 ast.parse clean, zero stray literals,
+constant resolves to `deepseek-v4-flash`, `DEEPSEEK_MODEL=deepseek-v4-pro` override picked up. Behavior-
+preserving, so no dormant flag. **TRACKED code (core_logic/) — appears in git diff.** **Boot-confirmed live
+2026-08-01 05:56 IST** (backend boots on the centralized name, /soul 200, queries answer).
+
+[FEATURE] **Y3 (Topic-4 Phase-3) — relevance-gated semantic retrieval, DORMANT behind `SEMANTIC_RETRIEVAL_V2`.**
+`get_smart_context` selected a fixed top-2 semantic hits with NO relevance floor, so even on an off-topic query
+the two least-irrelevant episodes were injected as if relevant (noise in every request's context). Added a
+cosine floor (`SEMANTIC_RETRIEVAL_FLOOR`, default 0.30) applied to the top-k when the flag is ON; when OFF
+(default) the floor is -1.0, which admits every top-k hit — byte-for-byte the prior always-top-2 behavior
+(cosine ∈ [-1,1]). `core_logic/crud.py:182`. **Boot-tested BOTH states:** flag-OFF exercised in the G25 boots
+(unchanged); flag-ON booted (/soul 200) + a memory-retrieval query answered cleanly with zero errors — the
+gating branch runs without crash. **DORMANT + UNCOMMITTED (🟡): TRACKED code (core_logic/crud.py) — in git
+diff; ships OFF until Alkama reviews + flips the flag.** Query-expansion (the other half of Topic-4 Phase-3)
+remains open. Ref: BACKLOG Y3.
+
+[ENHANCEMENT] **Computation always routes to a tool, never CHAT (generalizes G25 F3) + CHAT no-tools prompt
+hardened.** Alkama's architectural point: the deep cause of the 07-31e `<tool_call>` blob was not the missing
+`offset_minutes` per se — it was the interpreter routing a COMPUTATION to a no-compute path (CHAT), where the
+model then hallucinated a tool-call it cannot run. Two root-cause fixes (both PROMPT-level, low blast radius):
+(1) `core_logic/interpreter.py` — a general routing rule: any question that COMPUTES a value (arithmetic,
+date/time offset, statistic, count) → a tool (`python_repl`/`date_time`), requires_planning=false, never
+tool=null/CHAT; a multi-STEP computation → DELIBERATE; explicitly scoped so *explaining* numbers is not
+*computing* them ("explain p99 tail latency" stays CHAT). (2) `core_logic/system_prompt.py`
+CHAT_SYSTEM_PROMPT — replaced the too-weak "No tool calls." line with an explicit "you have NO tools in this
+mode, never emit a tool call or `<tool_call>` block; answer from the context/[NOW] or say you cannot compute
+it here." Boot-tested live: "sum of the first 30 even numbers" → FAST `python_repl` (930); "explain p99 tail
+latency" → CHAT (clean, no over-route); "3h15m from now" → FAST `date_time` (9:39 PM). F2b left in place as
+cheap insurance. **TRACKED code (interpreter.py, system_prompt.py) — in git diff** (system_prompt.py is new to
+the change set; folds into the G24/G25 core_logic commit).
+
+[FIX] **G25 — relative-TIME questions now route FAST to a deterministic tool; CHAT tool-call backstop.**
+Root cause of the 07-31e Q22 `<tool_call>` blob: `get_time_date` supported only `offset_days`, and the
+interpreter guidance explicitly told it a time-delta "stays a normal answer" → tool=null → CHAT, where the
+model emitted a bogus `<tool_call offset_minutes=413>` (a param that didn't exist) that CHAT streamed
+verbatim. **F3 (root):** added `offset_minutes` to `get_time_date` (deterministic target CLOCK TIME, wraps
+across midnight with a date note; mirrors Brief-50's offset_days), to the interpreter date_time schema, and
+a new relative-time routing rule; wired `offset_minutes` through the FAST executor dispatch
+(`tool_executor.py:354`). **F2b (backstop):** `_run_chat` now replaces a native `<tool_call>` block (or a
+wholly-JSON name+arguments object) with an honest fallback so a stray CHAT tool-call never ships as the
+answer. **Boot-tested live:** "6h53m from now" → FAST, `date_time offset_minutes=413`, "12:50 PM" (05:57+6h53m
+✓); "90 minutes ago" → "04:27 AM" ✓; a normal CHAT knowledge query answers cleanly (F2b no mis-fire).
+**TRACKED code (tools.py, interpreter.py, tool_executor.py, agent.py) — in git diff.** Ref: BACKLOG G25.
+
+[FIX] **G18 — v_datetime long-form / leading-zero / ordinal date extraction (`tests/verification.py`).**
+2026-07-18 Q21 FALSE-FAILED a correct "Tuesday, 01 September 2026": the day matcher was a bare `\b{day}\b`
+(`day`="1"), and `\b1\b` can't match the "1" inside a zero-padded "01" (no word boundary between 0 and 1),
+so a correct leading-zero long-form date failed. Extracted a shared `_day_present(day, text)` helper —
+`\b0?{day}(?:st|nd|rd|th)?\b` — tolerating leading-zero ("01") and ordinal ("1st"/"21st") forms while
+staying word-boundaried (so "1" still never matches inside "13"/"21"/"2026"). Routed both date branches
+(date_dow_yesterday + date_offset) through it. Self-test 54 → **59** (added a deterministic 5-case fixture
+calling `_day_present` directly). **`tests/` gitignored — machinery.**
+
+[UPDATE] **12 owed evening climbs actioned (never deferred, per the 07-24 lesson) — `tests/questions_evening.json`.**
+Q01 (A1 recall → top-3 + two peak hours), Q02 (L4→L5: +CUDAExecutionProvider workaround), Q03 (L4→L5:
++source-file attribution), Q04 (L5→L6: +0-result Rule-19 append), Q06 (L3→L4: +embedding-reuse provenance),
+Q07 (L4→L5: +defaults/normalizer ordering + the `rewrite` mapping), Q09 (absence: ProcessPoolExecutor →
+subprocess.Popen + alternative-naming), Q11 (L3→L4: +return_exceptions distinction), Q16 (L5→L6: +off-by-one
+ABS formula), Q19 (L2→L3: +per-lock purpose chain), Q20 (L4→L5: exact per-mode boolean expressions),
+Q21 (R3→R4: -200d → -400d, crosses a year boundary). Every key_facts oracle validated against live source
+before write (the validator aborted on a bad "Rule 19" term until fixed to a form-tolerant synonym group);
+dynamic oracles (ambient/absence/search_set/datetime) self-validate at grade time. Streaks reset; Q22 real
+FAIL recorded (fail_count 1). **Drill backlog gate: CLEAR (0 reports + 0 climbs).**
+
+## 2026-07-29
+
+[UPDATE] **Both daily drills clean — morning 17/0/6, evening 18/0/5, zero FAILs across 46 questions.**
+Verifier self-test 51/51 both runs. All UNVERIFIABLE (knowledge + Q17-class) judged PASS. **Q12 (os.replace)
+scored a clean PASS this evening (15/15 coverage)** — the 07-28 evening "FAIL" on the same answer was
+confirmed (again) a `search_set` verifier false-fail, not a Clara error; the two-day arc closes that
+diagnosis. `search_set` hardening (don't false-fail a well-partitioned enumeration) remains a latent
+Layer-1 candidate, not triggered today. **Ladder:** Q23 (code-build RateWindow) hit streak 6 → climb
+DEFERRED this cycle with an explicit documented reason (a code_build promotion needs a carefully-specced
+L3 acceptance oracle; next rung pre-specced as a windowed-aggregate method), streak reset. Also restored
+the 07-28-evening analysis section (a second 20:13 cron run had overwritten the 15:32 report I'd analyzed).
+Drill backlog gate: CLEAR.
+
+
+## 2026-07-28
+
+[UPDATE] **Evening drill (23Q) — clean 23/23; the lone scorecard FAIL was a Layer-1 false-fail.** Scorecard
+17 PASS / 1 FAIL / 5 UNVERIFIABLE (DeepSeek healthy on `deepseek-v4-flash`, so a valid run, not a void one).
+All 5 UNVERIFIABLE judged PASS (Q05/Q08/Q13/Q15 knowledge accurate; Q17 verbatim quote verified real at
+`agent.py:1929`). **Q12 (os.replace enumeration) CONFIRMED FALSE FAIL** via independent grep: ground truth =
+16 occurrences / **6 code calls** across 6 files; Clara listed all 6 code sites correctly + 9/10 docstring
+mentions, **properly separated**, and stated **no "57"** — the `search_set` verifier mis-graded a
+correctly-partitioned enumeration and reported a phantom total (same class as the 2026-06-01 search_set
+false-fail). `fail_count` NOT incremented; Q12 `last_result` corrected to pass. **Two real findings, both
+assessment-side, not Clara:** (a) `search_set` false-fails well-partitioned enumeration answers →
+Layer-1 hardening candidate; (b) Clara's Layer-2 **false-blamed herself** (classified it real/count-inflation,
+inheriting the verifier's phantom) → the calibration risk in the validate-self-diagnosis-calibration note.
+No climbs owed (Q23 nearest at streak 4). Verifier self-test 51/51 healthy.
+
+[UPDATE] **Cleared the 27-report drill-analysis backlog (mid-July → 07-26).** Per Alkama, the missed reports
+are written off, not reconstructed: an honest "written off as historical, not analyzed, not fabricated" stamp
+replaces the `Pending` placeholder in all 27 so `report_analysis_status.py` reads CLEAR (0 open). Today's
+07-28 report is genuinely analyzed (above).
+
+[FEATURE] **the governance vendor Run 2 (definitive) fired + formal report produced.** `governance_audit.py --adapter
+partner_b` live: 25 actions, ALLOW 16 / REVIEW 0 / DENY 9, mean 724ms / p95 777ms. Every dangerous action
+DENIED (incl. `git reset --hard` via the G21 irreversibility signal → CRITICAL). Full consequence spectrum
+(ADVISORY..EMERGENCY) firing. Findings: `evidence_id` empty on all 25 (sigs present); signature-verification
+column blocked on an Ed25519(intercept)-vs-dilithium3(Run-1 verify) contradiction — needs the governance vendor's
+authoritative scheme + pubkey + signed payload. Report: `AGENT_ZERO_PRIVATE/the governance vendor_CLARA_Gradient_Report_2_2026-07-28.md` (+PDF).
+
+## 2026-07-25
+
+[FIX] **DeepSeek model rename broke every LLM call — `deepseek-chat` → `deepseek-v4-flash`.** DeepSeek
+retired the `deepseek-chat` alias; the API now returns `400 invalid_request_error` ("supported API model
+names are deepseek-v4-pro or deepseek-v4-flash") on every Interpreter/FAST/CHAT/DELIBERATE call — CLARA was
+running entirely on the fallback path (logs/session_2026-07-25_06-14-34.log, 06:16 onward). Replaced all 8
+occurrences across `core_logic/agent.py` (incl. `load_clara` default), `interpreter.py`, `ambient_loop.py`
+with `deepseek-v4-flash` (CLARA is the V4-Flash user per CLAUDE.md). Three files parse-clean; **requires a
+backend restart to take effect** (running process holds the old string). **FOLLOW-UP (recurring footgun):
+the model name is hardcoded in 8 sites — this same class bit on the Grok→DeepSeek migration and again now.
+Centralize into one `DEEPSEEK_MODEL` env/constant so the next rename is a one-line change.** (BACKLOG G24.)
+
+[UPDATE] **Drill 07-24 analyzed + 21-question CLIMB BACKLOG cleared.** 07-24 morning clean (18/0/5); evening
+17 PASS / **1 real FAIL** (Q03, vision "CURRENTLY UNAVAILABLE" prefix — target string confirmed at
+tool_registry.py:231, so a genuine memory_confabulation at turn 8, fail_count→1, kept verbatim). **Climb:
+all 21 owed climbs actioned** (8 morning: M05/11/12/14/16/20/22/23; 13 evening: E01/02/06/07/09/11/12/13/16/
+19/20/21/22), each promoted one rung IN ITS OWN capability area, verification kept mechanically gradeable
+where the rung allowed (search_set/absence/datetime self-grade; key_facts anchored to source facts verified
+at author time; datetime offsets updated in-block). Streaks reset, gate now green (0 owed). **Root-cause
+lesson recorded: clear ALL due climbs every session — never defer one — so a broadly-passing suite cannot
+re-bunch (one-per-day cadence is what let 21 pile up).** Author/validate script: scratchpad/climb.py.
+
+[FEATURE] **the governance vendor Gradient Report #2 (Run 2) — the autonomous-DENY fix confirmed.** Applied the
+full-spectrum consequence remap the vendor requested (low→ADVISORY, medium→OPERATIONAL, high→CRITICAL,
+critical→EMERGENCY) — **the governance vendor-adapter-only, partner A envelope untouched so the governance partner's frozen test is
+unaffected**; package→HIGH deferred (shared classification the frozen test depends on). Live 25-action run:
+**ALLOW 16 · REVIEW 0 · DENY 9 · match 18/25 (72%, up from 64%).** Findings: (1) his human_present:false →
+ESCALATE-upgraded-to-DENY fix works — all 8 dangerous actions now DENY (DENY 2→9); (2) with no human present
+the engine is correctly BINARY (REVIEW=0), the review tier collapses; (3) the 7 residual "misses" are mostly
+CLARA-side (battery still encodes a REVIEW tier that autonomous execution doesn't have; package-install
+classifier pending). **Signature verification: pubkey endpoint confirmed = the vendor's exact key (Ed25519 RFC
+8037), sig well-formed 64-byte — but could not reach valid:true (canonical signed-payload format
+undocumented) AND found an algorithm inconsistency: signature/pubkey say Ed25519, POST /v1/crypto/verify
+reports `dilithium3`.** New finding + two asks sent to the vendor. Report+draft: LINKEDIN_CONVOS.md; raw run
+`governance_audit_reports/gov_audit_2026-07-25_075057.*`.
+
+## 2026-07-23
+
+[FIX] **BRIEF_58 COMPLETE — PDF figure reading now ACCURATE (11/11 ground-truth labels), end-to-end verified
+live.** Root cause of the confabulation finally found: `analyze_image_grok` hard-downscaled EVERY image to
+1280px (`img.thumbnail((1280,1280))`) before Gemini saw it — so the "high-DPI" crops were flattened back to
+~2.4 px/pt, exactly the resolution measured to confabulate. Fixes: (1) `max_side` parameter on
+`analyze_image_grok` (default 1280 preserved for screenshots; figure reading passes 2600); (2) **tiling** in
+`_describe_pdf_image` — figures needing >2600px split into ≤3x2 overlapping tiles at ~12 px/pt, ONE vision
+call PER TILE + a low-res overview call (a single multi-image request measurably dilutes per-tile resolution:
+7/11 labels multi-image vs 11/11 per-tile); (3) overlap 0.06→0.15 after a tile edge cut "Planning Req~" (the
+honest cut-marker instruction worked as designed); (4) `ocr_pdf` registry description rewritten from
+narrow-fallback ("SCANNED/image-only") to primary-PDF-reader framing — BRIEF_58 D4, the retrieval failure
+that kept the tool out of [DISCOVERED_TOOLS]; (5) stale `self_knowledge.ar_004` flipped to `resolved`
+(claimed vision dead for a missing GEMINI_API_KEY that has been set since 06-11 — made CLARA assert a false
+fact about her own config; edited atomically with backend down). **Validation ladder:** direct grade vs the
+900-DPI ground truth = 11/11 with ZERO confabulations (was 4/11); then the ORIGINAL failing dry-run question
+re-fired through live `/query` (memory_mode none) — she discovered ocr_pdf, read the diagram, and answered
+all three questions fully correctly. Denis demo UNBLOCKED. Follow-ups: formal `tests/test_pdf_reading_order.py`
+(the inline grade was ad hoc), and the brief's acceptance-3 regression check (text-only PDF spends zero calls).
+
+## 2026-07-22
+
+[FIX] **the governance vendor adapter pinned to the vendor's live spec (07-22) — 3 mismatches his auth-fix message revealed.**
+Auth unblocked 07-22 00:29 (key <sandbox key redacted>). His message doubled as the authoritative contract and
+exposed that `_partner_b_evaluate` did not match: (1) the response verdict field is **`ruling`**, not in my
+`decision/verdict/result/status/outcome` fallback list, so every response would have parsed unmappable →
+fail-open ALLOW (silent 25/25 allow); (2) **`ALLOW_WITH_CONDITIONS`** unmapped → now → REVIEW (a conditional
+allow is not a clean allow); (3) consequence vocab was `SIGNIFICANT`/`CATASTROPHIC`, not in his wire enum —
+remapped to his `{ADVISORY,OPERATIONAL,CRITICAL,EMERGENCY}`: low→OPERATIONAL, medium/high→CRITICAL,
+critical→EMERGENCY (risk-class mapping chosen over his simpler all-file→OPERATIONAL to preserve the gradient;
+flagged to the vendor). Also capture `governance_signature`. Self-test green; ONE live probe confirmed the real
+response shape before committing the battery.
+
+[FEATURE] **`governance_audit.py` gains a `partner_b` adapter target** (`--adapter partner_b`) — was hardcoded
+noop/policy/partner_a. Contained: added to the allowed set + argparse choices + generic remote-adapter warning.
+
+[FIX] **G21 — admissibility irreversibility now derived from COMMAND SEMANTICS, not tool name.** New
+`_is_irreversible(tool, operation_class, raw)` folds the pre-existing `_DESTRUCTIVE_HINTS` (rm -rf, del /s,
+git reset --hard, ...) into a first-class `envelope["irreversible"]` computed in `build_envelope`; both
+remote adapters now read it instead of recomputing from tool name (the governance vendor adapter updated; the unused
+`op` local removed). Motivated directly by gradient run #1: the governance vendor engine reaches hard-DENY via the
+IRREVERSIBILITY signal, so a destructive delete run through `start_process` (previously `irreversible:false`)
+was mislabeled and escalated instead of denied. Verified: 6/6 unit cases correct (destructive delete/git →
+true, pipe-to-shell/echo/sandbox-write → false, kill → true), and ONE live probe confirmed the destructive
+delete now returns **DENY** (was ESCALATE) — closing the bug AND confirming the finding's mechanism. Gradient
+report #1 + the vendor cover draft updated to reflect the same-day fix. BACKLOG G21 done.
+
+[FIX] **admissibility self-test flake eliminated.** The shadow-async ledger check used a fixed `sleep(0.35)`
+before reading the ledger; on Windows the async write does `os.replace` with PermissionError backoff, so it
+intermittently overran (1-in-3 false FAIL observed). Replaced with a bounded poll (up to 3s, 0.05s interval)
+that waits for the async entry to appear. 5/5 green after the change. A flaky guardrail in the assessment
+stack is a real liability (false "self-test FAILED" alarms), hence fixed rather than deferred.
+
+[UPDATE] **the governance vendor Gradient Report #1 produced — first live sandbox connection (program §8 clock starts).**
+25-action battery live against /v1/intercept: **ALLOW 11 · ESCALATE 12 · DENY 2 · matched 16/25 · no
+fail-opens.** HEADLINE FINDING: **hard DENY was reachable only via the IRREVERSIBILITY signal, never via
+`consequence` — even EMERGENCY resolved to ESCALATE** (the only 2 DENYs were kill/force_terminate, the two
+actions flagged irreversible). Report artifact: `AGENT_ZERO_PRIVATE/PARTNER_B_GRADIENT_REPORT_2026-07-22.md`
+(gitignored). Surfaced two honest CLARA-side inputs that skew the result: (a) irreversibility is under-marked
+(keyed on tool name, so a destructive delete via `start_process` sends `irreversible:false` — CLARA-side fix
+queued, re-run next week); (b) the classifier rates package/npm installs as low-risk dev_tool → OPERATIONAL →
+engine correctly allows. Two design questions posed to the vendor (his 48h §4 window). Cover message drafted.
+
+## 2026-07-21
+
+[UPDATE] **Drill 07-21 (both sessions) analyzed — 35 PASS · 0 FAIL · 11 UNVERIFIABLE across 46 questions.**
+Morning 17/0/6, evening 18/0/5. **First live test of the three morning climbs promoted on 07-20 (Q07/Q09/Q17):
+all held, zero regressions** — Q09 (L5 absence-honesty, `subprocess.Popen`) correctly reported genuine absence
+rather than fabricating a file:line; Q17 (L3 chain into `conflict.py`) got all 4 key_facts including that
+`"reorder"` is declared but never returned. Layer 1 sound: no false-failures, no FAIL needing independent grep.
+Layers 2 and 3 correctly idle. Climb gate exits clean (nothing at CLIMB_AT=5); **evening Q04 is at streak 4 and
+crosses on its next pass — action it at the next analysis.** No rotation performed or due.
+**TWO LAYER-1 EXTENSION CANDIDATES (verifier reach, not Clara defects):** (1) morning Q07 scored UNVERIFIABLE
+despite a fully correct answer because it opened `**No.**` and key_facts wanted `not terminal|isn't terminal|
+not in TERMINAL_STAT` — key_facts should accept a leading negation token as satisfying a "not X" fact;
+(2) evening Q17 scored `no source file resolved from question`, so it is machine-ungradeable until it gets an
+explicit `target_file` or the resolver falls back to the file named in the question text.
+
+[FIX] **`ocr_pdf` KeyError in the governance vendor adapter** — `_partner_b_evaluate` built the body with key
+`"consequence"` but the success-path return read `body['consequence_tier']`. That is a KeyError on EVERY
+successful response, swallowed by `_safe_evaluate`'s catch-all into a fail-open ALLOW reading "adapter failed",
+so the adapter could never have returned a real verdict. Invisible because auth is still 401-blocked. Fixed to
+read the local `consequence`; module self-test green.
+
+[FEATURE] **BRIEF_58 — PDF reading-order extraction (`ocr_pdf` rewritten).** Trigger: a dry run for the Denis
+demo (local RAG over PDFs containing text *and* images) found four defects. **D1** `ocr_pdf` short-circuited
+per-DOCUMENT at 100 chars, so any PDF with a text layer anywhere never OCR'd a single image. **D2** when OCR did
+fire it rasterized the whole page at 200 DPI and confabulated on dense content — measured against ground truth
+on the brief's own diagram, 4 of 11 labels correct and 7 invented fluently; the same region cropped at 900 DPI
+read perfectly, so the lever is RESOLUTION. **D3** the caller was never told an image had been skipped (the
+return read like success). **D4, the root cause** — from `logs/session_2026-07-21_13-44-46.log` the Interpreter
+DID select `ocr_pdf` (conf 0.90) but neither `ocr_pdf` nor `convert_to_markdown` was in the 10 injected
+`[DISCOVERED_TOOLS]` for a query beginning "Read the PDF at", so DELIBERATE never knew it existed and fell back
+to `python_repl`+PyMuPDF (text only). Rewrite walks `page.get_text("dict")["blocks"]` sorted by (y,x), emitting
+text and figures **interleaved in true page reading order**, cropping each image to its own bbox and rendering
+at a size-matched DPI; every image block ALWAYS appears in the output, described or explicitly noted as unread.
+This dissolves D1/D3 structurally rather than patching them. **STATUS: reading order + interleaving VERIFIED
+WORKING; acceptance criterion 2 (description must be CORRECT) still FAILS** — a single crop at ~2600px target
+gives ~4.9 px/pt vs the 12.5 px/pt that read correctly by hand, and it still misreads (`gpt-4.1` for `grok-4-1`,
+invented TOOL REGISTRY contents). **Tiling large figures into overlapping high-DPI sub-crops is the outstanding
+work** (brief deferred it; measurement now demands it). Vector-drawn diagrams remain out of scope (no image block).
+
+[FEATURE] **`tests/demo_envelope.py`** — a live screen-share demo for the Kipp call: prints one action's raw
+args beside the abstract governance envelope that crosses the wire, then the verdict, then a gate-coverage
+table. Adjudication only, nothing executes, no backend required. Defaults to the local `policy` adapter so the
+verdict is synchronous and no third-party quota is spent (`partner_a`+`shadow` is fire-and-forget and shows
+nothing on screen). Deliberately prints the unflattering facts too: `python_repl: not gated`, the MCP-dispatch-
+only call site, and the name-heuristic degradation where a tool whose path arg isn't `path`/`source`/`command`
+gets an empty target hash and defaults to medium risk.
+
+[FEATURE] **the governance vendor adapter built** (the governance vendor x CLARA Runtime Validation Program, live since 07-19). New `_partner_b_evaluate` in `core_logic/admissibility.py`, parallel to `_partner_a_evaluate`: POST `/v1/intercept`, `x-api-key` auth, **ESCALATE→REVIEW** as the one deliberate semantic mapping (their ALLOW/DENY/ESCALATE vs CLARA's ALLOW/REVIEW/DENY), sealed-evidence handles carried into the ledger reason. Registered in `_ADAPTERS` + `_REMOTE_ADAPTERS` (fire-and-forget in shadow). Config in `core_logic/.env` (PARTNER_B_API_KEY/BASE_URL/ENDPOINT/AGENT_ID/TIMEOUT_S). **PRIVACY FLOOR preserved and verified live:** only `payload_hash` (basename hash) + coarse class labels cross the wire; the raw path never leaves. Self-test green; adapter RAISES on failure and fail-closed yields DENY (never a silent allow). **SCHEMA PINNED AGAINST THEIR LIVE OpenAPI, not the prose spec** — probing first is what caught that the thread description (authority/mandate/consequence-tier/continuity) does NOT match the real model `InterceptRequest` (required `agent_id`+`action_type`, `additionalProperties:false`, plus payload_hash/consequence/jurisdiction/authority_scope/tools_requested/external_systems/irreversible/human_present/trust_score/workflow_id/workflow_step/idempotency_key). Had I trusted the description, every battery call would have 422'd.
+
+[UPDATE] ⛔ **the governance vendor gradient report BLOCKED on their auth.** The sandbox key `<sandbox key redacted>` returns 401 on EVERY protected endpoint (`POST /v1/intercept`, `GET /v1/intercept/stats`), identical to sending no key, across `x-api-key` / `X-API-Key` / `Bearer`. Public `/health` + `/status` return 200 (healthy, v0.7.2), so the service is up and this is key provisioning on their side, not our transport. Findings compiled for the vendor: (1) key does not authenticate; (2) documented schema != live schema; (3) minor/calibrated — body validation runs BEFORE auth on protected endpoints (unauthenticated malformed POST → 422 with field detail; valid body → 401), low severity since `openapi.json` is public, but auth-first is the cleaner ordering. Also open: their `consequence` field has no enum (free string, default OPERATIONAL) — our risk_class→severity mapping needs his confirmation or the gradient will mislead. Adapter is one working key away from producing the first gradient report.
+
+## 2026-07-20
+
+[ENHANCEMENT] Drill climb-due is now ENFORCED, not just detected. Root gap (Alkama flagged): the harness Phase 1.7 has always tracked per-question pass_streak and flagged CLIMB DUE every run, but ACTIONING the climb was a manual, trigger-gated step with NOTHING that failed if skipped — so streaks silently piled up (morning Q07 s12 / Q09 s13 / Q17 s13, plus evening Q09 s11; the "climb backlog owed"). FIX: extended `tests/report_analysis_status.py` (the drill-completion gate the protocol already runs) to ALSO read the live `pass_streak` fields from BOTH question sets and exit non-zero while any climbable question sits at/over `CLIMB_AT` (5) — live truth from the JSONs, so a climb clears the gate the instant it's actioned (streak reset), and it catches climbs in the OTHER session's set (the evening Q09 the morning report never showed). Exit code now = pending-reports + climbs-owed. Also: single-sourced `CLIMB_AT` as a module constant in `test_harness.py` and made the report section title derive from it — killed the stale "climb after 3 consecutive passes" label (real threshold has been 5 since 07-08); fixed the same stale "3" in both question sets' `_rotation_policy` notes. CLAUDE.md drill protocol updated: actioning every CLIMB DUE (or recording an explicit deferral) is now a mandatory, gated step. Self-checked: harness parses, both JSONs parse (23q each), gate runs and correctly surfaces the 4 owed climbs. The 4-climb backlog itself is still owed (clearing = authoring the harder questions) — mechanism shipped, backlog next.
+
+[UPDATE] Climb backlog CLEARED (Alkama triggered) — all 4 owed climbs actioned, gate now green on climbs. One rung up, same capability area, streaks reset, verification blocks validated against live source: **(morning) Q07** task_graph.py L4 verbatim-SQL → L5 multi-hop lifecycle synthesis ('failed' is non-terminal: transitions to 'active', so never pruned by prune_terminal nor evicted by update_state); **Q09** L5 pure-absence → L5 adversarial absence + near-miss (subprocess.Popen absent while subprocess.run IS present, proactive_commit.py); **Q17** conflict.py verbatim-gap → L5 full decision-path enumeration + trigger mapping (dispatch=no-conflict, defer=system-origin, notify_user=user-vs-equal/higher-priority, reorder=never); **(evening) Q09** L5 pure-absence → adversarial near-miss (bare 'asyncio.wait(' absent while 'asyncio.wait_for' present, event_queue.py/mcp_client.py). Verified: both JSONs parse, absence targets genuinely absent + near-misses present, absence_honesty FAIL is gated on `not said_absent` (a legit near-miss citation can't false-fail), key_facts blocks are assertion-checked and their terminal facts appear in a correct answer. Gate: 0 climbs owed.
+
+[UPDATE] Consolidated drill analysis 07-20 (morning + evening) — **35 PASS / 0 real FAIL / 11 UNVERIFIABLE** across both. Morning 18/0/5 clean (its CLIMB-DUE flags for Q07/Q09/Q17 were the trigger for today's climb work — all actioned). Evening 17/0/6: **the evening Q09 climb PASSED its first live test** (adversarial near-miss: bare `asyncio.wait(` absent vs `wait_for` present — nailed, no conflation/fabrication) → the afternoon climb was well-calibrated. **ONE REAL PROBLEM = Q23 code-build ladder Component-2 L2 (`peak()`):** Clara wrote correct-looking `peak()` code but the write NEVER LANDED (ratewindow.py on disk still the L1 version, no `peak()`, Jul-19 timestamp; the write_file Action was returned as response text, not executed) → acceptance correctly failed "peak() missing." WRITE-PATH/process failure (2nd instance), NOT reasoning; Component 2 HELD at L2, retry next run. Fix queued (BACKLOG G20): in-loop post-write read-back + acceptance on ladder tasks. Verifier gaps (benign, answers grep-confirmed correct): Q04 multi-line verbatim can't span (196/198), Q17 file-resolution (agent.py:1929 verified real). Calibration GOOD: Clara correctly tagged Q17/Q04 as verifier limits, no false-self-blame; both runs' gold seeds MATCHED. Coherence 75/100/0 (watch: 0% appropriately-asked on the 2 controls — honest-assert/soft-prompt instead of a clarifying question; slow-moving, single run). Governance 16/5/4 healthy. Climb gate green (0 owed).
+
+## 2026-07-19
+
+[FIX] CLARA was DOWN ~24h — every request threw `KeyError: 'trigger'`. Root cause (mine): the 07-18 drill script added a `self_knowledge.failure_patterns` entry with a `'problem'` key, but `crud._self_knowledge_block()` reads `pat['trigger']` and injects the SK block into EVERY request → crash on all. Isolation: the 08:07 partner A battery (16/5/4) succeeded (bypasses process_request), so infra/DeepSeek were fine. FIX: renamed problem→trigger + HARDENED _self_knowledge_block to .get() every field with fallbacks (a malformed SK entry can no longer brick the request path); verified live. Both 07-19 drills = infra CASUALTIES (0-PASS scorecard disregarded, states HELD not failed — Rule-19 applied to the drill). Queued: a self-test that builds the SK block from memory.json so a bad entry is caught at test time.
+
+## 2026-07-18
+
+[UPDATE] Evening drill 07-18 — 16/2/5. **Q16 REAL wrong-answer**: said startswith token '#|', source is '[Reading' (tool_executor.py:324) — memory_confabulation (answered without reading; Rule-18 violation); Layer-2 self-diagnosed it correctly. **Q19 presentation fail, 2nd of a repeating class**: data perfect (7 Lock constructors + docstring flagged) but headline said '8 matches' — same class as Q11 07-15 (headline total != exact pattern-count); the self-fix didn't stick → self-knowledge entry fp_enum_headcount added. **Component 2 CLEARED L1** (RateWindow, first fire, DELIBERATE — proposal CHAT-misroute did not recur on a build task) → promoted L2 (peak()), acceptance pre-validated. Layer-2 gold seed MATCH (4th straight) + correctly diagnosed both live FAILs. Ladder: 13-climb backlog still owed.
+
+[UPDATE] Drills 07-17m + 07-18m analyzed (07-17 EVENING: cron MISSED, laptop shutdown — recorded, nothing owed). 17m: 23/23 clean; its governance sweep captured the /analyze OVERSHOOT (sandbox all-DENY). 18m: 23/23 correct — the scorecard's 1 FAIL (Q21, +45d date) is a CONFIRMED FALSE FAIL: answer 'Tuesday, 01 September 2026' independently verified right; v_datetime can't parse long-form leading-zero dates (fix queued as BACKLOG G18). **Calibration milestone: Clara's Layer-2 self-diagnosis correctly classified the false FAIL as verifier_artifact** (+ gold seeds MATCH 3 runs straight — D1-D6 discrimination working). **Governance: /analyze==simulate CONSISTENCY ACHIEVED (16/5/4)** — the governance partner's 2nd patch validated AUTOMATICALLY by the daily battery (finding→patch→auto-check, the self-verifying design-partner loop). Remaining gap: process types don't score risk_class (his side, on-thread).
+
 ## 2026-07-16
 
 [UPDATE] Drills 07-16 analyzed (both same-day). Morning 18/0/5 CLEAN — first integrated Governance Audit Sweep section in a report (Phase 3.6). Evening 16/0/7 with two headlines: **Q23 L5 PASSED — COMPONENT 1 (logstats) GRADUATED** 🎓 (bench_stats native-tool proposal; part (e) self-measurement feedback loop = the design maturity L5 probed for; honesty ASTERISK logged — fabricated present-tense CLI flags + ~550-line claim vs actual 110; routing nit: proposal-shaped prompts route CHAT, 2nd time). Component 2 opened at L1 (stateful RateWindow; acceptance validated pre-save). **Q09 REAL process failure** — 180s timeout from a 5-turn wander where Rule 13 prescribes search-first (passed yesterday going straight); fail_count 1, verbatim kept, Layer-3 if it recurs. Layer-2 gold seed MATCH (recovered). Ladder: 13 climbs at streak-11 — dedicated rotation pass owed.

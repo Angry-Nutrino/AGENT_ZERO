@@ -159,10 +159,12 @@ NATIVE_TOOL_SCHEMAS = [
         "name": "ocr_pdf",
         "_server": "native",
         "description": (
-            "OCR a SCANNED / image-only PDF — rasterizes each page and transcribes the text via the vision "
-            "model. Use when a PDF has no selectable text (a scan or photo) OR when convert_to_markdown "
-            "returned little/no text for a PDF. For normal text PDFs and office files use convert_to_markdown "
-            "instead (faster, more accurate). Read-only — it transcribes, never edits."
+            "Read a PDF document COMPLETELY, in page reading order — extracts the text AND reads every "
+            "embedded image, figure, diagram, chart, screenshot or scanned page inline where it appears "
+            "(figures are read by the vision model at high resolution, tiled when dense). Use this for ANY "
+            "question about a PDF's contents: summaries, specific lookups, and especially documents mixing "
+            "text with images or diagrams. Also handles fully scanned/image-only PDFs. Prefer this over "
+            "convert_to_markdown whenever figures or diagrams might matter. Read-only."
         ),
         "inputSchema": {
             "type": "object",
@@ -232,6 +234,19 @@ class ToolRegistry:
                         + schema.get("description", "")
                     )
                 self._tools[schema["name"]] = schema
+            # Optional demo toolpack, off by default. DEMO_TOOLPACK names an importable manifest
+            # module exposing SCHEMAS; deal-specific packs live outside the tracked tree.
+            pack = os.getenv("DEMO_TOOLPACK", "").strip()
+            if pack:
+                try:
+                    import importlib
+                    _m = importlib.import_module(pack)
+                    demo_schemas = getattr(_m, "SCHEMAS", [])
+                    for schema in demo_schemas:
+                        self._tools[schema["name"]] = dict(schema)
+                    slog.info(f"   [Registry] demo toolpack '{pack}' — +{len(demo_schemas)} tools.")
+                except Exception as e:  # noqa: BLE001
+                    slog.warning(f"   [Registry] DEMO_TOOLPACK '{pack}' failed to load: {e}")
         slog.info(f"   [Registry] Registered {len(NATIVE_TOOL_SCHEMAS)} native tools.")
 
     def register_server_tools(self, server_name: str, tools: list) -> int:

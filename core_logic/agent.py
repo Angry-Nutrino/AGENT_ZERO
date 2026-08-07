@@ -11,6 +11,7 @@ from .tools import (
     query_task_status, get_archive_context,
 )
 from .system_prompt import SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, PERSONA
+from .llm_config import DEEPSEEK_MODEL
 from .bench_logger import Timer, log_request
 from .interpreter import interpret, TOOL_ARG_SCHEMAS
 from .memory_manager import free_gpu_memory
@@ -52,7 +53,7 @@ def _ds_sync_client():
 
 # DeepSeek thinking mode, DELIBERATE path ONLY (2026-06-07). The ReAct loop reasons
 # before each turn to cut the from-memory-fabrication pattern; interpreter/CHAT/FAST stay
-# non-reasoning (latency-sensitive, low accuracy upside). Smoke-tested: deepseek-chat accepts
+# non-reasoning (latency-sensitive, low accuracy upside). Smoke-tested: deepseek-v4-flash accepts
 # reasoning_effort + extra_body thinking, returns the CoT in a SEPARATE reasoning_content field
 # (the ReAct stream reads delta.content only, so the parser is untouched). Effort is one knob:
 # dial "max"->"high" if the evening bench shows the per-turn cost is too steep (DELIBERATE makes
@@ -180,6 +181,17 @@ from .session_logger import slog
 from .tool_executor import execute_deliberate, execute_fast
 from .tool_registry import format_tool_schemas_for_context
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+
+# BRIEF_59: per-turn ReAct stream watchdog. Each DELIBERATE turn opens a streaming DeepSeek
+# call; if the upstream freezes mid-stream the plain `async for` blocks forever (a ~22-minute
+# hang was observed in the wild). These bound the two places a stream can actually stall —
+# ESTABLISHING the connection, and the GAP BETWEEN chunks — so a frozen turn aborts in seconds
+# and the loop adapts, instead of hanging the whole request. Defaults are deliberately generous
+# so a legitimately slow (thinking-mode) turn never trips: reasoning tokens keep chunks flowing,
+# and the idle timer resets on every chunk, so it only fires on a true no-progress freeze.
+REACT_STREAM_CONNECT_TIMEOUT_S = float(os.getenv("REACT_STREAM_CONNECT_TIMEOUT_S", "30"))
+REACT_STREAM_IDLE_TIMEOUT_S = float(os.getenv("REACT_STREAM_IDLE_TIMEOUT_S", "30"))
+REACT_STREAM_MAX_CONSEC_STALLS = int(os.getenv("REACT_STREAM_MAX_CONSEC_STALLS", "2"))
 
 
 # Filesystem tools whose paths feed the live resource ledger in the orchestrator.
@@ -487,7 +499,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         )
         return future.result(timeout=30)
 
-    def load_clara(self, model_name="deepseek-chat"):
+    def load_clara(self, model_name=DEEPSEEK_MODEL):
         try:
             api_key = os.getenv("DEEPSEEK_API_KEY", "")
             if not api_key:
@@ -879,7 +891,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 {"role": "user", "content": f"Interaction:\n{chat_snapshot}"},
             ]
             _mem_resp = sync_client.chat.completions.create(
-                model="deepseek-chat",
+                model=DEEPSEEK_MODEL,
                 messages=messages,
                 stream=False,
             )
@@ -1456,7 +1468,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
             ds = _ds_client()
             _fast_response = await ds.chat.completions.create(
-                model="deepseek-chat",
+                model=DEEPSEEK_MODEL,
                 messages=format_messages,
                 stream=False,
             )
@@ -1551,7 +1563,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
 
         ds = _ds_client()
         async for chunk in await ds.chat.completions.create(
-            model="deepseek-chat",
+            model=DEEPSEEK_MODEL,
             messages=llm,
             stream=True,
             stream_options={"include_usage": True},
@@ -1573,6 +1585,18 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 await asyncio.sleep(0)
 
         response = raw.strip()
+        # F2b guard (G25): CHAT has NO tool execution. If the model emitted a native tool-call block
+        # (a degraded turn trying to call a tool it can't run — 2026-07-31e Q22 streamed
+        # `<tool_call>{"name":"date_time",...}</tool_call>` verbatim as the answer), never ship the raw
+        # blob. The root cause (time-deltas mis-routed to CHAT) is fixed via date_time offset_minutes; this
+        # is the durable backstop for any other stray tool-call leak.
+        _low = response.lower()
+        if ("<tool_call>" in _low) or (response.startswith("{") and response.endswith("}")
+                                       and '"name"' in response and '"arguments"' in response):
+            slog.warning("[CHAT] native tool-call block emitted in CHAT (no tools in this mode) — replacing "
+                         "the blob with an honest fallback so it is never shipped as the answer.")
+            response = ("Sorry, I fumbled that one — let me take it again. Ask me the same thing and I'll "
+                        "answer it directly.")
         slog.info(f">> [CHAT] Response:\n{response}")
         llm.append(assistant(response))
         return response, chat_usage
@@ -1684,6 +1708,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
         thought_only_streak = 0
         deliberate_usage_list = []
         last_response_text = ""
+        consecutive_stalls = 0  # BRIEF_59: consecutive stream timeouts (reset on any completed turn)
 
         while turn_count < max_turns:
             turn_count += 1
@@ -1699,36 +1724,91 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             _think_kw = ({"reasoning_effort": DELIBERATE_REASONING_EFFORT,
                           "extra_body": {"thinking": {"type": "enabled"}}}
                          if DELIBERATE_THINKING else {})
-            async for chunk in await ds.chat.completions.create(
-                model="deepseek-chat",
-                messages=llm,
-                stream=True,
-                stream_options={"include_usage": True},
-                **_think_kw,
-            ):
-                if chunk.usage:
-                    turn_usage = chunk.usage
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                token = (delta.content or "") if delta else ""
-                if not token:
-                    continue
+            # BRIEF_59: bound the two places a streaming turn can freeze. (1) CONNECT — `create()`
+            # is wrapped so a stream that never establishes aborts in CONNECT_TIMEOUT_S instead of
+            # hanging. (2) INTER-CHUNK — we iterate the stream by hand and wrap each `__anext__()`
+            # (the await for the NEXT chunk) in a wait_for, so the timer measures time-since-last-
+            # chunk (an IDLE timeout) and resets on every chunk. A steadily-generating turn never
+            # trips (reasoning tokens count as chunks); a frozen stream trips in IDLE_TIMEOUT_S.
+            stream_stalled = False
+            try:
+                _stream = await asyncio.wait_for(
+                    ds.chat.completions.create(
+                        model=DEEPSEEK_MODEL,
+                        messages=llm,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        **_think_kw,
+                    ),
+                    timeout=REACT_STREAM_CONNECT_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                slog.warning(f"   [Loop {turn_count}] stream did not connect within "
+                             f"{REACT_STREAM_CONNECT_TIMEOUT_S:.0f}s — upstream unresponsive.")
+                stream_stalled = True
 
-                raw_content += token
+            if not stream_stalled:
+                _iter = _stream.__aiter__()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            _iter.__anext__(), timeout=REACT_STREAM_IDLE_TIMEOUT_S)
+                    except StopAsyncIteration:
+                        break  # normal end of stream
+                    except asyncio.TimeoutError:
+                        slog.warning(f"   [Loop {turn_count}] stream idle "
+                                     f">{REACT_STREAM_IDLE_TIMEOUT_S:.0f}s — upstream stall; aborting turn.")
+                        try:
+                            await _stream.close()  # release the frozen HTTP connection
+                        except Exception:
+                            pass
+                        stream_stalled = True
+                        break
 
-                # STATE B: The code.
-                if "Action:" in raw_content:
-                    pass
+                    if chunk.usage:
+                        turn_usage = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    token = (delta.content or "") if delta else ""
+                    if not token:
+                        continue
 
-                # STATE A: The internal monologue.
-                elif "Thought:" in raw_content:
-                    start_idx = raw_content.find("Thought:") + 8
-                    current_thought = raw_content[start_idx:].strip()
-                    clean_thought = re.split(r'\n?(?:Action|Final Answer|Glint):?', current_thought)[0].strip()
+                    raw_content += token
 
-                    if current_thought and on_step_update:
-                        await on_step_update(clean_thought, type="thought", turn_id=turn_count)
+                    # STATE B: The code.
+                    if "Action:" in raw_content:
+                        pass
+
+                    # STATE A: The internal monologue.
+                    elif "Thought:" in raw_content:
+                        start_idx = raw_content.find("Thought:") + 8
+                        current_thought = raw_content[start_idx:].strip()
+                        clean_thought = re.split(r'\n?(?:Action|Final Answer|Glint):?', current_thought)[0].strip()
+
+                        if current_thought and on_step_update:
+                            await on_step_update(clean_thought, type="thought", turn_id=turn_count)
+
+            # BRIEF_59: a stalled turn (connect or inter-chunk) produced no usable content. Tell
+            # Clara honestly it was an infrastructure timeout — NOT a reasoning error — and re-run
+            # the turn (a transient stall clears on retry; a deterministic one gets a fresh context
+            # to adapt). But cap CONSECUTIVE stalls so a genuine upstream OUTAGE fails fast with an
+            # honest message instead of limping through all 8 turns.
+            if stream_stalled:
+                consecutive_stalls += 1
+                if consecutive_stalls >= REACT_STREAM_MAX_CONSEC_STALLS:
+                    slog.error(f"   [Loop {turn_count}] {consecutive_stalls} consecutive stream "
+                               "stalls — upstream appears down; ending task.")
+                    return ("The reasoning service kept stalling and I couldn't finish this — it "
+                            "looks like a temporary upstream outage. Try again in a moment.",
+                            deliberate_usage_list)
+                llm.append(user(
+                    "[Your previous response was cut off by an upstream timeout before it finished — "
+                    "an infrastructure stall, not a problem with your reasoning. Produce your response "
+                    "for this turn again.]"))
+                continue
+
+            consecutive_stalls = 0  # a turn's stream completed — reset the outage counter
 
             # Capture usage from this turn's stream
             if turn_usage:

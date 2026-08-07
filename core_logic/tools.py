@@ -171,14 +171,19 @@ def web_search(query: str) -> dict:
     except Exception as e:
         return {"answer": f"Error doing web_search: {e}", "results": []}
     
-def get_time_date(offset_days: int = 0) -> str:
+def get_time_date(offset_days: int = 0, offset_minutes: int = 0) -> str:
     """Rich temporal grounding (upgraded 2026-06-12 — the old version returned a bare
     datetime repr). Gives Clara everything needed to resolve relative time: weekday,
     both clock formats, timezone, part of day, and yesterday/tomorrow anchors.
 
     `offset_days` (Brief 50): when non-zero, appends a DETERMINISTICALLY-computed target line for
     'N days from now / N days ago' questions — so Clara never hand-computes a calendar date/weekday
-    (she reliably errs on month-boundary rollovers; +10d failed 06-24m/06-25m). Sign: future +, past −."""
+    (she reliably errs on month-boundary rollovers; +10d failed 06-24m/06-25m). Sign: future +, past −.
+
+    `offset_minutes` (G25, 2026-08-01): the time-delta analogue — when non-zero, appends a
+    deterministically-computed target CLOCK TIME (12h+24h) for 'what time in N hours/minutes' questions,
+    so Clara never hand-adds minutes (2026-07-31e Q22: a CHAT turn emitted a bogus tool-call for exactly
+    this). Wraps across midnight and notes the date when it does. Sign: future +, past −."""
     now = datetime.now().astimezone()
     from datetime import timedelta
     yest, tom = now - timedelta(days=1), now + timedelta(days=1)
@@ -203,6 +208,16 @@ def get_time_date(offset_days: int = 0) -> str:
         rel = f"{abs(n)} day(s) {'from today' if n > 0 else 'ago'}"
         out += (f"\n{rel.capitalize()}: {tgt.strftime('%A, %d %B %Y')} "
                 f"({tgt.strftime('%Y-%m-%d')})  (computed -- do not recompute by hand)")
+    try:
+        mo = int(offset_minutes)
+    except (TypeError, ValueError):
+        mo = 0
+    if mo:
+        tgt_t = now + timedelta(minutes=mo)
+        rel_t = f"{abs(mo)} minute(s) {'from now' if mo > 0 else 'ago'}"
+        daynote = f" on {tgt_t.strftime('%A, %Y-%m-%d')}" if tgt_t.date() != now.date() else ""
+        out += (f"\n{rel_t.capitalize()}: {tgt_t.strftime('%H:%M')} (24h) / "
+                f"{tgt_t.strftime('%I:%M %p').lstrip('0')} (12h){daynote}  (computed -- do not recompute by hand)")
     return out
 
 def consult_archive(query: str) -> str:
@@ -251,10 +266,16 @@ def analyze_image_grok(
     path: str,
     question: str = "Describe what you see in this image in detail.",
     paths=None,
+    max_side: int = 1280,
 ) -> str:
     """
     Analyze image(s) using Gemini 2.5 Flash (google-genai SDK).
     'client' parameter kept for API compatibility but unused.
+
+    max_side: images larger than this on either axis are downscaled before sending. 1280 is the
+    right default for screenshots/photos (payload size), but it DESTROYS dense-figure OCR — a
+    diagram crop rendered at high DPI gets flattened back to ~2.4 px/pt and the model confabulates
+    labels (BRIEF_58 D2, root-caused 2026-07-23). PDF figure reading passes a higher cap.
     """
     import io
     from google import genai
@@ -278,8 +299,9 @@ def analyze_image_grok(
             if not p.exists():
                 return f"Error: Image not found at path: {img_path}"
             with Image.open(p) as img:
-                if img.width > 1280 or img.height > 1280:
-                    img.thumbnail((1280, 1280), Image.LANCZOS)
+                cap = int(max_side) if max_side else 0
+                if cap and (img.width > cap or img.height > cap):
+                    img.thumbnail((cap, cap), Image.LANCZOS)
                 buf = io.BytesIO()
                 img.convert("RGB").save(buf, format="JPEG", quality=85)
                 parts.append(types.Part.from_bytes(
@@ -333,18 +355,143 @@ _OCR_PROMPT = (
 )
 
 
-def ocr_pdf(path: str, max_pages: int = 10, question: str = "") -> str:
+_FIGURE_PROMPT = (
+    "This is a figure cropped from a document page. Transcribe ALL text visible in it VERBATIM, "
+    "preserving its structure (box labels, numbered lists, arrows, axes). If it is a diagram or chart, "
+    "also state briefly what it depicts and how the parts connect. Do not infer or invent anything that "
+    "is not legible — if part of it is unreadable, say so."
+)
+
+# Resolution constants (BRIEF_58 D2, recalibrated 2026-07-23 after root-causing the 1280px
+# downscale inside analyze_image_grok): dense diagram labels read reliably at ~12 px/pt and
+# confabulate below ~3 px/pt (measured on the CLARA architecture map — 4/11 labels correct at
+# ~2.4 px/pt, 11/11 at 12.5 px/pt). One sent image is capped at _TILE_MAX_PX so Gemini doesn't
+# downsample it internally; figures needing more resolution than one image can carry are split
+# into overlapping tiles, ALL sent in ONE multi-image call so the model keeps global context.
+_PX_PER_PT = 12            # target effective resolution on figure content
+_TILE_MAX_PX = 2600        # max long side of any single image sent to the vision model
+_TILE_GRID_MAX = (3, 2)    # max cols x rows -> at most 6 tiles + 1 overview per figure
+_TILE_OVERLAP = 0.15       # fractional overlap between adjacent tiles — 0.06 left boundary words
+                           # cut ("Planning Req~", run 3); 15% ≈ 26pt covers a full word either side
+_IMG_MIN_PT = 40           # smaller than this is decoration (logo, rule, bullet) — don't spend a call
+_IMG_MAX_PER_DOC = 20      # cost ceiling: vision calls per document (a tiled figure = ONE call)
+
+
+def _describe_pdf_image(page, bbox, question: str, idx: int) -> str:
+    """Render ONE image block at readable resolution — tiling large figures — and read it.
+
+    ALWAYS returns a string: a description, or an explicit bracketed note saying why it wasn't read.
+    Never silence — a silently dropped figure is the failure class BRIEF_58 exists to kill. Never
+    raises. One vision call per figure regardless of tile count (tiles ride a single request).
     """
-    OCR a SCANNED / image-only PDF (Brief 36 F.6 / Y2): rasterize each page and transcribe it via the
-    Gemini vision tool. FALLBACK ONLY — for PDFs with a real text layer, convert_to_markdown (markitdown)
-    is faster and more accurate; this exists for scans markitdown returns empty/garbage on. If the PDF
-    already has a substantial text layer, the text is extracted directly (cheap) instead of OCR'd.
-    Read-only; never raises (returns an error string). Page count is bounded by max_pages.
+    import fitz
+    import tempfile
+    rect = fitz.Rect(bbox)
+    w_pt, h_pt = rect.width, rect.height
+    if min(w_pt, h_pt) < _IMG_MIN_PT:
+        return f"[image {w_pt:.0f}x{h_pt:.0f}pt — decorative size, not read]"
+
+    tmps = []
+
+    def _render(clip, dpi, tag):
+        pix = page.get_pixmap(dpi=dpi, clip=clip)
+        fd, t = tempfile.mkstemp(prefix=f"pdffig{idx}_{tag}_", suffix=".png")
+        os.close(fd)
+        pix.save(t)
+        tmps.append(t)
+        return t
+
+    try:
+        long_pt = max(w_pt, h_pt, 1)
+        if long_pt * _PX_PER_PT <= _TILE_MAX_PX:
+            # Small figure: one crop carries the full target resolution.
+            dpi = int(min(_PX_PER_PT * 72, _TILE_MAX_PX * 72 / long_pt))
+            main = _render(rect, dpi, "full")
+            desc = str(analyze_image_grok(None, path=main,
+                                          question=question or _FIGURE_PROMPT,
+                                          max_side=_TILE_MAX_PX)).strip()
+            label = f"[FIGURE {w_pt:.0f}x{h_pt:.0f}pt @ {dpi}dpi]"
+        else:
+            # Large/dense figure: overlapping high-res tiles + a low-res overview, one call.
+            cols = min(_TILE_GRID_MAX[0], max(1, -(-int(w_pt * _PX_PER_PT) // _TILE_MAX_PX)))
+            rows = min(_TILE_GRID_MAX[1], max(1, -(-int(h_pt * _PX_PER_PT) // _TILE_MAX_PX)))
+            tile_w, tile_h = w_pt / cols, h_pt / rows
+            dpi = int(min(_PX_PER_PT * 72, _TILE_MAX_PX * 72 / max(tile_w, tile_h)))
+            ov_w, ov_h = tile_w * _TILE_OVERLAP, tile_h * _TILE_OVERLAP
+            tiles = []
+            for r in range(rows):
+                for c in range(cols):
+                    clip = fitz.Rect(
+                        rect.x0 + c * tile_w - (ov_w if c else 0),
+                        rect.y0 + r * tile_h - (ov_h if r else 0),
+                        rect.x0 + (c + 1) * tile_w + (ov_w if c < cols - 1 else 0),
+                        rect.y0 + (r + 1) * tile_h + (ov_h if r < rows - 1 else 0),
+                    )
+                    tiles.append(_render(clip, dpi, f"r{r}c{c}"))
+            # ONE image per call — the empirically proven configuration. A single multi-image
+            # request dilutes per-tile resolution (Gemini budgets tokens across images: measured
+            # 2026-07-23, tiny labels misread in a 7-image call but read perfectly one-at-a-time).
+            overview = _render(rect, max(72, int(_TILE_MAX_PX * 72 / long_pt)), "ovw")
+            ov_desc = str(analyze_image_grok(
+                None, path=overview, max_side=_TILE_MAX_PX,
+                question="This is a figure from a document page. State briefly what it depicts and "
+                         "how its parts connect. Do NOT try to transcribe small text — a separate "
+                         "high-resolution pass handles that.")).strip()
+            tile_txts = []
+            for k, t in enumerate(tiles):
+                r, c = divmod(k, cols)
+                tt = str(analyze_image_grok(
+                    None, path=t, max_side=_TILE_MAX_PX,
+                    question="This image is one high-resolution tile of a larger figure. Transcribe "
+                             "ALL text visible in it VERBATIM, preserving structure (box titles, "
+                             "numbered lists, labels). Output only the transcription. If a word is "
+                             "cut off at an edge, transcribe the visible part followed by '~'. Do "
+                             "not guess at anything illegible — mark it '(illegible)'.")).strip()
+                tile_txts.append(f"[tile row {r + 1}/{rows}, col {c + 1}/{cols}]\n{tt}")
+            desc = (ov_desc + "\n\nHigh-resolution text by tile (tiles overlap slightly, so some "
+                    "lines repeat across adjacent tiles):\n" + "\n".join(tile_txts))
+            label = f"[FIGURE {w_pt:.0f}x{h_pt:.0f}pt @ {dpi}dpi, {rows}x{cols} tiles]"
+        low = desc.lower()
+        if not desc or low.startswith("error") or low.startswith("vision error"):
+            return f"[image {w_pt:.0f}x{h_pt:.0f}pt — could not be read: {desc or 'empty response'}]"
+        return f"{label}\n{desc}\n[/FIGURE]"
+    except Exception as e:
+        return f"[image {w_pt:.0f}x{h_pt:.0f}pt — could not be read: {e}]"
+    finally:
+        for t in tmps:
+            try:
+                os.remove(t)
+            except Exception:
+                pass
+
+
+def ocr_pdf(path: str, max_pages: int = 10, question: str = "") -> str:
+    """Read a PDF COMPLETELY, in READING ORDER — page text and embedded figures interleaved exactly
+    as they appear on the page (BRIEF_58, 2026-07-21).
+
+    Use this for ANY PDF you need to actually understand: normal text PDFs, scans, and (the case that
+    matters) mixed documents where a diagram, chart or screenshot carries information the text does not.
+
+    How it works: for each page, PyMuPDF returns text blocks (type 0) and image blocks (type 1), each
+    with a bounding box; sorting by (y, x) gives true reading order. Text is emitted as-is; each image
+    is cropped to its own box, rendered at a resolution scaled to its size, and read by the vision model
+    inline where it sits. There is deliberately NO "does this document have a text layer" decision — the
+    old per-document short-circuit is what silently dropped every image in any PDF that had text
+    anywhere (BRIEF_58 D1).
+
+    Every image block ALWAYS appears in the output, described or explicitly noted as unread, so the
+    caller can never be unaware that a figure was there (BRIEF_58 D3).
+
+    Known limit: a diagram drawn as native PDF vectors carries no image block, so it is read only as its
+    stray text labels. Embedded rasters (scans, pasted screenshots, exported diagrams) are covered.
+
+    Read-only; never raises (returns an error string). Pages bounded by max_pages, figures by
+    _IMG_MAX_PER_DOC. `question` overrides the default figure prompt if you want something specific.
     """
     try:
         import fitz  # PyMuPDF — self-contained wheel, no onnxruntime/magika (avoids the markitdown footgun)
     except Exception:
-        return "Error: PyMuPDF (fitz) is not installed — cannot OCR PDFs."
+        return "Error: PyMuPDF (fitz) is not installed — cannot read PDFs."
     p = pathlib.Path(str(path).strip().strip('"').strip("'"))
     if not p.exists():
         return f"Error: PDF not found at path: {path}"
@@ -360,37 +507,46 @@ def ocr_pdf(path: str, max_pages: int = 10, question: str = "") -> str:
         n_pages = doc.page_count
         if n_pages == 0:
             return "Error: PDF has no pages."
-        # If the PDF already has a real text layer, skip OCR — cheaper and more accurate.
-        existing = "".join(doc[i].get_text() for i in range(min(n_pages, max_pages)))
-        if len(existing.strip()) >= 100:
-            return (f"[PDF has a text layer — extracted directly, no OCR needed ({n_pages} page(s))]\n"
-                    + existing.strip())
-        # Scanned / image-only → rasterize + OCR each page via Gemini.
-        import tempfile
-        out = []
         pages_to_do = min(n_pages, max_pages)
+        out, n_fig, n_unread = [], 0, 0
         for i in range(pages_to_do):
+            page = doc[i]
             try:
-                pix = doc[i].get_pixmap(dpi=200)
-                fd, tmp = tempfile.mkstemp(prefix=f"ocr_pg{i + 1}_", suffix=".png")
-                os.close(fd)
-                try:
-                    pix.save(tmp)
-                    text = analyze_image_grok(None, path=tmp, question=question or _OCR_PROMPT)
-                finally:
-                    try:
-                        os.remove(tmp)
-                    except Exception:
-                        pass
+                blocks = page.get_text("dict").get("blocks", [])
             except Exception as e:
-                text = f"(page {i + 1} OCR error: {e})"
-            out.append(f"--- Page {i + 1} ---\n{str(text).strip()}")
-        note = "" if n_pages <= max_pages else f"\n\n[Note: OCR'd the first {max_pages} of {n_pages} pages.]"
-        return "\n\n".join(out) + note
+                out.append(f"--- Page {i + 1} ---\n(page could not be parsed: {e})")
+                continue
+            # Reading order: top-to-bottom, then left-to-right.
+            blocks.sort(key=lambda b: (round((b.get("bbox") or [0, 0, 0, 0])[1], 1),
+                                       round((b.get("bbox") or [0, 0, 0, 0])[0], 1)))
+            parts = []
+            for b in blocks:
+                if b.get("type") == 0:
+                    txt = "\n".join(
+                        "".join(s.get("text", "") for s in (ln.get("spans") or []))
+                        for ln in (b.get("lines") or [])
+                    ).strip()
+                    if txt:
+                        parts.append(txt)
+                elif b.get("type") == 1:
+                    if n_fig >= _IMG_MAX_PER_DOC:
+                        n_unread += 1
+                        parts.append("[image not read — per-document figure budget reached]")
+                        continue
+                    desc = _describe_pdf_image(page, b.get("bbox"), question, n_fig + 1)
+                    if desc.startswith("[FIGURE"):
+                        n_fig += 1
+                    else:
+                        n_unread += 1
+                    parts.append(desc)
+            out.append(f"--- Page {i + 1} ---\n" + "\n".join(parts))
+        header = (f"[Read {pages_to_do} of {n_pages} page(s) in reading order; "
+                  f"{n_fig} figure(s) read, {n_unread} not read]")
+        return header + "\n\n" + "\n\n".join(out)
     except Exception as e:
         # Honor the "never raises" contract: get_text()/page_count can raise on an encrypted or
         # corrupt PDF (a realistic weird-scan input) — return an error string, don't propagate.
-        return f"Error: OCR failed while reading the PDF: {e}"
+        return f"Error: failed while reading the PDF: {e}"
     finally:
         doc.close()
 

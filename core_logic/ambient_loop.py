@@ -28,8 +28,10 @@ import asyncio
 
 try:                                                  # package vs. direct-run import
     from .salience import AmbientGate, Budget, classify, SURFACE, _ACTIONABILITY
+    from .llm_config import DEEPSEEK_MODEL
 except ImportError:                                   # python core_logic/ambient_loop.py
     from salience import AmbientGate, Budget, classify, SURFACE, _ACTIONABILITY
+    from llm_config import DEEPSEEK_MODEL
 
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 _SHADOW_FILE = os.path.join(_DIR, "ambient_shadow.jsonl")
@@ -154,7 +156,7 @@ async def _llm_remark(entry):
         f"Observation: {entry.get('remark')}"
     )
     r = await _llm_client.chat.completions.create(
-        model="deepseek-chat",
+        model=DEEPSEEK_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=1.1, max_tokens=60, stream=False,
     )
