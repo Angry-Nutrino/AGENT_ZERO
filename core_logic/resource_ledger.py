@@ -48,9 +48,23 @@ class ResourceLedger:
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def record_read(self, task_id: str, path: str, content: str) -> None:
-        """Record hash of file content at read time. Called after successful read_file."""
-        h = self._hash(content)
+    def record_read(self, task_id: str, path: str, content: str = "") -> None:
+        """Record hash of the file's ON-DISK state at read time. Called after read_file.
+
+        Hashes the FILE, not the tool's returned string. DC's read_file prepends a
+        '[Reading N lines from line M ...]' header + blank line, and an offset read returns
+        only a slice — so hashing the returned text could NEVER equal check_write's hash of
+        the on-disk file, and every read-then-write by the same task was false-blocked with
+        "modified by another task" on byte-identical content. That made the read-modify-write
+        guard both useless (a real concurrent edit was indistinguishable from the constant
+        false positive) and costly (each occurrence burned a ReAct turn plus a bypass).
+        Hashing the same source on both sides makes the comparison correct by construction.
+        `content` is now only a fallback for an unreadable path. (2026-08-07, from the
+        08-07 evening drill Q23 flag.)
+        """
+        h = self._hash_file(path)
+        if h is None:
+            h = self._hash(content)
         self._read_hashes[(task_id, path)] = h
         slog.debug(f"   [Ledger] task {task_id[:8]} read '{path}' @ {h[:8]}")
 
@@ -104,3 +118,72 @@ class ResourceLedger:
 
 # Module-level singleton — shared across all concurrent tasks
 resource_ledger = ResourceLedger()
+
+
+if __name__ == "__main__":
+    # ── self-test (no backend) — run as `python -m core_logic.resource_ledger` ─
+    # (module form required: this file uses a relative import for slog.)
+    # Guards the 2026-08-07 fix: record_read must hash the FILE, not the tool's
+    # returned string, or every read-then-write is false-blocked.
+    import os, tempfile
+
+    fails = []
+
+    def check(label, cond):
+        if not cond:
+            fails.append(f"  FAILED: {label}")
+
+    tmpdir = tempfile.mkdtemp(prefix="ledger_selftest_")
+    p = os.path.join(tmpdir, "sample.py")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("line one\nline two\nline three\n")
+
+    L = ResourceLedger()
+
+    # DC read_file returns a header + blank line + body — NOT the raw file bytes.
+    dc_output = "[Reading 3 lines from line 0 of sample.py]\n\nline one\nline two\nline three\n"
+
+    # 1. read (via the real tool-output shape) then write, file unchanged → ALLOWED.
+    #    This is the regression: before the fix this returned ok=False every time.
+    L.record_read("task-a", p, dc_output)
+    ok, reason = L.check_write("task-a", p)
+    check("unchanged file after read must NOT be blocked", ok is True and reason == "")
+
+    # 2. a genuine external modification → BLOCKED.
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("line one\nline two CHANGED\nline three\n")
+    ok, reason = L.check_write("task-a", p)
+    check("externally modified file must be blocked", ok is False)
+    check("block reason names the guard", "Write blocked" in reason)
+
+    # 3. pure write — no prior read by this task → ALLOWED (hash check skipped).
+    ok, reason = L.check_write("task-b", p)
+    check("pure write with no prior read must be allowed", ok is True)
+
+    # 4. partial (offset) read hashes the whole file, so a slice does not false-block.
+    L2 = ResourceLedger()
+    L2.record_read("task-c", p, "[Reading 1 lines from line 1 of sample.py]\n\nline two CHANGED\n")
+    ok, _ = L2.check_write("task-c", p)
+    check("offset/partial read must not false-block", ok is True)
+
+    # 5. unreadable path → falls back to hashing content, and a missing file never blocks.
+    missing = os.path.join(tmpdir, "does_not_exist.txt")
+    L2.record_read("task-d", missing, "whatever")
+    ok, _ = L2.check_write("task-d", missing)
+    check("missing file must not block", ok is True)
+
+    # 6. release_task drops this task's hashes only.
+    L.record_read("task-e", p, dc_output)
+    L.release_task("task-a")
+    check("release_task cleared the releasing task", ("task-a", p) not in L._read_hashes)
+    check("release_task left other tasks alone", ("task-e", p) in L._read_hashes)
+
+    for fn in os.listdir(tmpdir):
+        os.remove(os.path.join(tmpdir, fn))
+    os.rmdir(tmpdir)
+
+    if fails:
+        print("resource_ledger self-test FAILED:")
+        print("\n".join(fails))
+        raise SystemExit(1)
+    print("resource_ledger self-test: 8 checks passed.")

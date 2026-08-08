@@ -111,3 +111,7 @@ governance_audit_reports/
 # Work logs that name design partners and private business context — never publish.
 busy-mode-reports/
 partner_a_pilot_call.py
+
+# Consolidated contact/context dump — real third-party names + private business discussion.
+# NEVER commit (repo is public). Keep alongside AGENT_ZERO_PRIVATE/.
+Alignment.md

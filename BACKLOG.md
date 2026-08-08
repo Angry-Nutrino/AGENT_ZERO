@@ -44,6 +44,57 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
+- **G32 · Coherence Drill scores controls whose PRECEDING dialogue died of infra** — added 2026-08-08.
+  On 08-08m `appropriately-asked` read **0%**, but one of the two controls (`ambiguous-service`) never ran
+  — it died with an `HTTPConnectionPool` read timeout — so the honest denominator was 1, not 2. Worse, the
+  surviving control (`ambiguous-offer`) ran *immediately after* that failure and answered "there are no two
+  offers in this conversation", which is plausibly **correct** if the failed dialogue disturbed the
+  transient window. A failed request is silently laundered into a behavioural score. Fix: skip (or mark
+  `unscored`) any probe whose request errored, and any control whose preceding dialogue errored, rather
+  than counting it as a behavioural miss. **First step: re-run the two controls in isolation** to settle
+  whether 08-08m's 0% is an artifact. Ref: reports/2026-08-08-morning.md analysis. Dep: none.
+
+- **G33 · Harness: verify the 08:00 morning cron is still scheduled** — added 2026-08-08. The morning cron
+  did NOT fire on 08-08 (no report at 10:02, newest session log was the prior evening); run manually via
+  the CLAUDE.md recovery path and it completed clean. One miss is a one-off, two is a broken schedule.
+  Inspect the Task Scheduler entry. **A silently-missing drill is the one failure that hides every other
+  failure**, so this outranks its size. Dep: none. Small.
+
+- **G30 · Admissibility: stamp the policy version into every receipt** — added 2026-08-08, surfaced by an
+  external reviewer's question. `_ledger_append` records `{receipt_id, verdict, reason, adapter, mode,
+  enforced, envelope}` but **no policy version**, and `_load_policy()` re-reads the JSON on every
+  evaluation. So two actions either side of a policy edit are indistinguishable in the ledger and an audit
+  cannot tell which rules were in force. Add a version/hash of the policy file to the envelope or receipt.
+  Dep: none. Small.
+
+- **G31 · Admissibility: bind the verdict to the action (signed, not just structural)** — added 2026-08-08,
+  same source. Today the binding is *structural*: `gate(tool_name, args)` gets the same in-memory dict the
+  dispatcher gets, same frame, no gap — so the executed action is the evaluated one **by construction**.
+  The envelope carries a `nonce` and a `signature`, but `signature` is `""` on the local path. That is
+  arguably proportionate for one in-process actuator and clearly **not** enough the moment the actuator is
+  a separate process or the verdict comes from a remote engine. Target: a verdict signed over
+  (target_path_hash, policy_version, nonce) that the executor verifies before dispatch. Dep: G30 (needs the
+  policy version to sign over). 🟡-adjacent — design first, do not wire live without review.
+
+- **G27 · Layer-1: `verbatim_quote` file resolution misses an explicitly-named file** — added 2026-08-07.
+  08-07e Q17 graded UNVERIFIABLE with *"no source file resolved from question"* even though the question
+  names `core_logic/agent.py` outright, and her quote (`agent.py:2009`) was verbatim-correct. A PASS the
+  verifier could not see. Fix the filename extraction in `tests/verification.py`'s quote path, add both
+  directions to the self-test. Ref: reports/2026-08-07-evening.md analysis. Dep: none.
+
+- **G28 · Layer-1: `key_facts` judge accepts a paraphrase for an absent must-include token** — added
+  2026-08-07. 08-06e Q03 asked to "name the EXACT file"; she described the mechanism and never emitted
+  `tool_registry`. The judge accepted the paraphrase and resolved to UNVERIFIABLE. Safe direction (it did
+  not silently PASS), but an absent must-include token arguably belongs as a FAIL — the whole premise of
+  `key_facts` is that the terminal identifier is *present*, not approximated. **Decide the threshold
+  deliberately**: this affects every `key_facts` question in both sets, so it is a designed pass, not a
+  drive-by edit. Ref: reports/2026-08-06-evening.md analysis. Dep: none.
+
+- **G29 · Layer-1: code_build acceptance failure grades UNVERIFIABLE, not FAIL** — added 2026-08-07.
+  08-05e Q23 failed acceptance (`exit 1: AssertionError: first_exceeding() missing`) — the harness ran her
+  code and the method was absent, which is a real miss — but it landed as UNVERIFIABLE, so it never
+  registered in the headline. Ref: reports/2026-08-05-evening.md analysis. Dep: none.
+
 - ~~**G26 · search_set partition/caveat false-fail**~~ — ✅ DONE 2026-08-01 (busy-mode). `_stated_total_conflict`
   in `tests/verification.py` false-failed a correct enumeration when the answer PARTITIONED the count
   ("8 executable + 8 comment" of 16) or carried a clarifying CAVEAT ("12 hits for the broader token") — it read

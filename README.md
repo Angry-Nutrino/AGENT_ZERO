@@ -104,8 +104,8 @@ python tests/test_harness.py --session morning   # or: evening
 **Prerequisites:** Python 3.11, Node.js, NVIDIA CUDA 12.x, [eSpeak NG](https://github.com/espeak-ng/espeak-ng/releases) on PATH, and FFmpeg.
 
 ```bash
-git clone https://github.com/Angry-Nutrino/AGENT_ZERO.git
-cd AGENT_ZERO
+git clone https://github.com/Angry-Nutrino/C.L.A.R.A.-Contextual-Locally-Aware-Robust-Agent-.git
+cd C.L.A.R.A.-Contextual-Locally-Aware-Robust-Agent-
 
 python -m venv jarvis_v2
 jarvis_v2\Scripts\activate                 # Windows
