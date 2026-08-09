@@ -1,6 +1,55 @@
 # CLARA Project Timeline
 
+## 2026-08-09
+
+[FIX] **Two verifier defects, both silently downgrading CORRECT answers; self-test 62 -> 67.**
+`tests/verification.py`. (1) **Markdown-table line numbers read as claimed totals.** 08-08e Q19 graded FAIL
+"states total 285 but the true count is 8" on a FLAWLESS 8/8 enumeration — "285" occurs exactly once in the
+answer, as the line-number cell of `| tool_executor.py | 285 | asyncio.create_task(...) |`. Rule A of
+`_stated_total_conflict` matches `(\d{1,6})\s+\W{0,2}` + the token, and `\W{0,2}` eats the `| ` between
+cells; the 08-07 `_is_line_ref` guard only tested for a preceding ':' so it never fired on a table. THIRD
+shape of this class (06-30m, 08-05e, now 08-08e) — and partly self-inflicted, since the question was climbed
+on 08-07 to "list every file and line", which invites the table. `_is_line_ref` now also credits a number in
+a table cell whose LEFT neighbour names a `.py` file (narrow: `| Total | 12 |` still parses as a claim).
+Also closed a matching gap in the other direction — the count-noun set was missing **"call site(s)"**, the
+exact noun that question invites, so a GENUINE miscount phrased "12 call sites" was a silent false-PASS.
+(2) **Dotted identifiers could never be credited as asserted.** `_SENT_SPLIT` split on every period, tearing
+`asyncio.Lock` into `asyncio` + `lock` before the hedge check, so `token in sent` was never true and EVERY
+dotted term fell through to the Tier-2 LLM judge as "present but unasserted" — **12 terms across 9 of the 46
+live questions**. Found via 08-08e Q04, where a plain declarative answer containing `asyncio.Lock` graded
+UNVERIFIABLE as "does not assert". Splitter now breaks only on a period followed by whitespace or
+end-of-text; decimals still protected, hedge guard verified still suppressing. 5 fixtures added across both
+fixes, both directions.
+
+[UPDATE] **Drill 08-08 evening — raw 13/1/9, corrected 16 PASS / 0 FAIL / 5 genuinely unverifiable.** The
+lone FAIL was a confirmed verifier artifact (above) and at least three UNVERIFIABLEs were instrumentation.
+Factual layer clean: zero fabricated files, values or line numbers across 23 questions, including Q09's
+adversarial absence (`ThreadPoolExecutor`, climbed 08-07 *because* `asyncio.to_thread` uses one internally —
+she reported the absence honestly and named the real mechanism). Two infra non-answers (Q03/Q13, 180s
+transport timeouts), traces 21/23, gold seed MATCHED.
+**HEADLINE FINDING — the free-text self-assessment CONFABULATED an error that did not happen.** Layer 2
+(structured, trace-anchored) classified Q19 `verifier_artifact`, correctly. The narrative self-assessment
+classified the same item `real` and explained it as "the answer injected a headline contrast figure of 285
+(asyncio.to_thread calls)", with ownership language ("My error, specific, naming it"). No such figure exists;
+"285" appears once as a table line number; and there are **33** to_thread occurrences in core_logic, not 285.
+Asked to explain a FAIL whose true cause was invisible from inside its own trace, it produced fluent specific
+false self-blame — the direction that evades scrutiny because it reads as integrity. Architectural
+consequence: **when Layer 2 and the narrative self-assessment disagree, weight Layer 2.** Filed as G34.
+
 ## 2026-08-08
+
+[FIX] **The morning drill cron was silently skipping — root cause was the Task Scheduler BATTERY GUARD,
+not the schedule.** `CLARA_Test_Morning` reported `NumberOfMissedRuns: 2`, last ran 2026-08-06, and skipped
+both 08-07 and 08-08 (which matches the missing `reports/2026-08-07-morning.md` exactly). The task was
+Enabled, its trigger was Enabled, and `StartWhenAvailable` was already True — so a missed start *should*
+have been retried. What blocked it: `DisallowStartIfOnBatteries=True` refuses to start the task whenever
+the laptop is unplugged, and `StopIfGoingOnBatteries=True` would kill a run mid-flight on unplug. The
+evening task at 20:00 survived only because that is desk-and-mains time; 08:00 is not. Both guards now
+disabled on BOTH tasks (required an elevated shell — `Set-ScheduledTask` returns Access Denied from a
+normal prompt, since the tasks were registered elevated). Accepted tradeoff: the drill will now run on
+battery, ~35 min of GPU work, because a silently skipped drill costs more than the drain — it is the one
+failure that hides every other failure. Closes BACKLOG G33.
+
 
 [FIX] **Admissibility classifier — package managers mislabelled `shell`, and a compound install+pipe
 was UNDER-RATED medium instead of critical.** `core_logic/admissibility.py`. Two connected defects,
@@ -124,8 +173,7 @@ not an invariant break. Noted, not yet edited into CLAUDE.md.
 
 ## 2026-08-06
 
-[UPDATE] **Admissibility classifier — package installs reclassified `low` -> `medium` (partner A shared
-taxonomy).** `core_logic/admissibility.py`. `pip/npm/yarn/pnpm/poetry/conda/apt/brew install` (and
+[UPDATE] **Admissibility classifier — package installs reclassified `low` -> `medium` (shared taxonomy).** `core_logic/admissibility.py`. `pip/npm/yarn/pnpm/poetry/conda/apt/brew install` (and
 uninstall) previously fell through to the `dev_tool` -> `low` mapping, because the classifier saw the
 binary (`pip`, `npm`) and not the operation. That is too generous: an install resolves and executes
 arbitrary third-party setup code (`setup.py` / postinstall) from a remote index, so it is a supply-chain
@@ -133,9 +181,9 @@ surface. New `_PKG_INSTALL_HINTS` is checked in `_risk_class` BEFORE the dev_too
 `_DESTRUCTIVE_HINTS`, so `git reset --hard` still returns `high`). Verified against the agreed shape:
 `git reset --hard` -> high, all install forms -> medium, and the controls unchanged (`git status`/
 `python x.py` -> low, `curl | sh` -> critical, `shutdown` -> high). Module self-test passes. This closes
-the last classifier gap in the partner A process-family taxonomy; partner's final confirmation battery
+the last classifier gap in the shared process-family taxonomy; partner's final confirmation battery
 is next. Shadow-mode, so no live enforcement change. Classifier output for the partner emitted to
-`AGENT_ZERO_PRIVATE/partner_a_classifier_output_2026-08-06.json` (gitignored).
+a gitignored classifier-output artifact.
 
 ## 2026-08-05
 
@@ -404,7 +452,7 @@ re-bunch (one-per-day cadence is what let 21 pile up).** Author/validate script:
 
 [FEATURE] **the governance vendor Gradient Report #2 (Run 2) — the autonomous-DENY fix confirmed.** Applied the
 full-spectrum consequence remap the vendor requested (low→ADVISORY, medium→OPERATIONAL, high→CRITICAL,
-critical→EMERGENCY) — **the governance vendor-adapter-only, partner A envelope untouched so the governance partner's frozen test is
+critical→EMERGENCY) — **the governance vendor-adapter-only, the governance partner envelope untouched so the partner's frozen test is
 unaffected**; package→HIGH deferred (shared classification the frozen test depends on). Live 25-action run:
 **ALLOW 16 · REVIEW 0 · DENY 9 · match 18/25 (72%, up from 64%).** Findings: (1) his human_present:false →
 ESCALATE-upgraded-to-DENY fix works — all 8 dangerous actions now DENY (DENY 2→9); (2) with no human present
@@ -450,7 +498,7 @@ flagged to the vendor). Also capture `governance_signature`. Self-test green; ON
 response shape before committing the battery.
 
 [FEATURE] **`governance_audit.py` gains a `partner_b` adapter target** (`--adapter partner_b`) — was hardcoded
-noop/policy/partner_a. Contained: added to the allowed set + argparse choices + generic remote-adapter warning.
+noop/policy/partner. Contained: added to the allowed set + argparse choices + generic remote-adapter warning.
 
 [FIX] **G21 — admissibility irreversibility now derived from COMMAND SEMANTICS, not tool name.** New
 `_is_irreversible(tool, operation_class, raw)` folds the pre-existing `_DESTRUCTIVE_HINTS` (rm -rf, del /s,
@@ -473,7 +521,7 @@ stack is a real liability (false "self-test FAILED" alarms), hence fixed rather 
 25-action battery live against /v1/intercept: **ALLOW 11 · ESCALATE 12 · DENY 2 · matched 16/25 · no
 fail-opens.** HEADLINE FINDING: **hard DENY was reachable only via the IRREVERSIBILITY signal, never via
 `consequence` — even EMERGENCY resolved to ESCALATE** (the only 2 DENYs were kill/force_terminate, the two
-actions flagged irreversible). Report artifact: `AGENT_ZERO_PRIVATE/PARTNER_B_GRADIENT_REPORT_2026-07-22.md`
+actions flagged irreversible). Report artifact: `AGENT_ZERO_PRIVATE/<partner-b gradient report> (gitignored)`
 (gitignored). Surfaced two honest CLARA-side inputs that skew the result: (a) irreversibility is under-marked
 (keyed on tool name, so a destructive delete via `start_process` sends `irreversible:false` — CLARA-side fix
 queued, re-run next week); (b) the classifier rates package/npm installs as low-risk dev_tool → OPERATIONAL →
@@ -521,12 +569,12 @@ work** (brief deferred it; measurement now demands it). Vector-drawn diagrams re
 [FEATURE] **`tests/demo_envelope.py`** — a live screen-share demo for the Kipp call: prints one action's raw
 args beside the abstract governance envelope that crosses the wire, then the verdict, then a gate-coverage
 table. Adjudication only, nothing executes, no backend required. Defaults to the local `policy` adapter so the
-verdict is synchronous and no third-party quota is spent (`partner_a`+`shadow` is fire-and-forget and shows
+verdict is synchronous and no third-party quota is spent (`partner`+`shadow` is fire-and-forget and shows
 nothing on screen). Deliberately prints the unflattering facts too: `python_repl: not gated`, the MCP-dispatch-
 only call site, and the name-heuristic degradation where a tool whose path arg isn't `path`/`source`/`command`
 gets an empty target hash and defaults to medium risk.
 
-[FEATURE] **the governance vendor adapter built** (the governance vendor x CLARA Runtime Validation Program, live since 07-19). New `_partner_b_evaluate` in `core_logic/admissibility.py`, parallel to `_partner_a_evaluate`: POST `/v1/intercept`, `x-api-key` auth, **ESCALATE→REVIEW** as the one deliberate semantic mapping (their ALLOW/DENY/ESCALATE vs CLARA's ALLOW/REVIEW/DENY), sealed-evidence handles carried into the ledger reason. Registered in `_ADAPTERS` + `_REMOTE_ADAPTERS` (fire-and-forget in shadow). Config in `core_logic/.env` (PARTNER_B_API_KEY/BASE_URL/ENDPOINT/AGENT_ID/TIMEOUT_S). **PRIVACY FLOOR preserved and verified live:** only `payload_hash` (basename hash) + coarse class labels cross the wire; the raw path never leaves. Self-test green; adapter RAISES on failure and fail-closed yields DENY (never a silent allow). **SCHEMA PINNED AGAINST THEIR LIVE OpenAPI, not the prose spec** — probing first is what caught that the thread description (authority/mandate/consequence-tier/continuity) does NOT match the real model `InterceptRequest` (required `agent_id`+`action_type`, `additionalProperties:false`, plus payload_hash/consequence/jurisdiction/authority_scope/tools_requested/external_systems/irreversible/human_present/trust_score/workflow_id/workflow_step/idempotency_key). Had I trusted the description, every battery call would have 422'd.
+[FEATURE] **the governance vendor adapter built** (the governance vendor x CLARA Runtime Validation Program, live since 07-19). New `_partner_b_evaluate` in `core_logic/admissibility.py`, parallel to `_partner_evaluate`: POST `/v1/intercept`, `x-api-key` auth, **ESCALATE→REVIEW** as the one deliberate semantic mapping (their ALLOW/DENY/ESCALATE vs CLARA's ALLOW/REVIEW/DENY), sealed-evidence handles carried into the ledger reason. Registered in `_ADAPTERS` + `_REMOTE_ADAPTERS` (fire-and-forget in shadow). Config in `core_logic/.env` (PARTNER_B_API_KEY/BASE_URL/ENDPOINT/AGENT_ID/TIMEOUT_S). **PRIVACY FLOOR preserved and verified live:** only `payload_hash` (basename hash) + coarse class labels cross the wire; the raw path never leaves. Self-test green; adapter RAISES on failure and fail-closed yields DENY (never a silent allow). **SCHEMA PINNED AGAINST THEIR LIVE OpenAPI, not the prose spec** — probing first is what caught that the thread description (authority/mandate/consequence-tier/continuity) does NOT match the real model `InterceptRequest` (required `agent_id`+`action_type`, `additionalProperties:false`, plus payload_hash/consequence/jurisdiction/authority_scope/tools_requested/external_systems/irreversible/human_present/trust_score/workflow_id/workflow_step/idempotency_key). Had I trusted the description, every battery call would have 422'd.
 
 [UPDATE] ⛔ **the governance vendor gradient report BLOCKED on their auth.** The sandbox key `<sandbox key redacted>` returns 401 on EVERY protected endpoint (`POST /v1/intercept`, `GET /v1/intercept/stats`), identical to sending no key, across `x-api-key` / `X-API-Key` / `Bearer`. Public `/health` + `/status` return 200 (healthy, v0.7.2), so the service is up and this is key provisioning on their side, not our transport. Findings compiled for the vendor: (1) key does not authenticate; (2) documented schema != live schema; (3) minor/calibrated — body validation runs BEFORE auth on protected endpoints (unauthenticated malformed POST → 422 with field detail; valid body → 401), low severity since `openapi.json` is public, but auth-first is the cleaner ordering. Also open: their `consequence` field has no enum (free string, default OPERATIONAL) — our risk_class→severity mapping needs his confirmation or the gradient will mislead. Adapter is one working key away from producing the first gradient report.
 
@@ -540,7 +588,7 @@ gets an empty target hash and defaults to medium risk.
 
 ## 2026-07-19
 
-[FIX] CLARA was DOWN ~24h — every request threw `KeyError: 'trigger'`. Root cause (mine): the 07-18 drill script added a `self_knowledge.failure_patterns` entry with a `'problem'` key, but `crud._self_knowledge_block()` reads `pat['trigger']` and injects the SK block into EVERY request → crash on all. Isolation: the 08:07 partner A battery (16/5/4) succeeded (bypasses process_request), so infra/DeepSeek were fine. FIX: renamed problem→trigger + HARDENED _self_knowledge_block to .get() every field with fallbacks (a malformed SK entry can no longer brick the request path); verified live. Both 07-19 drills = infra CASUALTIES (0-PASS scorecard disregarded, states HELD not failed — Rule-19 applied to the drill). Queued: a self-test that builds the SK block from memory.json so a bad entry is caught at test time.
+[FIX] CLARA was DOWN ~24h — every request threw `KeyError: 'trigger'`. Root cause (mine): the 07-18 drill script added a `self_knowledge.failure_patterns` entry with a `'problem'` key, but `crud._self_knowledge_block()` reads `pat['trigger']` and injects the SK block into EVERY request → crash on all. Isolation: the 08:07 the governance partner battery (16/5/4) succeeded (bypasses process_request), so infra/DeepSeek were fine. FIX: renamed problem→trigger + HARDENED _self_knowledge_block to .get() every field with fallbacks (a malformed SK entry can no longer brick the request path); verified live. Both 07-19 drills = infra CASUALTIES (0-PASS scorecard disregarded, states HELD not failed — Rule-19 applied to the drill). Queued: a self-test that builds the SK block from memory.json so a bad entry is caught at test time.
 
 ## 2026-07-18
 
@@ -552,38 +600,38 @@ gets an empty target hash and defaults to medium risk.
 
 [UPDATE] Drills 07-16 analyzed (both same-day). Morning 18/0/5 CLEAN — first integrated Governance Audit Sweep section in a report (Phase 3.6). Evening 16/0/7 with two headlines: **Q23 L5 PASSED — COMPONENT 1 (logstats) GRADUATED** 🎓 (bench_stats native-tool proposal; part (e) self-measurement feedback loop = the design maturity L5 probed for; honesty ASTERISK logged — fabricated present-tense CLI flags + ~550-line claim vs actual 110; routing nit: proposal-shaped prompts route CHAT, 2nd time). Component 2 opened at L1 (stateful RateWindow; acceptance validated pre-save). **Q09 REAL process failure** — 180s timeout from a 5-turn wander where Rule 13 prescribes search-first (passed yesterday going straight); fail_count 1, verbatim kept, Layer-3 if it recurs. Layer-2 gold seed MATCH (recovered). Ladder: 13 climbs at streak-11 — dedicated rotation pass owed.
 
-[FEATURE] Envelope risk metadata (the governance partner schema, same-day loop). Morning: the 2-day shadow audit surfaced that the privacy floor (hashed paths) hides the risk gradient from partner A (both sweeps identical: writes uniform REVIEW, processes uniform ALLOW, 0 DENY). Alkama sent the finding; the governance partner agreed, specified the exact schema (target_class/operation_class/risk_class), and SHIPPED server-side support within minutes. Built same day in `core_logic/admissibility.py`: local classifiers (`_classify_file_target` sandbox|project|user_space|system|secrets with secrets>system precedence; `_classify_process_target` dev_tool|project_script|shell|system_service; `_risk_class` matrix low|medium|high|critical) — computed from the RAW path/command locally, only class labels leave the machine. Wired into `build_envelope` + the partner_a command. Self-test extended (case 9, 12 classification fixtures) — all green. Also fixed: `tests/governance_audit.py` now loads core_logic/.env standalone (an unconfigured adapter had failed open as a silent 25/25 ALLOW at 15ms — caught by latency).
+[FEATURE] Envelope risk metadata (partner-agreed schema). Morning: the 2-day shadow audit surfaced that the privacy floor (hashed paths) hides the risk gradient from the governance partner (both sweeps identical: writes uniform REVIEW, processes uniform ALLOW, 0 DENY). Alkama sent the finding; the governance partner agreed, specified the exact schema (target_class/operation_class/risk_class), and SHIPPED server-side support within minutes. Built same day in `core_logic/admissibility.py`: local classifiers (`_classify_file_target` sandbox|project|user_space|system|secrets with secrets>system precedence; `_classify_process_target` dev_tool|project_script|shell|system_service; `_risk_class` matrix low|medium|high|critical) — computed from the RAW path/command locally, only class labels leave the machine. Wired into `build_envelope` + the partner command. Self-test extended (case 9, 12 classification fixtures) — all green. Also fixed: `tests/governance_audit.py` now loads core_logic/.env standalone (an unconfigured adapter had failed open as a silent 25/25 ALLOW at 15ms — caught by latency).
 
-[UPDATE] Validation battery via /api/v2/simulate (the governance partner's staged rollout): **first DENYs ever** — ALLOW 16 / REVIEW 5 / DENY 4, expectation-match 24%→68%. File gradient PERFECT (sandbox→ALLOW, project/user→REVIEW, system/ssh/secrets/program-files→DENY). Finding for the governance partner: process types (run_model/shutdown) don't consume risk_class yet (pipe-to-shell sent critical → ALLOW). Report: governance_audit_reports/gov_audit_2026-07-16_133630.md.
+[UPDATE] Validation battery via /api/v2/simulate (partner's staged rollout): **first DENYs ever** — ALLOW 16 / REVIEW 5 / DENY 4, expectation-match 24%→68%. File gradient PERFECT (sandbox→ALLOW, project/user→REVIEW, system/ssh/secrets/program-files→DENY). Finding for the governance partner: process types (run_model/shutdown) don't consume risk_class yet (pipe-to-shell sent critical → ALLOW). Report: governance_audit_reports/gov_audit_2026-07-16_133630.md.
 
-[UPDATE] Demo health pass (pre-Denis-call, 2026-07-16 ~14:15): stack booted clean; /soul 200; pipeline sanity query correct (CHAT routing, accurate self-knowledge); frontend 200; 0 error lines in session log; **first ORGANIC partner_a ledger entries confirmed** (a governed write_file + create_directory, async:True, risk fields sandbox/low flowing). FINDING: /analyze DENYs sandbox-low writes at 0.95 while /simulate ALLOWs the identical enriched envelope — /analyze isn't consuming the risk metadata yet; confirms the governance partner's simulate-first rollout sequencing (his side to patch). Ledger forensics: all 9 prior entries pre-flip noop; morning-drill file probes have NEVER gated (they go via python_repl — the documented v1 bypass). Demo artifact cleaned; stack stopped.
+[UPDATE] Demo health pass (pre-Denis-call, 2026-07-16 ~14:15): stack booted clean; /soul 200; pipeline sanity query correct (CHAT routing, accurate self-knowledge); frontend 200; 0 error lines in session log; **first ORGANIC partner ledger entries confirmed** (a governed write_file + create_directory, async:True, risk fields sandbox/low flowing). FINDING: /analyze DENYs sandbox-low writes at 0.95 while /simulate ALLOWs the identical enriched envelope — /analyze isn't consuming the risk metadata yet; confirms the governance partner's simulate-first rollout sequencing (his side to patch). Ledger forensics: all 9 prior entries pre-flip noop; morning-drill file probes have NEVER gated (they go via python_repl — the documented v1 bypass). Demo artifact cleaned; stack stopped.
 
 ## 2026-07-15
 
 [UPDATE] Evening drill analyzed — 16 PASS / 1 FAIL / 6 UNVERIFIABLE (5 manual PASS). **Q23 (L5 GRADUATION) did NOT deliver** — the 'propose logstats as a native tool' question routed to CHAT (interpreter tool=null/no-planning), opened with 'let me verify logstats.py first' (a file-read CHAT can't do), and never produced the proposal; 5.3s elapsed confirms. L5 graduation DEFERRED; Q23 held at L5 pending a clean re-run (needs DELIBERATE routing or a from-knowledge answer). **Q11 FAIL = minor presentation** (data perfect: 4 asyncio.gather in code, tools.py:119 correctly flagged comment; headline said '3 active' vs verifier raw-count 4). Layer-2 gold-seed self-test MISMATCH on Q17 (self-diagnosis calibration flag). Ladder backlog: 13 climbs DUE (streak-10) from skipped drills (07-10m/07-14m/07-15m pending) — dedicated rotation pass owed. Verifier self-test 51/51.
 
 
-[UPDATE] Governance audit sweep WIRED into the MORNING harness (Phase 3.6, BRIEF_57/R20). `governance_audit.run_for_harness()` fires the 25-action battery live to partner A once/day alongside the drill and appends a verdict section under the morning scorecard. Gated by `GOVERNANCE_AUDIT` (.env, now =on), morning-only, wrapped non-fatal (a partner A hiccup never fails the harness). Self-tested dry via the policy adapter (21 ALLOW / 4 DENY, privileged writes denied). Fires LIVE on the next morning cron. Also landed 07-15: adapter fix in `_partner_a_evaluate` — carries `target: sandbox-test` (the likely DENY cause) and maps tools to honest partner A action types (file->write_file, process->run_model, kill->shutdown); admissibility self-test green. Capabilities granted on the dashboard: write_file / run_model / shutdown, all :sandbox-test.
+[UPDATE] Governance audit sweep WIRED into the MORNING harness (Phase 3.6, BRIEF_57/R20). `governance_audit.run_for_harness()` fires the 25-action battery live to the governance partner once/day alongside the drill and appends a verdict section under the morning scorecard. Gated by `GOVERNANCE_AUDIT` (.env, now =on), morning-only, wrapped non-fatal (a the governance partner hiccup never fails the harness). Self-tested dry via the policy adapter (21 ALLOW / 4 DENY, privileged writes denied). Fires LIVE on the next morning cron. Also landed 07-15: adapter fix in `_partner_evaluate` — carries `target: sandbox-test` (the likely DENY cause) and maps tools to honest the governance partner action types (file->write_file, process->run_model, kill->shutdown); admissibility self-test green. Capabilities granted on the dashboard: write_file / run_model / shutdown, all :sandbox-test.
 
 ## 2026-07-14
 
-[FEATURE] Admissibility gate — shadow-async remote adapter (BRIEF_57, partner A Phase-1 wiring / R20).
-`core_logic/admissibility.py`: in SHADOW mode a remote adapter (`partner_a`) now runs **fire-and-forget** —
+[FEATURE] Admissibility gate — shadow-async remote adapter (BRIEF_57, the governance partner Phase-1 wiring / R20).
+`core_logic/admissibility.py`: in SHADOW mode a remote adapter (`partner`) now runs **fire-and-forget** —
 a daemon thread computes the verdict off the hot path and ledgers it under the caller's receipt
 (`"async": True`), while the caller gets an immediate non-enforced ALLOW. ENFORCE stays synchronous (the
 verdict must be known before the action proceeds); local adapters (noop/policy) stay sync. Rationale: in
-shadow the verdict is never enforced, so paying an up-to-6s partner A round-trip per mutating action was
+shadow the verdict is never enforced, so paying an up-to-6s the governance partner round-trip per mutating action was
 pure latency. New: `_REMOTE_ADAPTERS` set, `_safe_evaluate`/`_evaluate_and_ledger` helpers,
 `_ledger_lock` serializing `_ledger_append` (concurrent async writes can't clobber), self-test case (8).
 Ships **dormant** — live adapter stays `noop`, so production behaviour is unchanged until Alkama flips
-`ADMISSIBILITY_ADAPTER=partner_a`. `TODO(enforce)` marked in code + BRIEF_57 + BACKLOG R20: the
+`ADMISSIBILITY_ADAPTER=partner`. `TODO(enforce)` marked in code + BRIEF_57 + BACKLOG R20: the
 synchronous-remote latency on the user-facing path must be addressed at shadow→enforce (risk-tiered
 fast-path / verdict cache / tighter timeout). Self-test green (8/8). This is the concrete Phase-1
-milestone from the governance partner's 2026-07-14 design-partner agreement.
+milestone from the 2026-07-14 design-partner agreement.
 
-[FEATURE] Governance audit sweep — `tests/governance_audit.py` (BRIEF_57 / R20). A standalone, on-demand battery of 25 mutating-action ENVELOPES spanning every class (write/edit/mkdir/move/process/kill) across a benign→privileged risk gradient, fired through the admissibility adapter to produce systematic governance-verdict coverage (the deliberate counterpart to organic usage). ADJUDICATION ONLY — nothing executes, zero side effects, so 'privileged/destructive' targets are safe test cases. Writes a per-action + summary report (md+json) to `governance_audit_reports/` (gitignored). Default `--dry` = built-in mock (no network, no quota); `--adapter policy/noop` = local; `--live` = REAL partner A /analyze (~25 quota calls, outward — deliberate). Validated dry (25 actions, gradient 25/25) and via the policy adapter (real code path, no network — policy already DENYs the 4 privileged writes). **Sits ready** — run `--live` once the governance partner grants CLARA's capability set (until then it would log all-DENY, same as organic). NOT wired into the cron/harness (quota + pre-grant it's wasteful); auto-run cadence is a later decision.
+[FEATURE] Governance audit sweep — `tests/governance_audit.py` (BRIEF_57 / R20). A standalone, on-demand battery of 25 mutating-action ENVELOPES spanning every class (write/edit/mkdir/move/process/kill) across a benign→privileged risk gradient, fired through the admissibility adapter to produce systematic governance-verdict coverage (the deliberate counterpart to organic usage). ADJUDICATION ONLY — nothing executes, zero side effects, so 'privileged/destructive' targets are safe test cases. Writes a per-action + summary report (md+json) to `governance_audit_reports/` (gitignored). Default `--dry` = built-in mock (no network, no quota); `--adapter policy/noop` = local; `--live` = REAL the governance partner /analyze (~25 quota calls, outward — deliberate). Validated dry (25 actions, gradient 25/25) and via the policy adapter (real code path, no network — policy already DENYs the 4 privileged writes). **Sits ready** — run `--live` once the governance partner grants CLARA's capability set (until then it would log all-DENY, same as organic). NOT wired into the cron/harness (quota + pre-grant it's wasteful); auto-run cadence is a later decision.
 
-[UPDATE] Shadow-audit WENT LIVE 2026-07-14 — Alkama flipped `ADMISSIBILITY_ADAPTER=noop→partner_a` (core_logic/.env), MODE stays shadow, added `PARTNER_A_ENDPOINT=analyze` (signed enforced-eval path; shadow logs, enforces nothing). CLARA now sends every mutating action through partner A's /analyze on live traffic and ledgers the verdict async (BRIEF_57, no hot-path block). Takes effect on next backend restart. Expected first pattern: all-DENY on 'capability not granted' (the pilot write_file gap) until the governance partner grants CLARA's capability set — that evidence drives the capability-scoping ask. Revert = ADAPTER=noop.
+[UPDATE] Shadow-audit WENT LIVE 2026-07-14 — Alkama flipped `ADMISSIBILITY_ADAPTER=noop→partner` (core_logic/.env), MODE stays shadow, added `PARTNER_ENDPOINT=analyze` (signed enforced-eval path; shadow logs, enforces nothing). CLARA now sends every mutating action through the governance partner's /analyze on live traffic and ledgers the verdict async (BRIEF_57, no hot-path block). Takes effect on next backend restart. Expected first pattern: all-DENY on 'capability not granted' (the pilot write_file gap) until the governance partner grants CLARA's capability set — that evidence drives the capability-scoping ask. Revert = ADAPTER=noop.
 
 ## 2026-07-13
 
@@ -615,20 +663,20 @@ correct-but-imprecise answers to manual review; both manually confirmed PASS. **
 CLI tool); the drill_workspace watcher-exclusion fix held — NO repeat of the 07-08 L2 write-block. Morning
 16 PASS/0/7 UNVERIFIABLE, evening 18/0/5, all UNVERIFIABLEs judged PASS. States updated; Q23 → L4 pending.
 
-[FEATURE] partner A pilot — FIRST ENFORCED GOVERNED CALL SUCCEEDED (the milestone) + agreed 2-phase
-adoption plan [pilot session with the governance partner, WhatsApp ~5-6 AM IST; `partner_a_pilot_call.py`]. Proven live:
-signed /analyze read_url → ALLOW/low/0.1 with both-way Ed25519 (our request accepted + partner A's signed
+[FEATURE] the governance partner pilot — FIRST ENFORCED GOVERNED CALL SUCCEEDED (the milestone) + agreed 2-phase
+adoption plan [partner pilot session; script gitignored]. Proven live:
+signed /analyze read_url → ALLOW/low/0.1 with both-way Ed25519 (our request accepted + the governance partner's signed
 response) and a full audit spine (ledger_id b8e0107b…, replay_url, evidence_url.zip, decision_digest,
-reputation 0→1). The core handshake is real: CLARA signs → partner A verifies → evaluates → signed decision
+reputation 0→1). The core handshake is real: CLARA signs → the governance partner verifies → evaluates → signed decision
 → ledger/replay/evidence. The signed write_file → DENY/high/0.95 "Capability not granted: write_file" — the
 enforced path enforces capabilities strictly (simulate was lax/REVIEW); full audit trail still created +
 a capability_add_url (follow-up: grant write_file:sandbox-test for /analyze). Honesty held throughout:
-Alkama told the governance partner plainly that CLARA's live gate is still shadow+noop (audits, does not stop, partner A not
-wired into live decisions) — the governance partner praised it. AGREED PLAN (Alkama proposed, the governance partner endorsed): Phase 1 =
-wire partner_a adapter live but SHADOW-audit every real decision to the local ledger for pattern review;
+Alkama told the partner plainly that CLARA's live gate is still shadow+noop (audits, does not stop, the governance partner not
+wired into live decisions) . AGREED PLAN (agreed by both sides): Phase 1 =
+wire partner adapter live but SHADOW-audit every real decision to the local ledger for pattern review;
 Phase 2 = flip to enforce deliberately once trusted. Phase-1 build considerations captured in BRIEF_54
 §7.3 (hot-path latency of a network call per mutating action; free-tier 1000-req/mo quota; capability
-grants). NOT built yet — this is the next partner A step; the pilot proved the adapter, integration into
+grants). NOT built yet — this is the next the governance partner step; the pilot proved the adapter, integration into
 CLARA's live path is Phase 1.
 
 ## 2026-07-09
@@ -667,11 +715,9 @@ write-block (above) root cause: watcher-spawned autonomous tasks raced Clara's c
 drill. IGNORED_PATTERNS now drops `drill_workspace` (substring) — the drill owns that tree; the watcher
 never reacts to it. (Companion discipline: clean backend for cron, do not leave the stack up while editing.)
 
-[FEATURE] partner A signed /analyze path BUILT + offline-proven; pilot walkthrough LOCKED (Fri 07-10,
-5-6 AM IST) [`core_logic/admissibility.py`]. the governance partner delivered the exact signing spec: Ed25519 over the
-canonical JSON (sort_keys + compact separators) of {agent_id, command, timestamp, ts_unix}; headers
-X-Signature (base64) + X-Timestamp-Unix; body excludes ts_unix; replay is server-side (no nonce).
-`_partner_a_sign` + endpoint switch (PARTNER_A_ENDPOINT=simulate|analyze, default simulate — the enforced
+[FEATURE] the governance partner signed /analyze path BUILT + offline-proven; pilot walkthrough LOCKED (Fri 07-10,
+5-6 AM IST) [`core_logic/admissibility.py`]. The signing scheme was agreed with the partner.
+`_partner_sign` + endpoint switch (PARTNER_ENDPOINT=simulate|analyze, default simulate — the enforced
 path is opt-in). Proven OFFLINE without touching /analyze: the delivered private key DERIVES the
 registered public key, and a signature over the spec's exact payload shape VERIFIES against that public
 key — the first enforced call is deliberately saved for the joint session (simulate-records review →
@@ -744,14 +790,14 @@ Bash converts the `/c` arg to `C:\`, so cmd sat at an interactive prompt and vit
 clean restart through `.\start_clara.ps1` — backend /soul 200, frontend 200 on :5173 (Vite ready 1.3s),
 WhatsApp watcher + hotkey up, zero launch errors in any log. Stack LEFT RUNNING (owner's intent).
 
-[FEATURE] partner A adapter LIVE — CLARA's first two GOVERNED CALLS succeeded (the the governance partner pilot's core
-milestones) [`core_logic/admissibility.py`]. `_partner_a_evaluate` added to the gate's adapter registry
+[FEATURE] the governance partner adapter LIVE — CLARA's first two GOVERNED CALLS succeeded (the the governance partner pilot's core
+milestones) [`core_logic/admissibility.py`]. `_partner_evaluate` added to the gate's adapter registry
 (BRIEF_54 §7.1 contract: x-api-key auth, POST /api/v2/simulate, command-as-JSON-string; privacy floor
 holds — the envelope carries hashes/metadata only, the real path never leaves the machine; bounded timeout
-PARTNER_A_TIMEOUT_S=6 keeps the hot path sane; any transport failure raises → the gate's fail-open/closed
+PARTNER_TIMEOUT_S=6 keeps the hot path sane; any transport failure raises → the gate's fail-open/closed
 setting decides). Live results: (1) health-check read_url → **ALLOW, risk=low, score 0.2**; (2) the benign
-sandboxed write_file envelope (dry_run+sandbox, the governance partner's confirmed first-test payload) → **REVIEW,
-risk=medium, score 0.62** — partner A risk-DIFFERENTIATES the two action classes, which is the pilot's
+sandboxed write_file envelope (dry_run+sandbox, the agreed first-test payload) → **REVIEW,
+risk=medium, score 0.62** — the governance partner risk-DIFFERENTIATES the two action classes, which is the pilot's
 proof point. Both returned action_hash; `ledger_hash=None` on simulate — question queued for the joint
 audit-trail inspection. Module self-test green. NOT armed: ADMISSIBILITY_ADAPTER stays local
 (noop/policy) — switching the live gate to the remote adapter is an arming call (latency + external
@@ -772,10 +818,9 @@ aggregation) with full oracle discipline: acceptance validated against a referen
 out of HER file, and verified to FAIL the L1-only component. G15 note: eQ21 passed FORMATTED — the
 condensation is intermittent (2/3 evenings); guard stays.
 
-[UPDATE] partner A pilot UNBLOCKED — third registration attempt SUCCEEDED (the governance partner fixed the onboarding
-flow): `agent_275182dd30750045` with both pilot capabilities assigned at creation; Ed25519 keypair +
+[UPDATE] the governance partner pilot UNBLOCKED — registration succeeded: `agent_275182dd30750045` with both pilot capabilities assigned at creation; Ed25519 keypair +
 capability-snapshot hash delivered and stored in `core_logic/.env` (gitignored-verified). Key transited
-chat → rotate after pilot (existing policy). Next: the `partner_a` adapter (BRIEF_54 §7.1) + first governed
+chat → rotate after pilot (existing policy). Next: the `partner` adapter (BRIEF_54 §7.1) + first governed
 health-check.
 
 ## 2026-07-07
@@ -1077,7 +1122,7 @@ Validated: module self-test 7/7 (off-by-default silent, classification, abstract
 no-content-leak, policy deny/review/path/default, enforce flag, fail-open/closed, ring cap); live boot-test —
 write query via /query (memory_mode=none) executed normally in shadow, exactly 1 ledger entry
 (ALLOW/noop/shadow + receipt), envelope leak-check clean, probe cleaned, backend stopped. Enforce-branch
-live-fire deliberately deferred to the pilot demo (phase 2). partner A adapter = next phase (contract
+live-fire deliberately deferred to the pilot demo (phase 2). the governance partner adapter = next phase (contract
 confirmed in BRIEF_54 §7). Fills the pre-action-authority gap flagged by the stability review and
 independently by ~8 governance founders.
 
@@ -2969,7 +3014,7 @@ a nice datapoint that L0/L1 self-assessment can catch a verifier artifact. FIX (
 short-circuits to UNVERIFIABLE for EVERY verifier type, so an outage can neither FALSE-PASS via verbatim NOR
 misleadingly FAIL via compute/search (it also flipped the run's Q2/Q3/Q4/Q6/Q7 from a misleading FAIL to the
 honest UNVERIFIABLE-outage). Locked in with 2 new fixtures in `tests/test_verification.py` (now 16/16),
-including one where the partner_a is verbatim in the fixture source — proving the guard fires BEFORE the
+including one where the partner is verbatim in the fixture source — proving the guard fires BEFORE the
 verbatim match. Principle held: the guard can only downgrade PASS→UNVERIFIABLE in pathological cases, never
 manufacture a false FAIL. Validated against the real run: Q5/Q8 → UNVERIFIABLE, Q20 → PASS.
 

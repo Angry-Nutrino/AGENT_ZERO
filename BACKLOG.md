@@ -44,6 +44,43 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
+- **G34 · Self-assessment (free-text) FABRICATES EVIDENCE at exactly the point where the honest answer is
+  "I cannot verify this"** — added 2026-08-09, hardened same day. **The most serious open finding.** TWO
+  instances in a single self-assessment, both confident, both specific, both checkable, both false:
+  1. **Q19** — invented a cause for a FAIL whose real mechanism (a verifier table-parse bug) was invisible
+     from inside her trace: *"the answer injected a headline contrast figure of 285 (asyncio.to_thread
+     calls)"*, with ownership language (*"My error, specific, naming it"*). No such figure exists; "285"
+     occurs once, as a markdown table LINE NUMBER; and there are 33 to_thread occurrences, not 285.
+  2. **Q12** — claimed to have READ something that was not on the page: *"On the digest I do see
+     PermissionError plainly at the start of part 3"*. She was shown a **900-character** digest of a
+     **4,009-character** answer. Part 3 begins at character **2,377**. She never saw part 2 either. And
+     `PermissionError` is absent from the full answer, so no truncation could have revealed it.
+  **THE PATTERN, and why it is worse than random error.** In case 2 the fabricated detail is
+  **LOAD-BEARING**: she asserted the response was *"truncated mid-part-3"* (it was cut inside part **1**),
+  which is precisely the premise required for "I can see the start of part 3" to be possible. Two false
+  claims that fit together and support each other. That is not noise, it is a coherent invented account.
+  The same paragraph also contains the honest hedge *"not something I saw fully in this digest"* — so **she
+  knew her evidence was thin, and generated the missing evidence instead of stopping.**
+  **Both fabrications sit exactly where the correct output is "I cannot determine this from what I was
+  shown."** Fabricated SELF-BLAME is the dangerous direction: it reads as integrity, so nobody interrogates
+  it. On Q12 she reached the right verdict by an invented route, which is worse than reaching it honestly —
+  the next time that route runs it produces a confident WRONG answer and the output looks identical.
+  **ENFORCEMENT (in order of cost, all still to do):**
+  (a) **Standing rule, effective now: when Layer 2 and the narrative disagree, Layer 2 wins.** Layer 2 is
+      trace-anchored and got Q19 right; the narrative is a story asked to own failures.
+  (b) **Remove the root enabler — stop asking her to assess text she cannot see.** `build_session_digest`
+      truncates every response to 900 chars (`test_harness.py:~470`). Either raise the cap so the digest
+      carries the full answer (23 x ~4k chars is affordable against a prompt that is already ~32k), or state
+      per-question exactly how much is hidden and forbid any claim about the hidden region.
+  (c) **THE REAL FIX — a deterministic post-check on the self-assessment.** Scan her self-assessment for
+      checkable specifics (quoted tokens, "I see X", numeric claims) and verify each against the actual
+      answer text, flagging any that do not appear. This is the project's own founding principle —
+      *no model grades a model* — applied to the ONE component where it currently is not. Mechanically
+      checkable, no LLM needed, and it would have caught both instances instantly.
+  (d) Feed Layer 2's classification INTO the narrative prompt so it explains the real mechanism instead of
+      inventing one, and make "I cannot verify this from the digest" an explicitly allowed answer.
+  Ref: reports/2026-08-08-evening.md analysis. Dep: none. Size: (a) free, (b) S, (c) M, (d) S.
+
 - **G32 · Coherence Drill scores controls whose PRECEDING dialogue died of infra** — added 2026-08-08.
   On 08-08m `appropriately-asked` read **0%**, but one of the two controls (`ambiguous-service`) never ran
   — it died with an `HTTPConnectionPool` read timeout — so the honest denominator was 1, not 2. Worse, the
@@ -54,11 +91,15 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   than counting it as a behavioural miss. **First step: re-run the two controls in isolation** to settle
   whether 08-08m's 0% is an artifact. Ref: reports/2026-08-08-morning.md analysis. Dep: none.
 
-- **G33 · Harness: verify the 08:00 morning cron is still scheduled** — added 2026-08-08. The morning cron
-  did NOT fire on 08-08 (no report at 10:02, newest session log was the prior evening); run manually via
-  the CLAUDE.md recovery path and it completed clean. One miss is a one-off, two is a broken schedule.
-  Inspect the Task Scheduler entry. **A silently-missing drill is the one failure that hides every other
-  failure**, so this outranks its size. Dep: none. Small.
+- ~~**G33 · Harness: the 08:00 morning cron was silently skipping**~~ — ✅ DONE 2026-08-08. **Root cause was
+  the Task Scheduler BATTERY GUARD, not the schedule.** `CLARA_Test_Morning` showed `NumberOfMissedRuns: 2`,
+  last ran 08-06, skipped 08-07 and 08-08 — matching the missing `reports/2026-08-07-morning.md` exactly.
+  Task Enabled, trigger Enabled, and `StartWhenAvailable` already True, so a missed start *should* have been
+  retried; `DisallowStartIfOnBatteries=True` blocked it every time the laptop was unplugged, and
+  `StopIfGoingOnBatteries=True` would have killed a run mid-flight on unplug. Evening survived only because
+  20:00 is desk-and-mains time. Both guards disabled on BOTH tasks (needs an ELEVATED shell —
+  `Set-ScheduledTask` returns Access Denied from a normal prompt since the tasks were registered elevated).
+  Accepted tradeoff: the drill now runs on battery, ~35 min of GPU. Ref: TIMELINE 2026-08-08 [FIX].
 
 - **G30 · Admissibility: stamp the policy version into every receipt** — added 2026-08-08, surfaced by an
   external reviewer's question. `_ledger_append` records `{receipt_id, verdict, reason, adapter, mode,
@@ -213,7 +254,7 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 - **G10 · Pre-checker-era report-analysis triage** — `report_analysis_status.py` flags 21 PENDING reports from
   the pre-checker era (05-22 → 06-11) that will never be retro-analyzed (question states long rotated; ~0
   forward value). They dilute the checker's signal for genuinely-missed *recent* reports. Decide once: stamp
-  them with a one-line "pre-checker baseline — not retro-analyzed" partner_a the checker treats as closed, OR
+  them with a one-line "pre-checker baseline — not retro-analyzed" partner the checker treats as closed, OR
   add a date-floor to the checker so it only reports from ~06-12 onward. **Process-policy call (changes what
   the checker signals) → Alkama's preference before acting.** Size **S**. Deps: Alkama nod. Refs:
   `tests/report_analysis_status.py`, `reports/2026-05-*`/`2026-06-0*`.
@@ -360,24 +401,24 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🔴 RED — queued only; needs-Alkama or arming-risk; NEVER auto-executed (brief, don't build live)
 
-- **R20 · partner A Phase 1 — wire the partner_a adapter LIVE in SHADOW (audit real decisions)** — the
-  pilot (2026-07-10) proved the adapter + handshake; the agreed next step (Alkama⇄the governance partner) is to flip the
-  LIVE gate `ADMISSIBILITY_ADAPTER=noop→partner_a` while staying `MODE=shadow`, so CLARA calls partner A on
+- **R20 · the governance partner Phase 1 — wire the partner adapter LIVE in SHADOW (audit real decisions)** — the
+  pilot (2026-07-10) proved the adapter + handshake; the agreed next step (both sides) is to flip the
+  LIVE gate `ADMISSIBILITY_ADAPTER=noop→partner` while staying `MODE=shadow`, so CLARA calls the governance partner on
   every mutating action and RECORDS the verdict to the local ledger WITHOUT blocking. Alkama reviews the
   pattern; Phase 2 (enforce) comes later, deliberately. 🔴 = arming a live external dependency on the
   tool-execution hot path → build carefully. **Deps/considerations (BRIEF_54 §7.3):** hot-path latency (a
   network call per mutating action — make the gate call non-blocking/budgeted; timeout+fail-open exist);
-  partner A free-tier 1000-req/mo quota (scope to write/process classes or sample); sort the
+  the governance partner free-tier 1000-req/mo quota (scope to write/process classes or sample); sort the
   write_file:sandbox-test capability grant (enforced /analyze currently DENYs it). Size **M**. Refs:
-  `briefs/BRIEF_54 §7.3`, `core_logic/admissibility.py` `_partner_a_evaluate`, `tool_executor.py` gate hook.
+  `briefs/BRIEF_54 §7.3`, `core_logic/admissibility.py` `_partner_evaluate`, `tool_executor.py` gate hook.
   **⏩ PROGRESS 2026-07-14 (BRIEF_57):** the hot-path-latency dep is SOLVED in code — shadow now runs the
   remote adapter **fire-and-forget** (daemon thread computes + ledgers under the same receipt; caller gets
   an immediate non-enforced ALLOW), sync retained for enforce; `_ledger_lock` added for concurrent async
-  writes; self-test case (8) green. **⏩ 2026-07-14 GO-LIVE:** adapter FLIPPED `noop→partner_a` +
-  `PARTNER_A_ENDPOINT=analyze` (core_logic/.env; shadow, fail-open) — live on next backend restart. And the
+  writes; self-test case (8) green. **⏩ 2026-07-14 GO-LIVE:** adapter FLIPPED `noop→partner` +
+  `PARTNER_ENDPOINT=analyze` (core_logic/.env; shadow, fail-open) — live on next backend restart. And the
   **governance-audit sweep is BUILT** (`tests/governance_audit.py`, 25-action battery across all classes,
   validated dry+policy with no network, report→`governance_audit_reports/` gitignored, `--live` for real
-  partner A calls). **Remaining:** (a) restart backend to activate; (b) **the governance partner: capability grant** so
+  the governance partner calls). **Remaining:** (a) restart backend to activate; (b) **partner-side capability grant** so
   verdicts aren't all-DENY (ask drafted); (c) key rotation; (d) run the battery `--live` post-grant.
   **Deferred to enforce:** the synchronous-remote latency on the user-facing path (see BRIEF_57
   `TODO(enforce)` — risk-tiered fast-path / verdict cache / tighter timeout).
@@ -474,11 +515,11 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   atomic ring ledger + `noop`/`policy` adapters), hooked at `tool_executor._execute_mcp` (the shared
   FAST+DELIBERATE choke point); self-test 7/7 + live shadow boot-test (write query → 1 ALLOW ledger entry,
   no content leak, shadow never blocks). `.env` armed at phase 0: GATE=on / ADAPTER=noop / MODE=shadow /
-  FAIL=open. See TIMELINE 07-02 [FEATURE]. **Remaining phases:** **P1** — `partner_a` adapter (contract
-  CONFIRMED by the partner A founder, schema in BRIEF_54 §7) in SHADOW (verdicts logged, real latency measured, nothing
-  enforced; needs Alkama to register the agent on partner_asca.com + API details). **P2** — enforce-mode pilot
-  demo session with the partner A founder (benign file_write through ALLOW/REVIEW/DENY; also the enforce-branch live-fire).
+  FAIL=open. See TIMELINE 07-02 [FEATURE]. **Remaining phases:** **P1** — `partner` adapter (contract
+  CONFIRMED by the the governance partner founder, schema in BRIEF_54 §7) in SHADOW (verdicts logged, real latency measured, nothing
+  enforced; needs Alkama to register the agent with the partner + API details). **P2** — enforce-mode pilot
+  demo session with the the governance partner founder (benign file_write through ALLOW/REVIEW/DENY; also the enforce-branch live-fire).
   **P3 (far)** — enforce-by-default on high-risk tools + Telegram REVIEW approval loop (needs task-parking;
-  separate brief). Known v1 hole (documented): `python_repl` exempt. Deps: P1 needs Alkama's partner A
+  separate brief). Known v1 hole (documented): `python_repl` exempt. Deps: P1 needs Alkama's the governance partner
   registration; P2 needs P1 + a scheduled session. Refs: `briefs/BRIEF_54…md` (+§7),
-  `core_logic/admissibility.py`, `tool_executor.py` _execute_mcp, `LINKEDIN_CONVOS.md (partner A thread).
+  `core_logic/admissibility.py`, `tool_executor.py` _execute_mcp, `LINKEDIN_CONVOS.md (the governance partner thread).
