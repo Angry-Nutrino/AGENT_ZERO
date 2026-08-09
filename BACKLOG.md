@@ -102,6 +102,16 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   (c) scope the drill's searches away from gitignored trees, which weakens the questions. **Prefer (b).**
   Note this is the SECOND leak class where the ignore mechanism gave false confidence, the first being
   `.gitignore` patterns publishing the names they existed to hide. Dep: none. Size: S.
+  **THIRD REPETITION, 2026-08-09 — the write-up keeps reproducing the leak.** Instance 1: `.gitignore`
+  patterns published the names they existed to hide. Instance 2: the first draft of this very item quoted the
+  leaked path verbatim. Instance 3: the TIMELINE entry *documenting the history rewrite* quoted the prospect
+  name verbatim while explaining a regex trap (`\b` not firing before `_`), and it was committed and pushed
+  before the pre-commit leak scan caught it; the tip commit had to be un-committed, the text rewritten to a
+  generic `\bNAME\b` / `NAME_demo`, and the branch force-pushed again. **The general rule this yields:
+  incident write-ups, bug reports and commit messages about a leak must use PLACEHOLDERS, never the live
+  string — the document describing the leak is itself a publication surface.** The reflex to quote exact
+  evidence, which is correct everywhere else, is actively harmful here. Any deny-list scrub built for option
+  (b) should therefore cover TIMELINE/BACKLOG/commit messages, not just `reports/`.
   **Status 2026-08-09: the INCIDENT is remediated, the MECHANISM is not.** Public state was scrubbed and
   git history rewritten + force-pushed (see TIMELINE 2026-08-09), verified against a fresh clone. That
   removes what already leaked; it does nothing to stop the next one. **Option (b) is still open and is the
