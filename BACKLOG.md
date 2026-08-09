@@ -44,6 +44,20 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
+- **G35 · Drill reports LEAK GITIGNORED PATHS into the public repo** — added 2026-08-09, found during the
+  partner cleanup and **it had already been pushed**. `reports/` is public; Clara's answers are published
+  verbatim; and her filesystem searches read gitignored directories. So an enumeration question
+  ("list every file+line using `os.replace`") returned `redacted-prospect_demo/redacted-prospect_store.py:34` — a **prospect's
+  name**, from a directory that is gitignored precisely so it never becomes public. Redacted by hand, but
+  the mechanism is general: **any future enumeration can surface any private path**, and nothing currently
+  stops it. `.gitignore` protects the FILES and does nothing about a report quoting their paths.
+  Options: (a) a deny-list scrub over the report writer before it writes (cheapest, catches the known
+  private dirs); (b) have the harness refuse to publish an answer containing a path under any gitignored
+  directory, computed from `git check-ignore` rather than a hardcoded list (correct, slightly more work);
+  (c) scope the drill's searches away from gitignored trees, which weakens the questions. **Prefer (b).**
+  Note this is the SECOND leak class where the ignore mechanism gave false confidence, the first being
+  `.gitignore` patterns publishing the names they existed to hide. Dep: none. Size: S.
+
 - **G34 · Self-assessment (free-text) FABRICATES EVIDENCE at exactly the point where the honest answer is
   "I cannot verify this"** — added 2026-08-09, hardened same day. **The most serious open finding.** TWO
   instances in a single self-assessment, both confident, both specific, both checkable, both false:
