@@ -1,5 +1,35 @@
 # CLARA Project Timeline
 
+## 2026-08-10
+
+[FIX-PENDING] **G38 — `python_repl` is never gated, so the admissibility gate has a bypass and the
+enforce plan is currently hollow.** Found while assembling an evidence pack for an external security
+assessment; the reviewer's own question ("which tools can mutate state") would have surfaced it.
+`admissibility.gate()` returns an immediate ALLOW with **no envelope, no adapter call and no ledger
+entry** whenever `is_mutating(tool_name)` is false, and `MUTATING_TOOLS` is a hardcoded set of eight DC
+tool NAMES that does not include `python_repl` — which executes arbitrary Python and can therefore write,
+delete or execute anything. Confirmed live, not theoretical: the 08-09 drill's Q18 wrote a file via
+`open(...,'w').write(...)` inside `python_repl`, producing no receipt, where `write_file` on the same
+path would have produced one. So the ledger records *gated* mutations rather than mutations, and
+flipping shadow->enforce would block a denied `write_file` while leaving the identical write through
+`python_repl` untouched. Adding it to `MUTATING_TOOLS` alone does not work, because `build_envelope`
+derives `target_path_hash` and `operation_class` from a `path` argument a code snippet does not have.
+Preferred direction is removing filesystem/process access from that tool's exec namespace so it becomes
+compute-only. Filed 🔴 as a blocker on BRIEF_57's enforce flip. Two smaller findings from the same pass:
+`signature` is present in every envelope and never populated (the Ed25519 helper is in the same module),
+and envelope timestamps are local time with no timezone suffix.
+
+[UPDATE] **Two external comparison artifacts built and validated.** (1) Runtime-authority fixture set
+for the CERTOR comparison — `FIXTURE_SCHEMA.md` + `fixtures_v1.json`, 6 fixtures on the
+`admitted_authority -> event -> runtime_state -> request` structure agreed 08-09, a 14-code frozen reason
+vocabulary, four dispositions, and a control that is **not identifiable by shape** (A-03 and A-06 carry
+semantically identical `event` and `runtime_state` blocks and differ only in the `request`, so telling
+them apart requires actually comparing the request against the grant). Validated mechanically: parses,
+every fixture carries every block, identical top-level key sets, zero disposition/expected-answer token
+leakage, zero real-world identifiers. (2) External security evidence pack answering five artifact
+requests and two questions, disclosing G38 in section 6 rather than waiting for it to be found. Both
+gitignored under `AGENT_ZERO_PRIVATE/`.
+
 ## 2026-08-09
 
 [UPDATE] **Drill 08-09 morning — 23/23 effective PASS (18 PASS / 0 FAIL / 5 UNVERIFIABLE, all five judged

@@ -42,6 +42,34 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 
 ---
 
+## 🔴 RED — highest-value open finding (blocks the enforce flip; do NOT hand-wave the fix)
+
+- **G38 · `python_repl` EXECUTES ARBITRARY PYTHON AND IS NEVER GATED. The enforce plan is hollow until
+  this is fixed.** Found 2026-08-10 while assembling the external security-assessment evidence pack.
+  `admissibility.gate()` opens with `if not gate_enabled() or not is_mutating(tool_name): return ALLOW`
+  — no envelope, no adapter call, no receipt, **no ledger entry**. `is_mutating("python_repl")` is
+  `False` because `MUTATING_TOOLS` is a hardcoded set of eight DC tool NAMES and `python_repl` is not
+  one of them. But `python_repl` runs arbitrary Python, so it can write, delete or execute anything.
+  **Not theoretical:** on 2026-08-09 the drill's Q18 wrote a file with
+  `open(r'<path>/probe_f.txt','w',encoding='utf-8').write(...)` through `python_repl` — a real mutation
+  that produced no envelope and no receipt, while `write_file` on the same path would have produced both.
+  **Three consequences, worst last.** (1) The ledger is not a record of mutations, it is a record of
+  *gated* mutations — "80 decisions" undercounts by an unknown amount. (2) Flipping shadow->enforce
+  would block a denied `write_file` and NOT block the identical write via `python_repl`: a control with
+  a documented bypass. (3) It compounds the untrusted-content finding, because the available action set
+  includes unrestricted code execution.
+  **The fix is NOT just adding it to `MUTATING_TOOLS`** (that is step one and makes the gate throw,
+  because `build_envelope` derives `target_path_hash`/`operation_class` from a `path` ARG that a code
+  snippet does not have). Real options: (a) classify the code body — a static-analysis problem, do not
+  pretend it is solved; (b) **remove filesystem/process access from the exec namespace** so `python_repl`
+  is genuinely compute-only and mutations must go through gated tools — more defensible, and the
+  preferred direction; (c) a coarse envelope for code execution with `target_type: "code"` and no path
+  binding, which at least restores the receipt. **Dep: blocks the enforce flip (BRIEF_57). Size: M.**
+  Two smaller findings from the same pass: `signature` is in every envelope and NEVER populated (the
+  Ed25519 helper exists in the same module at `admissibility.py:273`), and envelope timestamps are LOCAL
+  time with no timezone suffix, which is wrong for an audit record meant to be ordered and verified.
+  Disclosed to the external reviewer in section 6 of the evidence pack rather than waiting to be caught.
+
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
 - **G36 · Coherence scorer marks a CORRECT refusal as "didn't ask" — whitelist + length ceilings** —
