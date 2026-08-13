@@ -45,7 +45,31 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
 ## 🔴 RED — highest-value open finding (blocks the enforce flip; do NOT hand-wave the fix)
 
 - **G38 · `python_repl` EXECUTES ARBITRARY PYTHON AND IS NEVER GATED. The enforce plan is hollow until
-  this is fixed.** Found 2026-08-10 while assembling the external security-assessment evidence pack.
+  this is fixed.** Raised 2026-08-10 while assembling the external security-assessment evidence pack.
+  **⚠️ FRAMING CORRECTED the same day: this was NOT an undiscovered hole.** It is written in the module's
+  own docstring — *"Known v1 hole (documented, not hidden): python_repl executes arbitrary code and can
+  write files around the gate. Native tools are exempt in Phase 0 … Revisit when enforcement matters."*
+  I wrote it up as a discovery before reading the file's own header, which is the parametric-memory
+  failure Rule 18 exists to prevent, committed by me rather than by Clara. What is genuinely new is not
+  the exemption but three things about it: the first LIVE evidence (08-09 Q18 wrote a file through
+  `python_repl` and produced no receipt), the quantified consequence (the ledger counts *gated*
+  mutations, so "80 decisions" undercounts by an unknown amount), and that **the docstring's own revisit
+  condition has now arrived** — enforcement is being actively planned, so the deliberate Phase-0 trade
+  has expired. The severity stands; the "found it" framing did not.
+  **🔥 ESCALATED 2026-08-10 19:02 — REPRODUCED LIVE, and the bypass is the AUTOMATIC FALLBACK PATH.**
+  During a boot-and-test of unrelated work, Clara was asked to write a file **explicitly using the
+  `write_file` tool**. `write_file` was not registered in that session's registry, so she completed the
+  task anyway *"via `python_repl` fallback because `write_file` is not registered in the current tool
+  registry."* The file was written. The gate was **enabled** in `.env` (`ADMISSIBILITY_GATE`, `ADAPTER`,
+  `MODE` all set). The ledger has **zero entries for 2026-08-10** — no envelope, no receipt, no record.
+  This changes the severity class. The exemption is not merely a hole an adversary could aim at; it is
+  where the agent **routes automatically when the gated tool is unavailable**. Every failure mode that
+  makes `write_file` unavailable — an MCP server that did not connect, a renamed tool, a registry
+  rebuild, a transport error — silently converts a gated action into an ungated one, and the more the
+  gated path degrades the *more* traffic the ungated path takes. A control that fails open into an
+  unaudited path under exactly the conditions where it is most needed is worse than no control, because
+  the ledger still looks populated. **This alone justifies option (b) — make `python_repl` compute-only
+  — before any enforce flip.**
   `admissibility.gate()` opens with `if not gate_enabled() or not is_mutating(tool_name): return ALLOW`
   — no envelope, no adapter call, no receipt, **no ledger entry**. `is_mutating("python_repl")` is
   `False` because `MUTATING_TOOLS` is a hardcoded set of eight DC tool NAMES and `python_repl` is not
@@ -70,9 +94,44 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   time with no timezone suffix, which is wrong for an audit record meant to be ordered and verified.
   Disclosed to the external reviewer in section 6 of the evidence pack rather than waiting to be caught.
 
+## 🟡 YELLOW — build dormant on `autonomous`, uncommitted, Alkama reviews the diff
+
+- **Y-PC1 · Partner C consequence-boundary integration — ADAPTER BUILT + DORMANT; blocked only on their
+  credentials and one missing string.** Added 2026-08-10. **This item existed only in the conversation
+  record for ~11 days and was never in the backlog** ("queues an adapter build once endpoint arrives"),
+  which is why the highest-value partner deliverable on the board was invisible to the queue. That is a
+  feeding-gap class worth watching: CLAUDE.md requires confirmed work to land in BOTH `BACKLOG.md` and
+  `briefs/ROADMAP.md`, and a thread-only commitment silently fails that.
+  **Done:** `consequence_ceiling()` (ordered-scale `max()`, not a special-case `if`), `pre_floor_tier`
+  surfaced alongside the resolved ceiling per their 08-10 request, `build_partner_c_scan()`,
+  `_partner_c_evaluate()` registered as a remote adapter, full in-module self-test. See TIMELINE
+  2026-08-10. Dormant: default adapter is still `noop`.
+  **Blocked on (both are theirs, not ours):** (a) the SDK entry point + sandbox key, which they were
+  sending to Alkama's email — the outbound call is Alkama's action to fire, never autonomous; (b) **the
+  exact string for the lowest of their three consequence tiers**, which appears nowhere on the record.
+  Until (b) lands the bottom two rungs are collapsed and a low-risk action reports the medium tier.
+  Both raised with them in the 08-10 draft. Dep: none on our side. Size: S remaining.
+
 ## 🟢 GREEN — do unattended, no asking (deterministic, reviewable, no live-system risk)
 
-- **G36 · Coherence scorer marks a CORRECT refusal as "didn't ask" — whitelist + length ceilings** —
+- **G39 · ⏸️ SCOPED, NOT STARTED · Two company discovery briefs for a warm internal referral** — a contact
+  offered to take a brief to his managers/leadership at **two named companies** and to vouch for it, so a
+  bounded CLARA workflow could be implemented. Deliverable: **two briefs, one per company, each OPENING
+  WITH THE PROBLEM** then how CLARA addresses it, in priority order. Written for the referrer to CARRY and
+  forward, not for a cold reader.
+  **Full scope, blocking questions, approach and honest calibration:**
+  `AGENT_ZERO_PRIVATE/LEAD_ENTERPRISE_REFERRAL_BRIEFS.md` (gitignored — the company names and the
+  referrer's identity live ONLY there and must never appear in a tracked file, including this one).
+  **Sequencing (Alkama's explicit order, 2026-08-13):** call-prep sheet → live demo → *then* this.
+  **Gated on** four questions to the referrer first (his actual role at each company, who receives the
+  brief, what pain he has personally watched, any procurement/security constraint) — a brief aimed at the
+  wrong audience is wasted effort.
+  **Calibration:** genuinely good lead — an internal champion is the hardest thing to manufacture — but
+  enterprise procurement at this scale runs in quarters. **This does NOT close by Aug 31 and must not
+  displace the sprint work.** Realistic entry is ONE small workflow — the existing prospect demo pack
+  (gitignored, named in the private scope doc) already proves that shape end to end and is the template.
+
+- **G36 · ✅ DONE 2026-08-10 · Coherence scorer marked a CORRECT refusal as "didn't ask"** — FIXED by moving detection from PHRASING to BEHAVIOUR (`_REQUEST_SIGNALS`, no length ceiling); self-test 24->29 with the real 08-10 answers pinned in BOTH directions. See TIMELINE 2026-08-10. Original write-up below. —
   added 2026-08-09 from the morning drill. `appropriately-asked` read 50%, which looked like a control
   regression and was not. On `ambiguous-service` Clara ran four independent probes, reported honestly that
   all came back empty, explicitly refused to guess ("guessing … would be fabrication"), listed three numbered
@@ -283,13 +342,14 @@ The full loop + rules are the **`busy-mode` skill** (`.claude/skills/busy-mode/S
   (what LOCAL adapters see as the raw path) is still command-less for processes. Thread it through if/when
   the policy adapter needs to match on process commands. Size S.
 
-- **G23 · repair-event classifier (state-repair vs expression-repair)** — idea from the Michael Magee
-  thread 07-23: the human's clarification turn IS the label. Mine session logs for human turns that are
-  clarification requests, classify object/state repairs ("which file do you mean") vs expression repairs
-  ("what do you actually mean" — Magee's 6th category, semantic compression). Ratio over time = which
-  layer is failing. The coherence drill currently measures STATE only and would pass a phantom-contrast
-  response; this is the missing axis. Cheap: a classifier pass over logs, no backend change. Size S-M.
-  Ref: LINKEDIN_CONVOS.md Magee r5 07-23.
+- **G23 · repair-event classifier (state-repair vs expression-repair)** — idea from an external
+  correspondent thread 07-23: the human's clarification turn IS the label. Mine session logs for human
+  turns that are clarification requests, classify object/state repairs ("which file do you mean") vs
+  expression repairs ("what do you actually mean" — their sixth category, semantic compression). Ratio
+  over time = which layer is failing. The coherence drill currently measures STATE only and would pass a
+  phantom-contrast response; this is the missing axis. Cheap: a classifier pass over logs, no backend
+  change. Size S-M.
+  Ref: the private record, correspondent-C r5 07-23.
 
 - ~~**G24 · centralize the DeepSeek model name**~~ — ✅ DONE 2026-08-01 (busy-mode). New
   `core_logic/llm_config.py` `DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")`; imported

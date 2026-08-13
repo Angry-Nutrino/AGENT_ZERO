@@ -1,6 +1,162 @@
 # CLARA Project Timeline
 
+## 2026-08-11
+
+[FIX] **Two verifier gaps closed, both found while analysing the 08-10 evening report; self-test 67 ->
+73. Both produced WRONG SCORECARD VERDICTS, in opposite directions.**
+
+**(1) File-count check (`_stated_filecount_conflict`).** 08-10e Q19 enumerated all 8
+`asyncio.create_task(` sites across 5 files with every line number correct, then wrote *"8 calls across
+**6** files"*. `search_set` scored line coverage 8/8, `_stated_total_conflict` matched the item total 8,
+and **nothing examined the file span** — a clean PASS on an answer containing a flat factual error. The
+omission was deliberate rather than accidental: the count-checker's docstring explicitly excludes
+"across N files" so a file count can never be mistaken for an item total, which is correct for its
+purpose and left the field unguarded. Now compared against `len(hits)`, a value the function already
+computed and discarded. **Deliberately narrow** — only "across N files" counts as a claim, because
+"across **all** 37 .py files in the directory" means the files SEARCHED, and the same evening's Q11 says
+exactly that; admitting it would false-FAIL a correct answer, which is the bug class the check exists to
+stop. This is the SECOND consecutive occurrence of the underlying self-consistency defect on that one
+question (08-09e stated "7 call sites" while listing 8), which is what justified a check over a note.
+
+**(2) Three non-answer sentinels.** 08-10e Q12's entire response was *"Something went wrong on my end.
+Please try again."* (`agent.py:1401`, the generic exception fallback). `_NON_ANSWER_SENTINELS` covered
+the HTTP/transport shapes but not the agent's OWN failure returns, which sit a few lines from the one it
+did cover. The error string therefore reached the Tier-2 LLM judge and came back reported as *"judge
+accepted a PARAPHRASE for absent token(s)"*. The verdict was harmless (UNVERIFIABLE either way) but the
+stated REASON was fabricated, which is worse than a wrong verdict because it reads as evidence about the
+answer. Added `something went wrong on my end`, `request timed out reaching` (`agent.py:1398`) and
+`unable to complete this after` (`orchestrator.py:478`), each with a fixture.
+
+[UPDATE] **Drills 08-10 evening + 08-11 morning analysed; evening Q23 climbed L3 -> L4.** Evening
+corrected read **15 PASS / 1 FAIL / 7 UNVERIFIABLE** (scorecard said 16/0/7; Q19 was a false PASS per
+above). Morning **18 PASS / 0 FAIL / 5 UNVERIFIABLE**, fourth consecutive zero-FAIL morning, with BOTH
+fresh climbs landing on first exposure: Q11's L5 TaskGroup absence probe (she proved the zero was real by
+showing the same search mechanism returned positive hits — Rule 19 executed, not recited) and Q09's
+fresh-area L1 on `admissibility.py`, which matched at line **793** after I added ~250 lines to that
+module the previous afternoon, confirming `verbatim_quote` re-derives against live source rather than a
+snapshot. Q23 promoted to L4 (`retry_after(ts, k)`), acceptance validated in BOTH directions before
+shipping: it passes a correct reference implementation and rejects a plausible off-by-one. Gate exits 0.
+
+**Timeout note:** the `REQUEST_TIMEOUT` 180 -> 630 fix was NOT exercised (slowest question 88.3s). Q02
+ran 229s on 08-09 and 87.2s on 08-10 — the same question, 2.6x apart on consecutive nights. That points
+at upstream latency variance rather than question cost, meaning the old ceiling was not consistently too
+low, it was a coin flip that silently ate whichever deep questions landed on the wrong side. The fix
+remains unproven until a run actually crosses 180s.
+
 ## 2026-08-10
+
+[UPDATE] **G38 REPRODUCED LIVE during a boot-and-test, and it escalates the finding: the ungated path is
+the AUTOMATIC FALLBACK, not just an available hole.** Booted the backend at 18:57 to validate the
+envelope-binding work and issued a probe that **explicitly named the `write_file` tool**. `write_file`
+was not registered in that session, so Clara completed the task anyway "via `python_repl` fallback
+because `write_file` is not registered in the current tool registry". The file was written. The gate was
+ENABLED (`ADMISSIBILITY_GATE`/`ADAPTER`/`MODE` all set in `.env`). The ledger holds **zero entries for
+2026-08-10**: no envelope, no receipt, no record of the mutation.
+
+The severity class changes. This is not a hole an adversary must aim at; it is where the agent routes
+**by itself** whenever the gated tool is unavailable. Any failure that removes `write_file` from the
+registry — an MCP server that did not connect, a rename, a rebuild, a transport error — silently
+converts a gated action into an ungated one. The worse the gated path performs, the more traffic the
+unaudited path takes, while the ledger continues to look populated. Backlog G38 escalated with the
+reproduction; it is now a hard prerequisite for any enforce flip.
+
+Backend booted and stopped cleanly (port free well before the 20:00 cron); probe artifact removed;
+zero tracebacks from the new envelope code on the live hot path, which was the boot's original purpose
+and did pass.
+
+[FEATURE] **Envelope binding — `policy_version`, a real Ed25519 `signature`, UTC timestamps, and an
+offline `verify_envelope()`.** `core_logic/admissibility.py`. Closes the cheap two-thirds of the binding
+critique an external reviewer raised on 08-08 (the answer at the time was: binding is structural, the
+signature field is empty, there is no policy version).
+
+- **`policy_version`** is CONTENT-DERIVED (`sha256:` of the policy file) rather than a hand-maintained
+  string, because a hand-maintained version goes stale silently the first time someone edits the policy
+  and forgets to bump it. `POLICY_VERSION` overrides when an external convention needs a fixed label.
+- **`signature`** is Ed25519 over `canonical_envelope_bytes()` — sorted-key, whitespace-stable JSON of
+  every field EXCEPT the two signature fields, which would otherwise be self-referential. **Signed LAST**,
+  after the risk metadata and the irreversible flag, so the signature covers exactly the
+  governance-relevant fields rather than just the header.
+- **Never generates a key.** With no key configured the signature stays empty and the gate keeps working.
+  A per-process ephemeral key is worse than none: it produces signatures that look valid and can never be
+  verified after a restart. A partner lost a whole run's verifiable receipts to precisely that
+  (`SigningKey.generate()` fallback); the self-test pins the unconfigured case.
+- **`verify_envelope(envelope, public_key_b64)`** so the binding claim is demonstrable by a third party
+  with none of this code, rather than asserted.
+- **Timestamps are now UTC with an explicit offset.** They were naive local time with no suffix, which is
+  wrong for a record meant to be ordered and verified by someone in another timezone.
+
+Self-test pins tamper detection field-by-field: altering `risk_class`, `irreversible`, `target_path_hash`,
+`policy_version` or `tool` each break verification, plus wrong-key and unsigned-envelope cases. Verified
+live end to end. **Still open and deliberately not faked: true time-of-check-to-time-of-use.** Signing
+proves the envelope was not altered after the gate saw it; it does NOT prove the executed action matches
+the adjudicated one. That needs the verdict re-checked against actual arguments at execution.
+
+[FIX] **G36 — the coherence scorer marked correct refusals as failures; detection moved from PHRASING to
+BEHAVIOUR. Self-test 24 -> 29.** `tests/coherence_drill.py:is_clarifying_question`. The
+`appropriately_asked` metric had produced **zero true signal on two consecutive runs** (50% on 08-09,
+0% on 08-10) because every control was either falsely scored or timed out. The falsely-scored one was a
+textbook-correct refusal: four independent probes, an explicit *"guessing would be fabrication"*, three
+NUMBERED ways to unblock her, and a `[[TASK: INCOMPLETE]]` marker. It ran ~1400 chars and contained **no
+`?` at all**, so both `?`-gated paths were structurally unreachable and no whitelist phrase matched.
+
+Root cause is the whitelist itself, not its contents. The 2026-06-07 fix for this exact class added more
+phrases; the whitelist grew and the class survived. Worse, the length ceilings (320 / 120 chars) meant a
+*thorough* clarification could never score — the more evidence gathered before asking, the longer the
+answer, the more certain the miss. That is an incentive pointed the wrong way on the one axis guarding
+against confident guessing.
+
+Added `_REQUEST_SIGNALS`: object-directed requests for the missing input ("give me the", "paste the",
+"drop the", "what i need", "task: incomplete", …), matched with **no length ceiling**. Object-directed on
+purpose so a benign "give me a moment" cannot trip it.
+
+**Validated empirically, not by eye** — the fix was tested against all five real answers extracted from
+the 08-10 run, requiring the control to detect and all four INFER probes to stay undetected. The first
+cut FAILED that: a bare `"[[task:"` signal matched the success marker `[[TASK: COMPLETE]]` as well as
+`[[TASK: INCOMPLETE]]`, so a fully resolved infer answer scored as a clarification. Caught only because
+the real answers were used as fixtures rather than invented ones. Both texts are now pinned in
+`tests/test_coherence_drill.py` in both directions.
+
+[FEATURE] **Partner C consequence-boundary adapter + the consequence-ceiling convention (DORMANT).**
+`core_logic/admissibility.py`. Implements the request-surface convention agreed with partner C on
+08-09/08-10, which they closed with "send it through when ready" — so every remaining blocker was on
+our side. Four things landed.
+
+**(1) `consequence_ceiling(risk_class, irreversible) -> (pre_floor_tier, resolved)`.** Their rule is
+`max(tier_from_risk_class, IRREVERSIBLE_TIER if irreversible)`: an irreversible action can never resolve
+more permissively than the irreversible tier regardless of risk, because the ceiling must describe what
+the command DOES, not the category it sits in. **Implemented as a real `max()` over an ordered scale,
+not a special-case `if`** — the `if` form silently breaks when a risk class maps ABOVE the floor, since
+it would drag a `critical` action back DOWN to the irreversible tier. `max()` is monotone and cannot.
+The self-test covers that exact case.
+
+**(2) Both tiers surfaced.** Partner C asked (08-10) for `pre_floor_tier` alongside the resolved ceiling
+for traceability. `pre_floor_tier` is captured BEFORE the floor applies, which makes a future
+disagreement *diagnosable*: divergent `pre_floor_tier` = the two CLASSIFIERS disagree; matching
+`pre_floor_tier` with a divergent ceiling = the FLOOR RULE disagrees. One field would have merged two
+different conversations. Their worked example is reproduced exactly by the implementation.
+
+**(3) ⚠️ The third tier name is UNCONFIRMED and it is not cosmetic.** Only two tier strings appear
+anywhere on the record; the "three-tier baseline" has a lowest tier that was never written down in any
+exchange. Rather than invent a string and transmit it to a partner, `_CEILING_T_MIN` **aliases** the
+confirmed reversible tier (env-overridable via `PARTNER_C_TIER_MIN`, and the scale is already ordered to
+accept it). Consequence, surfaced to them rather than left to be discovered: **the bottom two rungs are
+currently collapsed**, so a genuinely `low`-risk action reports `reversible-bounded` and they cannot
+distinguish low from medium by tier until they supply the string.
+
+**(4) `_partner_c_evaluate` + `build_partner_c_scan`, registered and DORMANT.** Builds their scan
+request from the ABSTRACT envelope only, so the privacy floor holds exactly as for partners A and B (a
+self-test asserts no raw path, filename or directory reaches the payload). Emits the five SPI dimension
+scores as-is per the 07-31 agreement — notably `mandate_score` stays **0.3** rather than a neutral 1.0,
+because a null `delegation_ref` SHOULD pull the verdict to CONTESTED, which they confirmed is the system
+working rather than a miss. Verdict mapping CLEAR->ALLOW, BLOCKED->DENY, CONTESTED->REVIEW; **VOID
+raises** rather than coercing to ALLOW, because VOID is not a verdict about the action, it means the
+record itself is invalid. Inert unless `ADMISSIBILITY_ADAPTER=partner_c` AND both env vars are set;
+default adapter remains `noop`. **Nothing was sent externally** — no endpoint or key is configured, and
+an outbound call to a third party is Alkama's action regardless.
+
+Self-test extended in-module (ordered-scale floor cases including the downgrade trap, unknown-tier
+ranks-highest, payload shape, the five scores, `delegation_ref` null-not-absent, privacy-floor leak
+assertions, and dormant-without-config raises). `python -m core_logic.admissibility` passes.
 
 [FIX-PENDING] **G38 — `python_repl` is never gated, so the admissibility gate has a bypass and the
 enforce plan is currently hollow.** Found while assembling an evidence pack for an external security
@@ -20,7 +176,7 @@ compute-only. Filed 🔴 as a blocker on BRIEF_57's enforce flip. Two smaller fi
 and envelope timestamps are local time with no timezone suffix.
 
 [UPDATE] **Two external comparison artifacts built and validated.** (1) Runtime-authority fixture set
-for the CERTOR comparison — `FIXTURE_SCHEMA.md` + `fixtures_v1.json`, 6 fixtures on the
+for the design-partner-B comparison — `FIXTURE_SCHEMA.md` + `fixtures_v1.json`, 6 fixtures on the
 `admitted_authority -> event -> runtime_state -> request` structure agreed 08-09, a 14-code frozen reason
 vocabulary, four dispositions, and a control that is **not identifiable by shape** (A-03 and A-06 carry
 semantically identical `event` and `runtime_state` blocks and differ only in the `request`, so telling
