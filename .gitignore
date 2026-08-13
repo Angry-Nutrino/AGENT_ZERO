@@ -115,3 +115,14 @@ busy-mode-reports/
 # Consolidated contact/context dump — real third-party names + private business discussion.
 # NEVER commit (repo is public). Keep alongside AGENT_ZERO_PRIVATE/.
 Alignment.md
+
+# ── Narrative / process logs — UNTRACKED 2026-08-13 (privacy) ────────────────────
+# These narrate real interactions with real people and are where every leak to date
+# has happened: an org name in TIMELINE, a person's name x3 in BACKLOG, and two more
+# introduced the same day they were being audited. reports/ additionally published
+# Alkama's OWN activity data (ambient questions print which apps he used, how often,
+# and which hours he was active) into a public repo.
+# The public repo keeps the PRODUCT: code + CLAUDE.md. Process logs stay local.
+TIMELINE.md
+BACKLOG.md
+reports/
