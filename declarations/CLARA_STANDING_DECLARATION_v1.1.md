@@ -6,7 +6,7 @@
 **Issued:** 2026-08-23
 **Supersedes:** v1.0 (2026-08-17), which remains a valid description of the system at its issue date
 **Implementation status at issue:** gate enabled, running in SHADOW mode, external adapter live
-**Canonical artifact:** this document, at https://github.com/Angry-Nutrino/C.L.A.R.A.-Contextual-Locally-Aware-Robust-Agent-/blob/main/declarations/CLARA_STANDING_DECLARATION_v1.1.md. Any copy that differs
+**Canonical artifact:** this document, at https://github.com/Angry-Nutrino/C.L.A.R.A.-Contextual-Locally-Aware-Robust-Agent-/blob/declaration-v1.1/declarations/CLARA_STANDING_DECLARATION_v1.1.md. Any copy that differs
 from the authored version is not this declaration.
 
 **What changed from v1.0.** Three corrections. All of them narrow a claim rather than widen one, and none
