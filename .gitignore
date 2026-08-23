@@ -126,3 +126,38 @@ Alignment.md
 TIMELINE.md
 BACKLOG.md
 reports/
+
+# ── SECRET/BACKUP GAP CLOSED 2026-08-21 ─────────────────────────────────────────
+# Found during commit prep: `.env` was ignored but `.env.backup.<date>` was NOT, so
+# `core_logic/.env.backup.2026-08-12` and `.env.backup.2026-08-14` were both fully
+# committable to a PUBLIC repo. Between them they carry six of Alkama's own API keys
+# (DeepSeek, Gemini, Tavily, XAI), two Telegram bot tokens, and — far worse —
+# PARTNER_A / PARTNER_B / PARTNER_C API keys, endpoints, agent ids, an agent private
+# key and a pubkey. Those are live THIRD-PARTY credentials covered by signed NDAs.
+# Nothing was ever staged or committed; the gap was closed before the first commit in
+# eight days. Patterns below are deliberately broad: any env variant, any .bak, any
+# memory backup, any NDA or signed legal PDF.
+.env*
+*.env
+core_logic/.env*
+*.bak
+*.bak.*
+*.backup
+*.backup.*
+core_logic/memory.backup*
+*NDA*.pdf
+*Nda*.pdf
+*_SIGNED_*.pdf
+
+# ── BRIEF ARTIFACTS — kept LOCAL 2026-08-21 (Alkama) ────────────────────────────
+# The CLARA brief is an outbound sales/partner deliverable, not product source. It is
+# sent per-contact and revised often, and versioned PDFs in a public repo age badly and
+# invite people to read a stale pitch. Keeps working copies, extraction junk and the
+# rebuild wreckage out of git while leaving every file on disk.
+CLARA_Brief_v*.pdf
+CLARA_Brief_v*.html
+CLARA_Brief_v*.md
+CLARA_Brief_v*_TEXT_CHANGES.md
+CLARA_Brief_v*_TEXTONLY_BROKEN*.pdf
+CLARA_diagram_extracted_*.png
+COMMIT_MSG_*.txt

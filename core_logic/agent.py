@@ -338,6 +338,86 @@ def route(interpreted: dict) -> str:
     return "DELIBERATE"
 
 
+# ── BRIEF 61: enumeration/count consistency (2026-08-20) ─────────────────────────────────────────
+# Three drill FAILs across 08-17..08-19 shared one shape: the enumeration was PERFECT and the number
+# stated about it was wrong. 08-19m Q16 listed 2 correct call sites and then said "8" -- and the line
+# it was reading contained `top_k=8`. The number was lifted from adjacent text rather than counted.
+#
+# So the list and the total are produced independently, which is why nothing internally contradicts
+# and the model cannot see its own error.
+#
+# PHASE 1 IS OBSERVATION ONLY. This logs and returns; it never edits an answer. A guard that silently
+# rewrote a number could corrupt a legitimate one (a per-file subtotal, a line number, a figure quoted
+# from the question), and a wrong correction is worse than the slip because it is invisible. Same
+# doctrine as the admissibility gate and `code_intent`: measure the false-positive rate BEFORE
+# granting authority to change output. Phase 2 (correction) is gated behind COUNT_GUARD=correct and
+# is deliberately not implemented yet. See briefs/BRIEF_61_Enumeration_Count_Consistency.md
+
+_ITEM_NOUNS = (r"call[- ]?sites?|calls?|matches?|occurrences?|instances?|results?|"
+               r"references?|hits?|locations?")
+_FILE_NOUNS = r"files?|modules?"
+_FILELINE_RE = re.compile(r"\b([\w./\\-]+\.py):(\d{1,5})\b")
+
+
+def _enumeration_count_ok(answer):
+    """(ok, enumerated, stated) for an answer that both enumerates and claims a total.
+
+    TWO axes, because an answer claims two different quantities about the same list and they fail
+    independently. 08-17e Q19 wrote "8 calls across 6 files": the ITEM total was right, the FILE count
+    was wrong, and a guard that checked only items scored it consistent. That is the identical blind
+    spot `search_set` carried until 2026-08-11, one layer up.
+
+    ok is None when the check does not apply -- fewer than two file:line refs, or no explicit claim.
+    """
+    if not answer or not isinstance(answer, str):
+        return None, 0, None
+    refs = {(m.group(1).replace("\\", "/").lower(), m.group(2)) for m in _FILELINE_RE.finditer(answer)}
+    n_items = len(refs)
+    if n_items < 2:
+        return None, n_items, None
+    n_files = len({f for f, _ in refs})
+
+    a = answer.replace("`", "").replace("*", "")
+    item_claims, file_claims = [], []
+    for m in re.finditer(r"\b(\d{1,4})\s+(?:" + _ITEM_NOUNS + r")\b", a, re.I):
+        item_claims.append(int(m.group(1)))
+    for m in re.finditer(r"\btotal(?:\s+of)?\s*[:\-]?\s*(\d{1,4})\b", a, re.I):
+        item_claims.append(int(m.group(1)))
+    for m in re.finditer(r"\b(?:across|spanning|in|over)?\s*(\d{1,4})\s+(?:" + _FILE_NOUNS + r")\b",
+                         a, re.I):
+        file_claims.append(int(m.group(1)))
+
+    if not item_claims and not file_claims:
+        return None, n_items, None
+
+    # An answer legitimately carries several numbers (per-file subtotals, the pattern's own digits),
+    # so ONE correct claim on an axis is enough to call that axis consistent. Both axes must hold.
+    items_ok = (not item_claims) or (n_items in item_claims)
+    files_ok = (not file_claims) or (n_files in file_claims)
+    if items_ok and files_ok:
+        return True, n_items, n_items
+    bad = None
+    if not items_ok:
+        bad = f"{item_claims[0]} items (enumerated {n_items})"
+    elif not files_ok:
+        bad = f"{file_claims[0]} files (enumerated {n_files})"
+    return False, n_items, bad
+
+
+def _log_count_guard(answer, path_label, slog):
+    """Phase 1: observe and log. Never modifies the answer."""
+    try:
+        ok, enumerated, stated = _enumeration_count_ok(answer)
+        if ok is False:
+            slog.warning(f">> [CountGuard] {path_label} MISMATCH enumerated={enumerated} "
+                         f"stated={stated} — answer lists {enumerated} file:line refs but claims "
+                         f"{stated}. OBSERVE-ONLY (Brief 61 phase 1), answer unchanged.")
+        elif ok is True:
+            slog.info(f">> [CountGuard] {path_label} ok enumerated={enumerated}")
+    except Exception:
+        pass                                    # a guard must never break an answer path
+
+
 class Clara_Agent:
     def __init__(self, model_name="phi3:mini"):
         self.system_prompt = SYSTEM_PROMPT or """
@@ -1502,6 +1582,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                     response = str(tool_result).strip()
 
             slog.info(f">> [FAST] Response:\n{response}")
+            _log_count_guard(response, "FAST", slog)
             if on_step_update:
                 await on_step_update(response, type="stream", turn_id=0)
 
@@ -1598,6 +1679,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
             response = ("Sorry, I fumbled that one — let me take it again. Ask me the same thing and I'll "
                         "answer it directly.")
         slog.info(f">> [CHAT] Response:\n{response}")
+        _log_count_guard(response, "CHAT", slog)
         llm.append(assistant(response))
         return response, chat_usage
 
@@ -1859,6 +1941,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 if on_step_update:
                     await on_step_update(final, type="stream", turn_id=turn_count)
                 slog.info(f">> [DELIBERATE] Final Answer:\n{final}")
+                _log_count_guard(final, "DELIBERATE", slog)
                 return final, deliberate_usage_list
 
             # Fix (2026-06-09): the model very often delivers a COMPLETE, CORRECT answer ending in
@@ -1873,6 +1956,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 if on_step_update:
                     await on_step_update(final, type="stream", turn_id=turn_count)
                 slog.info(f">> [DELIBERATE] Final Answer (via [[TASK]] marker, no prefix):\n{final}")
+                _log_count_guard(final, "DELIBERATE", slog)
                 return final, deliberate_usage_list
 
             # Safety net: detect off-format turns — no Thought, no Action, no Final Answer.
@@ -1906,6 +1990,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                         f"   [Loop] Off-format turn {turn_count} — treating as implicit Final Answer."
                     )
                     slog.info(f">> [DELIBERATE] Final Answer (implicit):\n{response_text}")
+                    _log_count_guard(response_text, "DELIBERATE", slog)
                     return response_text, deliberate_usage_list
 
             # Fix 2: Thought-only corrective.
@@ -1953,6 +2038,7 @@ Treat it as your memory. Use it to maintain continuity and avoid repeating known
                 slog.warning(f"   [Loop] Turn {turn_count}: substantive answer, no line-start Action — "
                              f"delivering (Brief 52: a prose 'Action:'/'Glint:' is not a tool call).")
                 slog.info(f">> [DELIBERATE] Final Answer (implicit, Brief 52):\n{response_text}")
+                _log_count_guard(response_text, "DELIBERATE", slog)
                 if on_step_update:
                     await on_step_update(response_text.strip(), type="stream", turn_id=turn_count)
                 return response_text, deliberate_usage_list

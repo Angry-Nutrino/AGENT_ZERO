@@ -27,7 +27,14 @@ $ActionMorning = New-ScheduledTaskAction `
     -Argument "`"$Harness`" --session morning" `
     -WorkingDirectory $ProjectRoot
 
-$TriggerMorning = New-ScheduledTaskTrigger -Daily -At "08:00AM"
+# 10:00 IST, NOT 08:00 (changed 2026-08-15). From 16 Aug 2026 the model provider bills peak/off-peak,
+# with peak at DOUBLE the off-peak rate. Peak is 01:00-04:00 and 06:00-10:00 UTC, which in IST is
+# 06:30-09:30 and 11:30-15:30. The old 08:00 IST start = 02:30 UTC sat in the middle of the first peak
+# block and paid 2x for every morning run (~$0.24 wasted per run on measured token counts). 10:00 IST =
+# 04:30 UTC lands in the gap BETWEEN the two peak blocks, with ~2h of margin on the far side so a long
+# run cannot drift into the 11:30 IST peak. The evening run at 20:00 IST = 14:30 UTC was already
+# off-peak and is unchanged.
+$TriggerMorning = New-ScheduledTaskTrigger -Daily -At "10:00AM"
 
 Register-ScheduledTask `
     -TaskName "CLARA_Test_Morning" `

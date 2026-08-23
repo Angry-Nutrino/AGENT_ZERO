@@ -7,6 +7,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from .session_logger import slog
 import os
+import re
 
 load_dotenv()  # Load once at module level
 
@@ -113,7 +114,132 @@ def get_archive_context(q_emb_cpu, query: str, threshold: float = 0.35) -> str:
         return ""
 
 
-def run_python_code(code: str) -> str:
+# ── G38 OPTION (b) — COMPUTE-ONLY python_repl (BRIEF_60). DORMANT BY DEFAULT. ────────
+# The structural fix for the gate's largest hole. `python_repl` is not in MUTATING_TOOLS, so
+# admissibility.gate() short-circuits to ALLOW with no envelope and no ledger entry, and the code
+# then runs with FULL builtins (exec() auto-injects them when the globals dict has no
+# __builtins__). It can therefore write, delete and execute around the gate. Proven live
+# 2026-08-10: with write_file unregistered the agent FELL BACK to python_repl and completed a
+# write, leaving no receipt — the bypass is the automatic degradation path, not just an
+# adversary's route.
+#
+# Option (a) was to classify the code body and hold the risky ones. `code_intent` measured that:
+# false positives fell from 56% to roughly 21% after the 08-18 receiver fix, so (a) is viable.
+# (b) is still better and it is what this implements. If the namespace cannot reach the
+# filesystem, there is nothing to classify and nothing to falsely hold. A control that cannot be
+# bypassed beats a control that usually catches the bypass.
+#
+# OFF BY DEFAULT (`PYTHON_REPL_COMPUTE_ONLY=0`). Flipping it changes how Clara answers a large
+# share of drill questions — she currently reaches for os.walk here rather than the DC tools, even
+# though Rule 17 already tells her not to. So while the flag is off this still LOGS what it would
+# have blocked, and that shadow signal is what should decide the flip. Same doctrine as the gate
+# itself: measure before arming.
+_COMPUTE_ONLY = os.getenv("PYTHON_REPL_COMPUTE_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# Pure-computation modules. Anything that can touch the filesystem, spawn a process, open a
+# socket, or import arbitrary code is absent by construction rather than blacklisted, so a module
+# nobody thought of is denied rather than allowed.
+_ALLOWED_MODULES = frozenset({
+    "math", "cmath", "statistics", "decimal", "fractions", "numbers", "random",
+    "json", "re", "string", "textwrap", "unicodedata", "difflib",
+    "datetime", "calendar", "time", "zoneinfo",
+    "itertools", "functools", "operator", "collections", "heapq", "bisect", "array",
+    "copy", "enum", "dataclasses", "typing", "abc",
+    "hashlib", "hmac", "base64", "binascii", "struct", "uuid", "secrets",
+})
+
+# Builtins that reach the filesystem, execute code, or hand back an escape route to the real
+# builtins. `open` is handled separately so it can carry a redirect message.
+_DENIED_BUILTINS = frozenset({
+    "open", "exec", "eval", "compile", "__import__", "input", "breakpoint",
+    "exit", "quit", "help", "globals", "vars", "memoryview",
+})
+
+
+class _ComputeOnlyViolation(Exception):
+    """Raised inside the sandbox so the message reaches the model as tool output."""
+
+
+def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root not in _ALLOWED_MODULES:
+        raise _ComputeOnlyViolation(
+            f"python_repl is compute-only, so the '{root}' module is not available here. "
+            f"For files use read_file, write_file, list_directory or start_search. "
+            f"For processes use start_process. Those tools are recorded; this one is not."
+        )
+    return __import__(name, globals, locals, fromlist, level)
+
+
+def _denied_open(*a, **kw):
+    raise _ComputeOnlyViolation(
+        "python_repl is compute-only, so it cannot open files. "
+        "Use read_file to read one and write_file to write one, so the action leaves a record."
+    )
+
+
+def _build_exec_namespace(capture_print, utf8_open):
+    """The exec globals. Restricted only when the flag is on; otherwise byte-for-byte the
+    previous behaviour, so a dormant flag cannot change how anything runs."""
+    if not _COMPUTE_ONLY:
+        return {"open": utf8_open, "print": capture_print}
+    import builtins as _bi
+    safe = {n: getattr(_bi, n) for n in dir(_bi)
+            if not n.startswith("_") and n not in _DENIED_BUILTINS}
+    safe["__import__"] = _restricted_import
+    safe["__name__"] = "__main__"
+    return {"__builtins__": safe, "open": _denied_open, "print": capture_print}
+
+
+def _would_compute_only_block(code: str) -> str:
+    """Shadow signal for the flag itself: what WOULD have been refused if it were on.
+    Deliberately crude and string-based — it never runs and never blocks, it only tells us how
+    often flipping the flag would bite before anyone flips it."""
+    hits = []
+    for mod in ("os", "sys", "subprocess", "shutil", "pathlib", "socket", "importlib",
+                "ctypes", "glob", "tempfile", "io", "pickle", "sqlite3", "requests",
+                "urllib", "http", "multiprocessing", "threading", "signal", "platform"):
+        if re.search(rf"\b(?:import\s+{mod}\b|from\s+{mod}[\s.])", code):
+            hits.append(f"import:{mod}")
+    if re.search(r"\bopen\s*\(", code):
+        hits.append("open()")
+    for b in ("exec", "eval", "compile", "__import__"):
+        if re.search(rf"\b{b}\s*\(", code):
+            hits.append(f"builtin:{b}")
+    return ",".join(sorted(set(hits)))
+
+
+def run_python_code(code: str, use_case: str = "read") -> str:
+    # ── G38 / BRIEF_60 — SHADOW OBSERVATION ONLY. Changes NOTHING about execution. ──
+    # python_repl is not in MUTATING_TOOLS, so admissibility.gate() short-circuits and arbitrary
+    # Python runs with no envelope, no verdict and no ledger entry. Proven live 2026-08-10: with
+    # write_file unregistered, the agent completed a write through this tool and left no receipt.
+    #
+    # Before restricting anything we need the FALSE-POSITIVE RATE on real traffic — over-blocking is
+    # what gets a control switched off, which costs more than the hole it closes. So this block only
+    # derives and logs. Grep `[CodeIntent]` in logs/ to read the accumulated evidence.
+    #
+    # `use_case` is a CLAIM, never a grant (the agent must not self-authorize). Its value is that a
+    # declared/derived disagreement becomes a DETECTABLE finding rather than a silent bypass.
+    # Review date: 2026-08-18 (see My_Schedule/REMINDERS.md).
+    try:
+        from .code_intent import derive as _derive, agrees as _agrees
+        _op, _ev = _derive(code)
+        _ok = _agrees(use_case, _op)
+        slog.info(f"   [CodeIntent] declared={use_case} derived={_op} agrees={_ok} "
+                  f"imports={_ev.get('imports')} calls={_ev.get('calls')} "
+                  f"modes={_ev.get('open_modes')} opaque={_ev.get('opaque')}")
+        if not _ok:
+            slog.info(f"   [CodeIntent] ⚠️ MISMATCH would be REVIEW under enforce — "
+                      f"declared {use_case!r} but code derives {_op!r}")
+        # Shadow signal for G38 option (b): what a compute-only namespace would have refused.
+        _blocked_by = _would_compute_only_block(code)
+        if _blocked_by:
+            slog.info(f"   [ComputeOnly] would_block={_blocked_by} "
+                      f"(flag={'ON' if _COMPUTE_ONLY else 'OFF'})")
+    except Exception as _e:                      # observation must never break execution
+        slog.info(f"   [CodeIntent] derive failed (non-fatal): {type(_e).__name__}: {_e}")
+
     # Output capture is SCOPED via a print-override in the exec namespace — the old
     # implementation swapped the process-global sys.stdout, so two concurrent
     # python_repl calls (parallel Actions run via asyncio.gather in worker threads)
@@ -145,13 +271,18 @@ def run_python_code(code: str) -> str:
         # comprehensions resolve free variables against globals — so multiline code
         # like `content = open(...).read(); [x for x in content]` fails with
         # "name 'content' is not defined". A shared module-level namespace fixes that.
-        exec_ns: dict = {"open": _utf8_open, "print": _capture_print}
+        exec_ns: dict = _build_exec_namespace(_capture_print, _utf8_open)
         exec(code, exec_ns)
         output = buf.getvalue()
 
         if not output.strip():
             output = "Code executed successfully with no output. Check your format and checkcode for return values."
 
+    except _ComputeOnlyViolation as e:
+        # A refusal, not a crash. The message names the gated tool to use instead, so the model
+        # re-routes to a recorded path rather than treating this as a failure to work around.
+        slog.info(f"   [ComputeOnly] REFUSED: {e}")
+        output = f"Error: {e}"
     except Exception as e:
         output = f"Error: {str(e)}"
 

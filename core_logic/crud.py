@@ -522,6 +522,14 @@ class crud:
             rest = parts[1:]
             if not drive or not rest:
                 return
+            # G37 (2026-08-11): the top level of this tree is DRIVE LETTERS by schema. A RELATIVE path
+            # ('tests/probe_gate.txt', 'drill_workspace/x.py') used to promote its first segment into a
+            # phantom top-level "drive", so `tests` and `drill_workspace` sat alongside C and E and were
+            # serialized into the [FILE SYSTEM MAP] block injected on every request. Reject anything
+            # that is not a single drive letter — a relative path carries no information about WHERE it
+            # is, which is the only thing this map exists to record.
+            if len(drive) != 1 or not drive.isalpha():
+                return
             node = self.memory['filesystem_map']
             if drive not in node:
                 node[drive] = {}

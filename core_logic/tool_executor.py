@@ -57,7 +57,23 @@ def _update_filesystem_map(tool_name: str, args: dict, result: str) -> None:
     if not isinstance(result, str):
         return
     lowered = result.lstrip().lower()
-    if lowered.startswith("error:") or lowered.startswith("tool error:"):
+    # G37 (2026-08-11) — REQUIRE POSITIVE EVIDENCE, don't merely check for an "error:" prefix.
+    #
+    # The old guard was `startswith("error:")` only, and the recorded path comes from the tool ARGS.
+    # So any failure phrased differently — an empty result, a chunk-limit note, a differently-worded
+    # refusal — was treated as confirmation the path exists, and a path the model merely GUESSED got
+    # written into long-term memory as established fact. That is how `E:\ML PROJECTS` (with a space,
+    # a directory that does not exist) acquired a fabricated four-child subtree and started being
+    # injected into every request as [FILE SYSTEM MAP], costing a wasted turn whenever the agent had
+    # to disambiguate two plausible project roots.
+    #
+    # Corroborated in the same run that found it: she reported `list_directory` "returned empty output
+    # even for directories I know are populated" — precisely the case the old guard waved through.
+    if not lowered:
+        return                                    # empty result proves nothing
+    if any(t in lowered[:200] for t in ("error:", "tool error:", "not found", "no such file",
+                                        "cannot find", "does not exist", "access is denied",
+                                        "permission denied", "enoent", "failed")):
         return
     try:
         if tool_name in ("read_file", "write_file"):
